@@ -13,7 +13,7 @@
       <nav aria-label="Main navigation">
         <a href="#directory">Directory</a>
         <a href="#enrichment">Enrichment</a>
-        <button class="button button-small button-outline" data-open-request>Request an update</button>
+        <button class="button button-small button-outline" data-open-request>Manage your profile</button>
       </nav>
     </header>
 
@@ -101,10 +101,17 @@
     <dialog id="request-dialog" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div class="section-kicker">Candidate controls</div>
-      <h2>Request an update</h2>
-      <p class="dialog-copy">Found your profile here? Send a correction or request removal. The backend is stubbed for now; this demo records the request locally and shows the handoff we will wire to email verification later.</p>
-      <form id="request-form"><label class="field-label" for="request-email">Your email</label><input id="request-email" type="email" required placeholder="you@example.com" /><label class="field-label" for="request-message">What should change?</label><textarea id="request-message" required placeholder="Please update my location to…"></textarea><div class="dialog-actions"><button class="button button-ghost" type="button" data-close-dialog>Cancel</button><button class="button button-primary" type="submit">Send request</button></div></form>
-      <div class="success-message" id="request-success" hidden><span>✓</span><div><strong>Request recorded</strong><p>Thanks. In production, we’ll email you a verification link before changing the directory.</p></div></div>
+      <h2>Update or remove your profile</h2>
+      <p class="dialog-copy">Choose your listing and enter the private token issued during submission. Tokens are checked against the exact profile before any visibility or data changes.</p>
+      <form id="request-form">
+        <label class="field-label" for="request-candidate">Published profile</label>
+        <select id="request-candidate" required><option value="">Choose your published profile</option></select>
+        <label class="field-label" for="request-token">Private management token</label>
+        <input id="request-token" type="password" required autocomplete="off" spellcheck="false" placeholder="Paste your one-time issued token" />
+        <p class="privacy-note" id="request-state">The token is checked against the selected profile before anything changes.</p>
+        <div class="management-actions"><button class="button button-ghost" type="button" data-close-dialog>Cancel</button><button class="button button-ghost" type="submit" data-management-action="update">Prepare private update</button><button class="button button-danger" type="submit" data-management-action="remove">Remove & archive</button></div>
+      </form>
+      <div class="success-message" id="request-success" hidden></div>
     </dialog>
 
     <script src="./who-is-hiring.js"></script>

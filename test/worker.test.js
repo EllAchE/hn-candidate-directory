@@ -214,6 +214,114 @@ describe('candidate consent decisions', () => {
   });
 });
 
+describe('published candidate management', () => {
+  test('binds a management token to the exact candidate without changing visibility on failed authorization', async () => {
+    const env = createEnvironment();
+    const first = await publishSubmission(env, 'Name: First Candidate\nRole: Platform engineer');
+    const second = await publishSubmission(env, 'Name: Second Candidate\nRole: Product engineer');
+    const firstPath = `/api/candidates/${first.candidate.id}/manage`;
+
+    const missingToken = await worker.fetch(apiRequest(firstPath, 'POST', { action: 'remove' }), env);
+    expect(missingToken.status).toBe(401);
+    expect(await missingToken.json()).toEqual({ error: 'management_token_required' });
+
+    const wrongToken = await worker.fetch(apiRequest(firstPath, 'POST', { action: 'update' }, 'wrong-token'), env);
+    expect(wrongToken.status).toBe(403);
+    expect(await wrongToken.json()).toEqual({ error: 'management_token_invalid' });
+
+    const unrelatedToken = await worker.fetch(apiRequest(firstPath, 'POST', { action: 'remove' }, second.submission.reviewToken), env);
+    expect(unrelatedToken.status).toBe(403);
+    expect(await unrelatedToken.json()).toEqual({ error: 'management_token_invalid' });
+
+    const invalidAction = await manage(env, first, 'replace');
+    expect(invalidAction.status).toBe(400);
+    expect(await invalidAction.json()).toEqual({ error: 'invalid_management_action' });
+
+    const published = await publicCandidates(env);
+    expect(published.map((candidate) => candidate.id).sort()).toEqual([first.candidate.id, second.candidate.id].sort());
+    expect(env.DB.revisions.get(first.submission.submissionId)).toMatchObject({ status: 'published', name: 'First Candidate' });
+  });
+
+  test('moves a verified update into private review and requires explicit consent to republish', async () => {
+    const env = createEnvironment();
+    const published = await publishSubmission(env, 'Name: Update Candidate\nRole: Backend engineer\nSkills: Go, Redis');
+
+    const updateResponse = await manage(env, published, 'update');
+    expect(updateResponse.status).toBe(200);
+    const update = await updateResponse.json();
+    expect(update).toMatchObject({
+      action: 'update',
+      candidateId: published.candidate.id,
+      submissionId: published.submission.submissionId,
+      status: 'review_ready',
+      idempotent: false,
+      visibility: 'hidden_during_review',
+      reviewEndpoint: `/api/reviews/${published.submission.submissionId}`,
+      decisionEndpoint: `/api/reviews/${published.submission.submissionId}/decision`
+    });
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const repeatedUpdate = await manage(env, published, 'update');
+    expect(repeatedUpdate.status).toBe(200);
+    expect(await repeatedUpdate.json()).toMatchObject({ status: 'review_ready', idempotent: true });
+
+    const privateDraft = (await privateReview(env, published.submission)).draft;
+    const editedDraft = { ...editableDraft(privateDraft), name: 'Candidate Approved Update', skills: ['Go', 'SQLite'] };
+    const saveResponse = await worker.fetch(
+      apiRequest(`/api/reviews/${published.submission.submissionId}`, 'PATCH', editedDraft, published.submission.reviewToken),
+      env
+    );
+    expect(saveResponse.status).toBe(200);
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const republishResponse = await decide(env, published.submission, { decision: 'publish', draft: editedDraft });
+    expect(republishResponse.status).toBe(200);
+    expect(await republishResponse.json()).toMatchObject({ status: 'published', candidate: { name: 'Candidate Approved Update', skills: ['Go', 'SQLite'] } });
+    expect(await publicCandidates(env)).toEqual([expect.objectContaining({ id: published.candidate.id, name: 'Candidate Approved Update' })]);
+  });
+
+  test('archives verified removals and makes retries and invalid transitions safe', async () => {
+    const env = createEnvironment();
+    const published = await publishSubmission(env, 'Name: Removal Candidate\nRole: Security engineer');
+
+    const removalResponse = await manage(env, published, 'remove');
+    expect(removalResponse.status).toBe(200);
+    expect(await removalResponse.json()).toMatchObject({
+      action: 'remove',
+      candidateId: published.candidate.id,
+      status: 'archived',
+      idempotent: false,
+      visibility: 'not_searchable',
+      reviewEndpoint: null,
+      decisionEndpoint: null
+    });
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const repeatedRemoval = await manage(env, published, 'remove');
+    expect(repeatedRemoval.status).toBe(200);
+    expect(await repeatedRemoval.json()).toMatchObject({ status: 'archived', idempotent: true });
+
+    const updateAfterRemoval = await manage(env, published, 'update');
+    expect(updateAfterRemoval.status).toBe(409);
+    expect(await updateAfterRemoval.json()).toEqual({ error: 'candidate_archived' });
+    expect((await privateReview(env, published.submission)).status).toBe('archived');
+    expect(await publicCandidates(env)).toEqual([]);
+  });
+
+  test('allows a verified removal while an update is still private', async () => {
+    const env = createEnvironment();
+    const published = await publishSubmission(env, 'Name: Update Removal Candidate\nRole: Data engineer');
+
+    expect((await manage(env, published, 'update')).status).toBe(200);
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const removalResponse = await manage(env, published, 'remove');
+    expect(removalResponse.status).toBe(200);
+    expect(await removalResponse.json()).toMatchObject({ status: 'archived', idempotent: false });
+    expect(await publicCandidates(env)).toEqual([]);
+  });
+});
+
 test('extractProfile returns normalized collection fields', () => {
   expect(
     extractProfile('Name: Lin\nEducation: MIT; Stanford University\nSkills: TypeScript | Go | TypeScript\nExperience: 2019 to present\nLocation: Boston')
@@ -246,6 +354,23 @@ async function processQueuedSubmission(env) {
 async function decide(env, submission, body) {
   return worker.fetch(
     apiRequest(`/api/reviews/${submission.submissionId}/decision`, 'POST', body, submission.reviewToken),
+    env
+  );
+}
+
+async function publishSubmission(env, sourceText) {
+  const submission = await submit(env, sourceText);
+  await processQueuedSubmission(env);
+  const draft = editableDraft((await privateReview(env, submission)).draft);
+  const response = await decide(env, submission, { decision: 'publish', draft });
+  expect(response.status).toBe(200);
+  const publication = await response.json();
+  return { submission, candidate: publication.candidate };
+}
+
+async function manage(env, publication, action) {
+  return worker.fetch(
+    apiRequest(`/api/candidates/${publication.candidate.id}/manage`, 'POST', { action }, publication.submission.reviewToken),
     env
   );
 }

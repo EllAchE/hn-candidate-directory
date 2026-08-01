@@ -34,7 +34,7 @@ function card(candidate) {
   const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
   const enrichment = candidate.enriched ? `<span class="chip enriched">✦ enriched</span>` : '';
   const companies = candidate.companies.length ? `<span>Previously at <b>${escapeHtml(candidate.companies.join(', '))}</b></span>` : '<span>Employment history <b>not enriched</b></span>';
-  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span>from <b>${escapeHtml(candidate.source)}</b></span></div><div class="card-actions"><button data-view="${candidate.id}">View profile</button><a href="#" data-request-for="${candidate.id}">Request update</a></div></div></article>`;
+  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span>from <b>${escapeHtml(candidate.source)}</b></span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char])); }
@@ -51,17 +51,21 @@ document.querySelectorAll('[data-open-import]').forEach((button) => button.addEv
   el('import-result').classList.remove('review-ready');
   openDialog(el('import-dialog'));
 }));
-document.querySelectorAll('[data-open-request]').forEach((button) => button.addEventListener('click', () => openDialog(el('request-dialog'))));
+document.querySelectorAll('[data-open-request]').forEach((button) => button.addEventListener('click', () => openManagementDialog()));
 document.addEventListener('click', (event) => {
   if (event.target.matches('[data-close-dialog]')) closeDialogs();
   const view = event.target.closest('[data-view]');
   if (view) {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2><p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div><p class="dialog-copy" style="margin-top:20px">Enriched fields: <strong>${escapeHtml(candidate.university)}</strong> · ${escapeHtml(candidate.companies.join(', ') || 'pending document processing')}</p>`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2><p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div><p class="dialog-copy" style="margin-top:20px">Enriched fields: <strong>${escapeHtml(candidate.university)}</strong> · ${escapeHtml(candidate.companies.join(', ') || 'pending document processing')}</p><div class="dialog-actions"><button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button></div>`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
-  if (request) { event.preventDefault(); openDialog(el('request-dialog')); }
+  if (request) { event.preventDefault(); openManagementDialog(request.dataset.requestFor); }
+  const copyToken = event.target.closest('[data-copy-management-token]');
+  if (copyToken && activeReview?.token && navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(activeReview.token).then(() => { copyToken.textContent = 'Copied'; });
+  }
 });
 el('run-import').addEventListener('click', async () => {
   const sourceText = el('import-text').value.trim();
@@ -155,7 +159,47 @@ el('import-result').addEventListener('click', async (event) => {
     setDecisionBusy(false);
   }
 });
-el('request-form').addEventListener('submit', (event) => { event.preventDefault(); localStorage.setItem('hn-update-request', JSON.stringify({ email: el('request-email').value, message: el('request-message').value, createdAt: new Date().toISOString() })); event.target.hidden = true; el('request-success').hidden = false; });
+el('request-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const action = event.submitter?.dataset.managementAction;
+  const candidateId = el('request-candidate').value;
+  const token = el('request-token').value.trim();
+  if (!action || !candidateId || !token) return;
+
+  setManagementBusy(true, action === 'update' ? 'Opening private review…' : 'Removing profile…');
+  try {
+    const response = await fetch(apiPath(`/api/candidates/${encodeURIComponent(candidateId)}/manage`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action })
+    });
+    if (!response.ok) throw new Error(await apiError(response, 'Profile could not be managed'));
+    const result = await response.json();
+    el('request-token').value = '';
+    await loadPublishedCandidates();
+
+    if (result.status === 'review_ready') {
+      activeReview = { submissionId: result.submissionId, token, local: false };
+      const reviewResponse = await fetch(apiPath(result.reviewEndpoint), { headers: { authorization: `Bearer ${token}` } });
+      if (!reviewResponse.ok) throw new Error(await apiError(reviewResponse, 'Private review could not be loaded'));
+      const review = await reviewResponse.json();
+      closeDialogs();
+      el('run-import').closest('.dialog-actions').hidden = true;
+      openDialog(el('import-dialog'));
+      renderReviewDraft(review.draft);
+      el('review-save-state').textContent = 'Hidden from search while you review changes';
+      return;
+    }
+
+    event.target.hidden = true;
+    el('request-success').hidden = false;
+    el('request-success').innerHTML = '<span>✓</span><div><strong>Profile removed</strong><p>The verified profile is archived and no longer appears in public search. Repeating this removal is safe.</p></div>';
+  } catch (error) {
+    el('request-state').textContent = error.message;
+  } finally {
+    setManagementBusy(false);
+  }
+});
 render();
 loadPublishedCandidates();
 
@@ -211,17 +255,45 @@ function renderReviewDraft(draft) {
   el('run-import').closest('.dialog-actions').hidden = true;
   result.hidden = false;
   result.classList.add('review-ready');
-  result.innerHTML = `<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
+  result.innerHTML = `${managementTokenPanel()}<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
 }
 
 function renderPublicationResult(result) {
   const candidate = result.candidate;
   const publishedAt = new Date(result.publishedAt).toLocaleString();
-  el('import-result').innerHTML = `<div class="decision-result published"><span class="decision-icon">✓</span><div><div class="review-heading"><strong>Profile published</strong><span class="published-badge">Searchable</span></div><p><strong>${escapeHtml(candidate.name)}</strong> · ${escapeHtml(candidate.role)}</p><p>The exact revision you approved is now in public search. Published ${escapeHtml(publishedAt)}.</p><div class="decision-actions"><span class="review-save-state" id="review-save-state">You remain in control</span><button class="button button-danger" type="button" data-review-decision="refuse">Withdraw from directory</button></div></div></div>`;
+  el('import-result').innerHTML = `${managementTokenPanel()}<div class="decision-result published"><span class="decision-icon">✓</span><div><div class="review-heading"><strong>Profile published</strong><span class="published-badge">Searchable</span></div><p><strong>${escapeHtml(candidate.name)}</strong> · ${escapeHtml(candidate.role)}</p><p>The exact revision you approved is now in public search. Published ${escapeHtml(publishedAt)}.</p><div class="decision-actions"><span class="review-save-state" id="review-save-state">You remain in control</span><button class="button button-danger" type="button" data-review-decision="refuse">Withdraw from directory</button></div></div></div>`;
 }
 
 function renderRefusalResult(wasPublished) {
   el('import-result').innerHTML = `<div class="decision-result refused"><span class="decision-icon">×</span><div><div class="review-heading"><strong>${wasPublished ? 'Profile withdrawn' : 'Listing declined'}</strong><span class="private-badge">Not searchable</span></div><p>${wasPublished ? 'The profile has been removed from public search.' : 'This draft will not enter the public directory.'} This review token cannot publish the archived revision later.</p></div></div>`;
+}
+
+function managementTokenPanel() {
+  if (!activeReview?.token || activeReview.local) return '';
+  return `<div class="management-token"><strong>Save your private management token</strong><p>This token is shown only in this tab. Use it later to update or remove this exact profile; the directory stores only its hash.</p><div class="token-row"><input type="text" readonly autocomplete="off" spellcheck="false" value="${escapeHtml(activeReview.token)}" /><button class="button button-ghost" type="button" data-copy-management-token>Copy</button></div></div>`;
+}
+
+function openManagementDialog(candidateId = '') {
+  closeDialogs();
+  refreshManagementCandidates(candidateId);
+  el('request-form').hidden = false;
+  el('request-success').hidden = true;
+  el('request-token').value = '';
+  el('request-state').textContent = 'The token is checked against the selected profile before anything changes.';
+  openDialog(el('request-dialog'));
+}
+
+function refreshManagementCandidates(preferredCandidateId = '') {
+  const select = el('request-candidate');
+  if (!select) return;
+  const selected = preferredCandidateId || select.value;
+  select.innerHTML = `<option value="">Choose your published profile</option>${candidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.name)} · ${escapeHtml(candidate.role)}</option>`).join('')}`;
+  if (candidates.some((candidate) => candidate.id === selected)) select.value = selected;
+}
+
+function setManagementBusy(busy, label = '') {
+  el('request-form').querySelectorAll('button').forEach((button) => { button.disabled = busy; });
+  if (busy) el('request-state').textContent = label;
 }
 
 function reviewInput(label, name, value) {

@@ -24,6 +24,12 @@ export default {
       return json({ error: 'method_not_allowed' }, 405);
     }
 
+    const managementMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/manage$/);
+    if (managementMatch) {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      return manageCandidate(request, env, managementMatch[1]);
+    }
+
     if (url.pathname === '/api/candidates') {
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
       return listPublishedCandidates(env);
@@ -265,6 +271,81 @@ async function listPublishedCandidates(env) {
   return json({ candidates: result.results.map(toPublicCandidate) });
 }
 
+async function manageCandidate(request, env, candidateId) {
+  const management = await authorizeCandidateManagement(request, env, candidateId);
+  if (management instanceof Response) return management;
+
+  const body = await readJson(request, 4_096);
+  if (body instanceof Response) return body;
+  if (!['update', 'remove'].includes(body?.action)) return json({ error: 'invalid_management_action' }, 400);
+
+  if (body.action === 'update') return startCandidateUpdate(env, management);
+  return removeCandidate(env, management);
+}
+
+async function startCandidateUpdate(env, management) {
+  if (management.status === 'review_ready') return managementResponse(management, 'update', true);
+  if (management.status === 'archived') return json({ error: 'candidate_archived' }, 409);
+  if (management.status !== 'published') return json({ error: 'invalid_management_transition' }, 409);
+
+  const updatedAt = new Date().toISOString();
+  const updateResult = await env.DB.prepare(
+    `UPDATE profile_revisions
+        SET status = 'review_ready', published_at = NULL, updated_at = ?
+      WHERE id = ? AND submission_id = ? AND status = 'published'`
+  )
+    .bind(updatedAt, management.candidate_id, management.submission_id)
+    .run();
+
+  if (changedRows(updateResult) > 0) {
+    return managementResponse({ ...management, status: 'review_ready' }, 'update', false);
+  }
+
+  const current = await getCandidateManagementRecord(env, management.candidate_id);
+  if (current?.submission_id !== management.submission_id) return json({ error: 'invalid_management_transition' }, 409);
+  if (current.status === 'review_ready') return managementResponse(current, 'update', true);
+  if (current.status === 'archived') return json({ error: 'candidate_archived' }, 409);
+  return json({ error: 'invalid_management_transition' }, 409);
+}
+
+async function removeCandidate(env, management) {
+  if (management.status === 'archived') return managementResponse(management, 'remove', true);
+  if (!['published', 'review_ready'].includes(management.status)) return json({ error: 'invalid_management_transition' }, 409);
+
+  const updatedAt = new Date().toISOString();
+  const updateResult = await env.DB.prepare(
+    `UPDATE profile_revisions
+        SET status = 'archived', published_at = NULL, updated_at = ?
+      WHERE id = ? AND submission_id = ? AND status IN ('published', 'review_ready')`
+  )
+    .bind(updatedAt, management.candidate_id, management.submission_id)
+    .run();
+
+  if (changedRows(updateResult) > 0) {
+    return managementResponse({ ...management, status: 'archived' }, 'remove', false);
+  }
+
+  const current = await getCandidateManagementRecord(env, management.candidate_id);
+  if (current?.submission_id === management.submission_id && current.status === 'archived') {
+    return managementResponse(current, 'remove', true);
+  }
+  return json({ error: 'invalid_management_transition' }, 409);
+}
+
+function managementResponse(management, action, idempotent) {
+  const reviewReady = management.status === 'review_ready';
+  return json({
+    action,
+    candidateId: management.candidate_id,
+    submissionId: management.submission_id,
+    status: management.status,
+    idempotent,
+    visibility: reviewReady ? 'hidden_during_review' : 'not_searchable',
+    reviewEndpoint: reviewReady ? `/api/reviews/${management.submission_id}` : null,
+    decisionEndpoint: reviewReady ? `/api/reviews/${management.submission_id}/decision` : null
+  });
+}
+
 async function processSubmissionMessage(message, env) {
   const submissionId = message.body?.submissionId;
   if (typeof submissionId !== 'string') {
@@ -342,6 +423,30 @@ async function authorizeReview(request, env, submissionId) {
   const tokenHash = await hashToken(token);
   if (!constantTimeEqual(tokenHash, submission.review_token_hash)) return json({ error: 'review_token_invalid' }, 403);
   return submission;
+}
+
+async function authorizeCandidateManagement(request, env, candidateId) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+  const authorization = request.headers.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!token) return json({ error: 'management_token_required' }, 401);
+
+  const management = await getCandidateManagementRecord(env, candidateId);
+  if (!management) return json({ error: 'candidate_not_found' }, 404);
+  const tokenHash = await hashToken(token);
+  if (!constantTimeEqual(tokenHash, management.review_token_hash)) return json({ error: 'management_token_invalid' }, 403);
+  return management;
+}
+
+async function getCandidateManagementRecord(env, candidateId) {
+  return env.DB.prepare(
+    `SELECT r.id AS candidate_id, r.submission_id, r.status, s.review_token_hash
+       FROM profile_revisions r
+       JOIN submissions s ON s.id = r.submission_id
+      WHERE r.id = ?`
+  )
+    .bind(candidateId)
+    .first();
 }
 
 function extractProfile(sourceText) {
