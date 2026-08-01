@@ -11,6 +11,12 @@ export default {
       return createTextSubmission(request, env);
     }
 
+    const decisionMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/decision$/);
+    if (decisionMatch) {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      return decideReview(request, env, decisionMatch[1]);
+    }
+
     const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
     if (reviewMatch) {
       if (request.method === 'GET') return getReview(request, env, reviewMatch[1]);
@@ -100,20 +106,17 @@ async function getReview(request, env, submissionId) {
   const submission = await authorizeReview(request, env, submissionId);
   if (submission instanceof Response) return submission;
 
-  const draft = await env.DB.prepare(
-    `SELECT id, status, name, role, summary, location, work_mode, availability,
-            universities_json, companies_json, skills_json, date_ranges_json, updated_at
-       FROM profile_revisions
-      WHERE submission_id = ?`
-  ).bind(submissionId).first();
+  const draft = await getReviewRevision(env, submissionId);
 
-  return json({ submissionId, status: submission.status, draft: draft ? toReviewDraft(draft) : null });
+  return json({ submissionId, status: draft?.status || submission.status, draft: draft ? toReviewDraft(draft) : null });
 }
 
 async function updateReview(request, env, submissionId) {
   const submission = await authorizeReview(request, env, submissionId);
   if (submission instanceof Response) return submission;
-  if (submission.status !== 'review_ready') return json({ error: 'review_not_ready' }, 409);
+
+  const currentDraft = await getReviewRevision(env, submissionId);
+  if (!currentDraft || currentDraft.status !== 'review_ready') return json({ error: 'review_not_editable' }, 409);
 
   const body = await readJson(request, 24_000);
   if (body instanceof Response) return body;
@@ -121,7 +124,7 @@ async function updateReview(request, env, submissionId) {
   if (!draft) return json({ error: 'invalid_review_draft' }, 400);
 
   const updatedAt = new Date().toISOString();
-  await env.DB.prepare(
+  const updateResult = await env.DB.prepare(
     `UPDATE profile_revisions
         SET name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
             universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, updated_at = ?
@@ -143,14 +146,110 @@ async function updateReview(request, env, submissionId) {
     )
     .run();
 
-  const saved = await env.DB.prepare(
+  if (changedRows(updateResult) === 0) return json({ error: 'review_not_editable' }, 409);
+
+  const saved = await getReviewRevision(env, submissionId);
+
+  return json({ submissionId, status: saved.status, draft: toReviewDraft(saved) });
+}
+
+async function decideReview(request, env, submissionId) {
+  const submission = await authorizeReview(request, env, submissionId);
+  if (submission instanceof Response) return submission;
+
+  const body = await readJson(request, 24_000);
+  if (body instanceof Response) return body;
+  if (!['publish', 'refuse'].includes(body?.decision)) return json({ error: 'invalid_review_decision' }, 400);
+
+  const revision = await getReviewRevision(env, submissionId);
+  if (!revision) return json({ error: 'review_not_ready' }, 409);
+
+  if (body.decision === 'publish') return publishReview(env, submissionId, revision, body.draft);
+  return refuseReview(env, submissionId, revision);
+}
+
+async function publishReview(env, submissionId, revision, draftValue) {
+  if (revision.status === 'published') return reviewDecisionResponse(submissionId, revision, true);
+  if (revision.status === 'archived') return json({ error: 'review_withdrawn' }, 409);
+  if (revision.status !== 'review_ready') return json({ error: 'invalid_review_transition' }, 409);
+
+  const approvedDraft = validateDraft(draftValue);
+  if (!approvedDraft) return json({ error: 'approved_draft_required' }, 400);
+
+  const publishedAt = new Date().toISOString();
+  const updateResult = await env.DB.prepare(
+    `UPDATE profile_revisions
+        SET status = 'published', name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
+            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, published_at = ?, updated_at = ?
+      WHERE submission_id = ? AND status = 'review_ready'`
+  )
+    .bind(
+      approvedDraft.name,
+      approvedDraft.role,
+      approvedDraft.summary,
+      approvedDraft.location,
+      approvedDraft.workMode,
+      approvedDraft.availability,
+      JSON.stringify(approvedDraft.universities),
+      JSON.stringify(approvedDraft.companies),
+      JSON.stringify(approvedDraft.skills),
+      JSON.stringify(approvedDraft.dateRanges),
+      publishedAt,
+      publishedAt,
+      submissionId
+    )
+    .run();
+
+  if (changedRows(updateResult) === 0) return resolvePublishRetry(env, submissionId);
+  return reviewDecisionResponse(submissionId, await getReviewRevision(env, submissionId), false);
+}
+
+async function refuseReview(env, submissionId, revision) {
+  if (revision.status === 'archived') return reviewDecisionResponse(submissionId, revision, true);
+  if (!['review_ready', 'published'].includes(revision.status)) return json({ error: 'invalid_review_transition' }, 409);
+
+  const updatedAt = new Date().toISOString();
+  const updateResult = await env.DB.prepare(
+    `UPDATE profile_revisions
+        SET status = 'archived', published_at = NULL, updated_at = ?
+      WHERE submission_id = ? AND status IN ('review_ready', 'published')`
+  )
+    .bind(updatedAt, submissionId)
+    .run();
+
+  if (changedRows(updateResult) === 0) {
+    const current = await getReviewRevision(env, submissionId);
+    if (current?.status === 'archived') return reviewDecisionResponse(submissionId, current, true);
+    return json({ error: 'invalid_review_transition' }, 409);
+  }
+
+  return reviewDecisionResponse(submissionId, await getReviewRevision(env, submissionId), false);
+}
+
+async function resolvePublishRetry(env, submissionId) {
+  const current = await getReviewRevision(env, submissionId);
+  if (current?.status === 'published') return reviewDecisionResponse(submissionId, current, true);
+  if (current?.status === 'archived') return json({ error: 'review_withdrawn' }, 409);
+  return json({ error: 'invalid_review_transition' }, 409);
+}
+
+function reviewDecisionResponse(submissionId, revision, idempotent) {
+  return json({
+    submissionId,
+    status: revision.status,
+    idempotent,
+    publishedAt: revision.published_at || null,
+    candidate: revision.status === 'published' ? toPublicCandidate(revision) : null
+  });
+}
+
+async function getReviewRevision(env, submissionId) {
+  return env.DB.prepare(
     `SELECT id, status, name, role, summary, location, work_mode, availability,
-            universities_json, companies_json, skills_json, date_ranges_json, updated_at
+            universities_json, companies_json, skills_json, date_ranges_json, updated_at, published_at
        FROM profile_revisions
       WHERE submission_id = ?`
   ).bind(submissionId).first();
-
-  return json({ submissionId, status: submission.status, draft: toReviewDraft(saved) });
 }
 
 async function listPublishedCandidates(env) {
@@ -380,6 +479,10 @@ function constantTimeEqual(left, right) {
 
 function byteLength(value) {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function changedRows(result) {
+  return Number(result?.meta?.changes ?? result?.changes ?? 0);
 }
 
 function json(value, status = 200) {

@@ -119,6 +119,42 @@ el('import-result').addEventListener('submit', async (event) => {
     saveButton.disabled = false;
   }
 });
+el('import-result').addEventListener('change', (event) => {
+  if (!event.target.matches('#publish-consent')) return;
+  const publishButton = el('import-result').querySelector('[data-review-decision="publish"]');
+  if (publishButton) publishButton.disabled = !event.target.checked;
+});
+el('import-result').addEventListener('click', async (event) => {
+  const decisionButton = event.target.closest('[data-review-decision]');
+  if (!decisionButton || !activeReview || activeReview.local) return;
+
+  const decision = decisionButton.dataset.reviewDecision;
+  const form = el('review-form');
+  if (decision === 'publish' && !el('publish-consent')?.checked) {
+    el('review-save-state').textContent = 'Confirm consent before publishing';
+    return;
+  }
+
+  const wasPublished = !form;
+  setDecisionBusy(true, decision === 'publish' ? 'Publishing approved revision…' : 'Recording your decision…');
+  try {
+    const response = await fetch(apiPath(`/api/reviews/${activeReview.submissionId}/decision`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${activeReview.token}` },
+      body: JSON.stringify({ decision, ...(decision === 'publish' ? { draft: draftFromForm(form) } : {}) })
+    });
+    if (!response.ok) throw new Error(await apiError(response, 'Decision could not be saved'));
+    const result = await response.json();
+    if (result.status === 'published') renderPublicationResult(result);
+    else renderRefusalResult(wasPublished);
+    await loadPublishedCandidates();
+  } catch (error) {
+    const state = el('review-save-state');
+    if (state) state.textContent = error.message;
+  } finally {
+    setDecisionBusy(false);
+  }
+});
 el('request-form').addEventListener('submit', (event) => { event.preventDefault(); localStorage.setItem('hn-update-request', JSON.stringify({ email: el('request-email').value, message: el('request-message').value, createdAt: new Date().toISOString() })); event.target.hidden = true; el('request-success').hidden = false; });
 render();
 loadPublishedCandidates();
@@ -169,10 +205,23 @@ async function waitForReview(reviewAccess) {
 
 function renderReviewDraft(draft) {
   const result = el('import-result');
+  const decisionControls = activeReview?.local
+    ? '<div class="decision-panel"><strong>Preview only</strong><p>Connect the Worker API to approve or decline this listing. This in-tab preview cannot publish.</p></div>'
+    : '<div class="decision-panel"><strong>Choose whether this exact revision enters the directory</strong><p>Saving above remains private. Publishing is a separate action and makes only the fields currently shown searchable. You can also decline the listing.</p><label class="consent-confirm"><input id="publish-consent" type="checkbox" /> <span>I approve this exact profile and consent to its publication in the public candidate directory.</span></label><div class="decision-actions"><button class="button button-danger" type="button" data-review-decision="refuse">Decline listing</button><button class="button button-primary" type="button" data-review-decision="publish" disabled>Approve exact draft & publish</button></div></div>';
   el('run-import').closest('.dialog-actions').hidden = true;
   result.hidden = false;
   result.classList.add('review-ready');
-  result.innerHTML = `<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-primary" type="submit">Save private draft</button></div></form>`;
+  result.innerHTML = `<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
+}
+
+function renderPublicationResult(result) {
+  const candidate = result.candidate;
+  const publishedAt = new Date(result.publishedAt).toLocaleString();
+  el('import-result').innerHTML = `<div class="decision-result published"><span class="decision-icon">✓</span><div><div class="review-heading"><strong>Profile published</strong><span class="published-badge">Searchable</span></div><p><strong>${escapeHtml(candidate.name)}</strong> · ${escapeHtml(candidate.role)}</p><p>The exact revision you approved is now in public search. Published ${escapeHtml(publishedAt)}.</p><div class="decision-actions"><span class="review-save-state" id="review-save-state">You remain in control</span><button class="button button-danger" type="button" data-review-decision="refuse">Withdraw from directory</button></div></div></div>`;
+}
+
+function renderRefusalResult(wasPublished) {
+  el('import-result').innerHTML = `<div class="decision-result refused"><span class="decision-icon">×</span><div><div class="review-heading"><strong>${wasPublished ? 'Profile withdrawn' : 'Listing declined'}</strong><span class="private-badge">Not searchable</span></div><p>${wasPublished ? 'The profile has been removed from public search.' : 'This draft will not enter the public directory.'} This review token cannot publish the archived revision later.</p></div></div>`;
 }
 
 function reviewInput(label, name, value) {
@@ -229,6 +278,14 @@ function showImportMessage(message, error = false) {
 function setImportBusy(busy, label) {
   el('run-import').disabled = busy;
   el('run-import').textContent = label;
+}
+
+function setDecisionBusy(busy, label = '') {
+  el('import-result').querySelectorAll('button').forEach((button) => {
+    button.disabled = busy || (button.dataset.reviewDecision === 'publish' && !el('publish-consent')?.checked);
+  });
+  const state = el('review-save-state');
+  if (busy && state) state.textContent = label;
 }
 
 async function apiError(response, fallback) {
