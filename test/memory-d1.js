@@ -15,6 +15,7 @@ class MemoryD1 {
     this.submissions = new Map();
     this.jobs = new Map();
     this.revisions = new Map();
+    this.batchTail = Promise.resolve();
   }
 
   prepare(sql) {
@@ -22,7 +23,19 @@ class MemoryD1 {
   }
 
   async batch(statements) {
-    return Promise.all(statements.map((statement) => statement.run()));
+    const previousBatch = this.batchTail;
+    let releaseBatch;
+    this.batchTail = new Promise((resolve) => {
+      releaseBatch = resolve;
+    });
+    await previousBatch;
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      return results;
+    } finally {
+      releaseBatch();
+    }
   }
 }
 
@@ -38,6 +51,14 @@ class MemoryStatement {
   }
 
   async first() {
+    if (this.sql === 'SELECT id, status FROM submissions WHERE id = ?') {
+      const submission = this.database.submissions.get(this.values[0]);
+      return submission ? select(submission, ['id', 'status']) : null;
+    }
+    if (this.sql === 'SELECT id FROM submissions WHERE id = ?') {
+      const submission = this.database.submissions.get(this.values[0]);
+      return submission ? select(submission, ['id']) : null;
+    }
     if (this.sql === 'SELECT source_text, status FROM submissions WHERE id = ?') {
       const submission = this.database.submissions.get(this.values[0]);
       return submission ? select(submission, ['source_text', 'status']) : null;
@@ -78,6 +99,7 @@ class MemoryStatement {
     const [first, ...rest] = this.values;
     if (this.sql.startsWith('INSERT INTO submissions')) {
       const [id, sourceText, reviewTokenHash, createdAt, updatedAt] = this.values;
+      if (this.database.submissions.has(id)) throw new Error('constraint_failed');
       this.database.submissions.set(id, {
         id,
         source_kind: 'text',
@@ -101,6 +123,21 @@ class MemoryStatement {
         created_at: createdAt,
         updated_at: updatedAt
       });
+      return success();
+    }
+    if (this.sql.startsWith("UPDATE submissions SET source_text = ?, review_token_hash = ?, status = 'submitted'")) {
+      const [sourceText, reviewTokenHash, updatedAt, submissionId, jobSubmissionId] = this.values;
+      const submission = this.database.submissions.get(submissionId);
+      const job = this.database.jobs.get(jobSubmissionId);
+      if (submission?.status !== 'failed' || job?.status !== 'failed') return success(0);
+      Object.assign(submission, { source_text: sourceText, review_token_hash: reviewTokenHash, status: 'submitted', updated_at: updatedAt });
+      return success();
+    }
+    if (this.sql.startsWith("UPDATE jobs SET status = 'queued'")) {
+      const [updatedAt, submissionId] = this.values;
+      const job = this.database.jobs.get(submissionId);
+      if (job?.status !== 'failed') return success(0);
+      Object.assign(job, { status: 'queued', attempts: 0, error: null, updated_at: updatedAt });
       return success();
     }
     if (this.sql.startsWith("UPDATE submissions SET status = 'processing'")) {
@@ -248,8 +285,23 @@ class MemoryStatement {
       });
       return success();
     }
-    if (this.sql.startsWith("UPDATE submissions SET status = 'failed'")) return success();
-    if (this.sql.startsWith("UPDATE jobs SET status = 'failed'")) return success();
+    if (this.sql.startsWith("UPDATE submissions SET status = 'failed'")) {
+      const [updatedAt, submissionId] = this.values;
+      const submission = this.database.submissions.get(submissionId);
+      if (!submission) return success(0);
+      Object.assign(submission, { status: 'failed', updated_at: updatedAt });
+      return success();
+    }
+    if (this.sql.startsWith("UPDATE jobs SET status = 'failed'")) {
+      const queueFailure = this.sql.includes("error = 'queue_unavailable'");
+      const [error, updatedAt, submissionId] = queueFailure
+        ? ['queue_unavailable', this.values[0], this.values[1]]
+        : this.values;
+      const job = this.database.jobs.get(submissionId);
+      if (!job) return success(0);
+      Object.assign(job, { status: 'failed', error, updated_at: updatedAt });
+      return success();
+    }
     throw new Error(`Unsupported run statement: ${this.sql}`);
   }
 }

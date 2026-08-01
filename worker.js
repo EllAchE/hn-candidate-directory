@@ -1,5 +1,9 @@
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
+const MAX_URL_REQUEST_BYTES = 4_096;
+const STRING_WEB_ACCESS_ENDPOINT = 'https://request.usestring.ai/v1/fetch';
+const STRING_WEB_ACCESS_LIMITS = Object.freeze({ requests: 1, pages: 1, timeoutMs: 12_000, responseBytes: 750_000 });
+const LINKEDIN_PROFILE_HOSTS = new Set(['linkedin.com', 'www.linkedin.com']);
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 
 export default {
@@ -9,6 +13,11 @@ export default {
     if (url.pathname === '/api/submissions/text') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
       return createTextSubmission(request, env);
+    }
+
+    if (url.pathname === '/api/submissions/url') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      return createUrlSubmission(request, env);
     }
 
     const decisionMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/decision$/);
@@ -70,29 +79,104 @@ async function createTextSubmission(request, env) {
   if (byteLength(sourceText) > MAX_SOURCE_BYTES) return json({ error: 'source_text_too_large', maxBytes: MAX_SOURCE_BYTES }, 413);
   if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
 
-  const submissionId = crypto.randomUUID();
+  return createQueuedSubmission(env, crypto.randomUUID(), sourceText, 'submission_conflict');
+}
+
+async function createUrlSubmission(request, env) {
+  const body = await readJson(request, MAX_URL_REQUEST_BYTES);
+  if (body instanceof Response) return body;
+
+  const sourceUrl = validateCandidateSourceUrl(body?.url);
+  if (!sourceUrl) return json({ error: 'url_not_allowed' }, 400);
+  if (!env.DB || !env.SUBMISSION_QUEUE || !env.UNBLOCKER_ORG_API_KEY) return json({ error: 'service_not_configured' }, 503);
+
+  const submissionId = `url-${(await hashToken(sourceUrl)).slice(0, 32)}`;
+  let existingSubmission;
+  try {
+    existingSubmission = await env.DB.prepare('SELECT id, status FROM submissions WHERE id = ?').bind(submissionId).first();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+  if (existingSubmission && existingSubmission.status !== 'failed') return json({ error: 'duplicate_url_submission' }, 409);
+
+  let sourceText;
+  try {
+    sourceText = await fetchCandidateSource(sourceUrl, env.UNBLOCKER_ORG_API_KEY);
+  } catch (error) {
+    if (error instanceof UrlSubmissionError) return json({ error: error.code }, error.status);
+    return json({ error: 'url_fetch_failed' }, 502);
+  }
+
+  if (existingSubmission) return retryFailedUrlSubmission(env, submissionId, sourceText);
+  return createQueuedSubmission(env, submissionId, sourceText, 'duplicate_url_submission');
+}
+
+async function retryFailedUrlSubmission(env, submissionId, sourceText) {
+  const reviewToken = createToken();
+  const reviewTokenHash = await hashToken(reviewToken);
+  const updatedAt = new Date().toISOString();
+
+  let results;
+  try {
+    results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE submissions
+            SET source_text = ?, review_token_hash = ?, status = 'submitted', updated_at = ?
+          WHERE id = ? AND status = 'failed'
+            AND EXISTS (SELECT 1 FROM jobs WHERE submission_id = ? AND status = 'failed')`
+      ).bind(sourceText, reviewTokenHash, updatedAt, submissionId, submissionId),
+      env.DB.prepare(
+        `UPDATE jobs
+            SET status = 'queued', attempts = 0, error = NULL, updated_at = ?
+          WHERE submission_id = ? AND status = 'failed'`
+      ).bind(updatedAt, submissionId)
+    ]);
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
+  if (results.some((result) => changedRows(result) !== 1)) return json({ error: 'duplicate_url_submission' }, 409);
+  return enqueueSubmission(env, submissionId, reviewToken);
+}
+
+async function createQueuedSubmission(env, submissionId, sourceText, duplicateError) {
   const jobId = crypto.randomUUID();
   const reviewToken = createToken();
   const reviewTokenHash = await hashToken(reviewToken);
   const createdAt = new Date().toISOString();
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO submissions (id, source_kind, source_text, review_token_hash, status, created_at, updated_at)
-       VALUES (?, 'text', ?, ?, 'submitted', ?, ?)`
-    ).bind(submissionId, sourceText, reviewTokenHash, createdAt, createdAt),
-    env.DB.prepare(
-      `INSERT INTO jobs (id, submission_id, kind, status, attempts, created_at, updated_at)
-       VALUES (?, ?, 'extract_profile', 'queued', 0, ?, ?)`
-    ).bind(jobId, submissionId, createdAt, createdAt)
-  ]);
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO submissions (id, source_kind, source_text, review_token_hash, status, created_at, updated_at)
+         VALUES (?, 'text', ?, ?, 'submitted', ?, ?)`
+      ).bind(submissionId, sourceText, reviewTokenHash, createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO jobs (id, submission_id, kind, status, attempts, created_at, updated_at)
+         VALUES (?, ?, 'extract_profile', 'queued', 0, ?, ?)`
+      ).bind(jobId, submissionId, createdAt, createdAt)
+    ]);
+  } catch {
+    let duplicate = false;
+    try {
+      duplicate = Boolean(await env.DB.prepare('SELECT id FROM submissions WHERE id = ?').bind(submissionId).first());
+    } catch {
+      duplicate = false;
+    }
+    return duplicate ? json({ error: duplicateError }, 409) : json({ error: 'submission_storage_unavailable' }, 503);
+  }
 
+  return enqueueSubmission(env, submissionId, reviewToken);
+}
+
+async function enqueueSubmission(env, submissionId, reviewToken) {
   try {
     await env.SUBMISSION_QUEUE.send({ submissionId });
   } catch {
+    const failedAt = new Date().toISOString();
     await env.DB.batch([
-      env.DB.prepare("UPDATE submissions SET status = 'failed', updated_at = ? WHERE id = ?").bind(new Date().toISOString(), submissionId),
-      env.DB.prepare("UPDATE jobs SET status = 'failed', error = 'queue_unavailable', updated_at = ? WHERE submission_id = ?").bind(new Date().toISOString(), submissionId)
+      env.DB.prepare("UPDATE submissions SET status = 'failed', updated_at = ? WHERE id = ?").bind(failedAt, submissionId),
+      env.DB.prepare("UPDATE jobs SET status = 'failed', error = 'queue_unavailable', updated_at = ? WHERE submission_id = ?").bind(failedAt, submissionId)
     ]);
     return json({ error: 'queue_unavailable' }, 503);
   }
@@ -106,6 +190,159 @@ async function createTextSubmission(request, env) {
     },
     202
   );
+}
+
+async function fetchCandidateSource(sourceUrl, apiKey) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STRING_WEB_ACCESS_LIMITS.timeoutMs);
+
+  try {
+    const response = await fetch(STRING_WEB_ACCESS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ url: sourceUrl, method: 'GET', format: 'json', executeJS: false, solveCaptcha: false }),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new UrlSubmissionError('url_fetch_failed', 502);
+
+    const responseText = await readLimitedText(response, STRING_WEB_ACCESS_LIMITS.responseBytes);
+    let envelope;
+    try {
+      envelope = JSON.parse(responseText);
+    } catch {
+      throw new UrlSubmissionError('url_fetch_failed', 502);
+    }
+    if (!isWebAccessEnvelope(envelope)) throw new UrlSubmissionError('url_fetch_failed', 502);
+    if (envelope.statusCode < 200 || envelope.statusCode >= 300) throw new UrlSubmissionError('url_fetch_failed', 502);
+
+    const sourceText = normalizeWebAccessData(envelope.data, envelope.headers);
+    if (!sourceText) throw new UrlSubmissionError('url_fetch_failed', 502);
+    if (byteLength(sourceText) > MAX_SOURCE_BYTES) throw new UrlSubmissionError('url_source_too_large', 413);
+    return sourceText;
+  } catch (error) {
+    if (error instanceof UrlSubmissionError) throw error;
+    if (controller.signal.aborted || error?.name === 'AbortError') throw new UrlSubmissionError('url_fetch_timeout', 504);
+    throw new UrlSubmissionError('url_fetch_failed', 502);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readLimitedText(response, maxBytes) {
+  const contentLength = response.headers.get('content-length');
+  if (/^\d+$/.test(contentLength || '') && Number(contentLength) > maxBytes) {
+    throw new UrlSubmissionError('url_source_too_large', 413);
+  }
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      throw new UrlSubmissionError('url_source_too_large', 413);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function isWebAccessEnvelope(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (!Number.isInteger(value.statusCode) || value.statusCode < 100 || value.statusCode > 599) return false;
+  if (typeof value.data !== 'string') return false;
+  return isHeaderRecord(value.headers);
+}
+
+function isHeaderRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value).every(
+    ([name, headerValue]) =>
+      name.length > 0 &&
+      name.length <= 256 &&
+      (typeof headerValue === 'string' ||
+        (Array.isArray(headerValue) && headerValue.length <= 50 && headerValue.every((item) => typeof item === 'string')))
+  );
+}
+
+function normalizeWebAccessData(data, headers) {
+  const contentType = headerValue(headers, 'content-type').split(';', 1)[0].trim().toLowerCase();
+  if (contentType === 'text/plain') return data.trim();
+  if (!['text/html', 'application/xhtml+xml'].includes(contentType)) throw new UrlSubmissionError('url_fetch_failed', 502);
+
+  return decodeHtmlEntities(
+    data
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<\/?(?:address|article|aside|blockquote|br|div|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tr|ul)\b[^>]*>/gi, '\n')
+      .replace(/<[^>]*>/g, ' ')
+  )
+    .replace(/[\t ]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+function headerValue(headers, name) {
+  const entry = Object.entries(headers).find(([headerName]) => headerName.toLowerCase() === name);
+  if (!entry) return '';
+  return Array.isArray(entry[1]) ? String(entry[1][0] || '') : entry[1];
+}
+
+function decodeHtmlEntities(value) {
+  const named = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"' };
+  return value.replace(/&(#(?:x[0-9a-f]+|\d+)|amp|apos|gt|lt|nbsp|quot);/gi, (entity, code) => {
+    if (!code.startsWith('#')) return named[code.toLowerCase()];
+    const numeric = code[1].toLowerCase() === 'x' ? Number.parseInt(code.slice(2), 16) : Number.parseInt(code.slice(1), 10);
+    return Number.isInteger(numeric) && numeric > 0 && numeric <= 0x10ffff ? String.fromCodePoint(numeric) : entity;
+  });
+}
+
+function validateCandidateSourceUrl(value) {
+  if (typeof value !== 'string' || !value.trim() || byteLength(value) > 2_048) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return null;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash || parsed.search || parsed.port) return null;
+  if (isBlockedNetworkHost(hostname) || !LINKEDIN_PROFILE_HOSTS.has(hostname)) return null;
+  const pathMatch = parsed.pathname.match(/^\/in\/([A-Za-z0-9-]{3,100})\/?$/);
+  if (!pathMatch) return null;
+  return `https://www.linkedin.com/in/${pathMatch[1]}`;
+}
+
+function isBlockedNetworkHost(hostname) {
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+    return true;
+  }
+  if (hostname === 'metadata.google.internal' || hostname === 'metadata.aws.internal') return true;
+  if (hostname.includes(':')) return true;
+  const octets = hostname.split('.');
+  return octets.length === 4 && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+class UrlSubmissionError extends Error {
+  constructor(code, status) {
+    super(code);
+    this.code = code;
+    this.status = status;
+  }
 }
 
 async function getReview(request, env, submissionId) {
@@ -539,6 +776,8 @@ function toPublicCandidate(row) {
 }
 
 async function readJson(request, maxBytes) {
+  const contentLength = request.headers.get('content-length');
+  if (/^\d+$/.test(contentLength || '') && Number(contentLength) > maxBytes) return json({ error: 'request_too_large' }, 413);
   const text = await request.text();
   if (byteLength(text) > maxBytes) return json({ error: 'request_too_large' }, 413);
   try {
@@ -594,4 +833,4 @@ function json(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
 }
 
-export { MAX_SOURCE_BYTES, extractProfile };
+export { MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl };
