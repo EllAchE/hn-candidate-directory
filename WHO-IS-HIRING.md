@@ -1,20 +1,44 @@
 # Who wants to be hired directory
 
-This is a public, static MVP for a searchable directory of candidates from Hacker News hiring threads.
+This repository is building a candidate-controlled, searchable directory from Hacker News “Who wants to be hired?” posts. The current increment implements the first private ingestion slice for source text. Resume uploads, URL retrieval, email verification, consent/publish actions, and update/removal flows are intentionally not part of this slice.
 
-## Document enrichment
+## What works
 
-The page intentionally separates the expensive document path from the directory UI:
+The same-origin Cloudflare Worker serves the static directory and three API routes:
 
-1. A candidate provides a resume, LinkedIn URL, or source text.
-2. A server-side adapter fetches URLs through String's Web Access API (`POST /v1/fetch`).
-3. A processing queue extracts normalized universities, companies, skills, dates, and locations.
-4. The candidate reviews the result before it becomes searchable.
+- `POST /api/submissions/text` accepts up to 100,000 UTF-8 bytes, writes a `submitted` D1 record with a hashed review token, creates a queued extraction job, and returns the one-time raw review token to the submitting tab.
+- `GET` and `PATCH /api/reviews/:submissionId` require that token, expose the asynchronous `review_ready` draft, and allow edits without publishing it.
+- `GET /api/candidates` reads only revisions whose status is `published`. `submitted`, `processing`, `review_ready`, and `failed` records cannot enter public search.
 
-`document-enrichment-worker.js` is an open-source Cloudflare Worker-shaped adapter. It keeps `UNBLOCKER_ORG_API_KEY` server-side and returns a small extraction preview. Set `window.HN_ENRICH_ENDPOINT` in the deployed page to connect it. The current page falls back to local parsing when that endpoint is unset, so the public demo remains usable on GitHub Pages.
+The Queue consumer extracts normalized locations, work modes, availability, universities, companies, skills, and date ranges. It clears the source text after successful processing and acknowledges redelivery of an already-ready draft without replacing it. The browser polls for the private draft and renders an editable review form. When the API is unavailable, the static demo performs an in-tab preview that is never inserted into the public candidate list.
 
-Production follow-ups should add candidate consent, URL allowlisting/SSRF controls, an async job queue, byte/page budgets, deduplication, redaction of sensitive fields, and email verification for update/removal requests.
+`worker.js` contains no String Web Access or other service credential. Later URL ingestion will add the server-side String Web Access adapter and its allowlisting, SSRF, redirect, page, byte, deduplication, and redaction controls as a separate reviewable increment.
 
-## Local demo
+## Local verification
 
-Open `who-is-hiring.html` directly. Search and filters work client-side. Imported candidates and update requests are stored in `localStorage` for the demo only.
+The automated tests use a dependency-free in-memory D1-shaped adapter; they do not create or migrate a database.
+
+```sh
+bun test
+bun run check
+```
+
+To exercise real local D1 and Queue bindings, install Wrangler separately, replace the placeholder D1 ID in `wrangler.toml`, and have an operator run:
+
+```sh
+wrangler d1 migrations apply hn-candidate-directory --local
+wrangler dev
+```
+
+The first command applies DDL, so agents must surface it for a human rather than running it. Open the URL printed by Wrangler, submit labeled source text, and keep the tab open while the local queue produces the token-gated review draft.
+
+## Cloudflare resources
+
+`wrangler.toml` declares these bindings:
+
+- D1 database `DB`
+- Queue producer `SUBMISSION_QUEUE`
+- Queue consumer `hn-candidate-submissions`
+- Static asset binding `ASSETS`
+
+Before a future deployment, create the D1 database and queue, replace the placeholder database ID, apply `migrations/0001_review_drafts.sql`, and verify the Worker routes on a non-production environment. No deployment or production data write is part of this increment.
