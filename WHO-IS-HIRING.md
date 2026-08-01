@@ -46,6 +46,10 @@ No schema change is needed for this increment. URL content enters the existing `
 
 The automated tests use dependency-free in-memory D1, Queue, R2, and String Web Access doubles; they make no live cloud requests and do not create or migrate a database.
 
+`test/browser.test.js` launches a real isolated headless Chromium process and drives the actual HTML, CSS, and JavaScript through the Chrome DevTools Protocol. Its ephemeral loopback server returns representative rows that are explicitly fixtures of the public `GET /api/candidates` contract; the Worker integration suite separately proves that private and archived revisions never enter that response. The harness blocks external font requests, removes its temporary browser profile in `finally`, and fails rather than skipping when no browser can launch.
+
+Set `BROWSER_BIN` to an executable Chromium-compatible browser when discovery needs an explicit path. Without it, the harness tries Homebrew Chromium, macOS Google Chrome, and common Linux Chromium/Chrome paths in order, continuing past a broken shim or failed launch.
+
 ```sh
 bun test
 bun run check

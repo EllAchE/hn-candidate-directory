@@ -110,10 +110,11 @@ test(
   'public browse, search, sorting, and filters work in a real browser at desktop and mobile viewports',
   async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
-    const server = createFixtureServer();
+    let server;
     let browser;
 
     try {
+      server = createFixtureServer();
       browser = await launchBrowser(temporaryRoot);
       const cdp = await connectToPage(browser.devToolsUrl);
       const runtimeExceptions = [];
@@ -212,6 +213,13 @@ test(
       await setControl(cdp, 'availability', 'Immediate');
       expect(await candidateNames(cdp)).toEqual(['Ada Rivera']);
       await clearFilters(cdp);
+      await setControl(cdp, 'search', 'REMOTE · latam');
+      await setControl(cdp, 'work-mode', 'Remote');
+      await setControl(cdp, 'availability', '1 month');
+      await setControl(cdp, 'university', 'University of Waterloo');
+      await setControl(cdp, 'skill', 'RUST');
+      expect(await candidateNames(cdp)).toEqual(['Diego Silva']);
+      await clearFilters(cdp);
       await setControl(cdp, 'skill', 'python');
       expect(await candidateNames(cdp)).toEqual(['Beatrice Okafor']);
       await clearFilters(cdp);
@@ -229,7 +237,7 @@ test(
 
       cdp.close();
     } finally {
-      server.stop(true);
+      server?.stop(true);
       if (browser) {
         browser.process.kill();
         await browser.process.exited;
@@ -290,7 +298,7 @@ async function launchBrowser(temporaryRoot) {
 
     const profilePath = join(temporaryRoot, `profile-${index}`);
     await mkdir(profilePath);
-    const process = Bun.spawn(
+    const browserProcess = Bun.spawn(
       [
         executable,
         '--headless=new',
@@ -314,11 +322,11 @@ async function launchBrowser(temporaryRoot) {
     );
 
     try {
-      const devToolsUrl = await readDevToolsUrl(process, executable);
-      return { process, devToolsUrl, executable };
+      const devToolsUrl = await readDevToolsUrl(browserProcess, executable);
+      return { process: browserProcess, devToolsUrl, executable };
     } catch (error) {
-      process.kill();
-      await process.exited;
+      browserProcess.kill();
+      await browserProcess.exited;
       launchErrors.push(error.message);
       if (configuredBrowser) break;
     }
@@ -505,7 +513,14 @@ async function clearFilters(cdp) {
 async function controlValues(cdp) {
   return evaluate(
     cdp,
-    `({ search: search.value, availability: availability.value, mode: document.getElementById('work-mode').value, university: university.value, company: company.value, skill: skill.value })`
+    `({
+      search: document.getElementById('search').value,
+      availability: document.getElementById('availability').value,
+      mode: document.getElementById('work-mode').value,
+      university: document.getElementById('university').value,
+      company: document.getElementById('company').value,
+      skill: document.getElementById('skill').value
+    })`
   );
 }
 
