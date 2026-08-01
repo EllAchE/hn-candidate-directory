@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import worker, { MAX_SOURCE_BYTES, extractProfile } from '../worker.js';
+import { createEnvironment } from './memory-d1.js';
 
 describe('source-text review drafts', () => {
   test('remain private through submission, processing, review, and draft edits', async () => {
@@ -77,10 +78,6 @@ describe('source-text review drafts', () => {
     expect((await saveResponse.json()).draft).toMatchObject({ summary: 'A candidate-reviewed summary.', skills: ['Rust', 'SQLite'] });
     expect(await publicCandidates(env)).toEqual([]);
 
-    env.DB.publish(submission.submissionId);
-    const published = await publicCandidates(env);
-    expect(published).toHaveLength(1);
-    expect(published[0]).toMatchObject({ name: 'Ada Candidate', summary: 'A candidate-reviewed summary.', skills: ['Rust', 'SQLite'] });
   });
 
   test('rejects source text over the byte budget before writing D1 state', async () => {
@@ -103,6 +100,120 @@ describe('source-text review drafts', () => {
   });
 });
 
+describe('candidate consent decisions', () => {
+  test('requires the review token and a ready draft', async () => {
+    const env = createEnvironment();
+    const submission = await submit(env, 'Name: Token Candidate');
+    const decisionPath = `/api/reviews/${submission.submissionId}/decision`;
+
+    const missingToken = await worker.fetch(apiRequest(decisionPath, 'POST', { decision: 'refuse' }), env);
+    expect(missingToken.status).toBe(401);
+
+    const wrongToken = await worker.fetch(apiRequest(decisionPath, 'POST', { decision: 'publish', draft: {} }, 'wrong-token'), env);
+    expect(wrongToken.status).toBe(403);
+
+    const notReady = await decide(env, submission, { decision: 'refuse' });
+    expect(notReady.status).toBe(409);
+    expect(await notReady.json()).toEqual({ error: 'review_not_ready' });
+
+    await processQueuedSubmission(env);
+    const invalidDecision = await decide(env, submission, { decision: 'later' });
+    expect(invalidDecision.status).toBe(400);
+    expect(await invalidDecision.json()).toEqual({ error: 'invalid_review_decision' });
+
+    const missingApprovedDraft = await decide(env, submission, { decision: 'publish' });
+    expect(missingApprovedDraft.status).toBe(400);
+    expect(await missingApprovedDraft.json()).toEqual({ error: 'approved_draft_required' });
+  });
+
+  test('keeps a refusal private and cannot publish it later', async () => {
+    const env = createEnvironment();
+    const submission = await submit(env, 'Name: Private Candidate\nRole: Infrastructure engineer');
+    await processQueuedSubmission(env);
+
+    const refusalResponse = await decide(env, submission, { decision: 'refuse' });
+    expect(refusalResponse.status).toBe(200);
+    expect(await refusalResponse.json()).toMatchObject({ status: 'archived', idempotent: false, publishedAt: null, candidate: null });
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const repeatedRefusal = await decide(env, submission, { decision: 'refuse' });
+    expect(repeatedRefusal.status).toBe(200);
+    expect(await repeatedRefusal.json()).toMatchObject({ status: 'archived', idempotent: true, candidate: null });
+
+    const refusedReview = await privateReview(env, submission);
+    expect(refusedReview.status).toBe('archived');
+    const refusedDraft = refusedReview.draft;
+    const latePublish = await decide(env, submission, { decision: 'publish', draft: editableDraft(refusedDraft) });
+    expect(latePublish.status).toBe(409);
+    expect(await latePublish.json()).toEqual({ error: 'review_withdrawn' });
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const lateEdit = await worker.fetch(
+      apiRequest(`/api/reviews/${submission.submissionId}`, 'PATCH', editableDraft(refusedDraft), submission.reviewToken),
+      env
+    );
+    expect(lateEdit.status).toBe(409);
+  });
+
+  test('publishes exactly the approved revision once and supports withdrawal', async () => {
+    const env = createEnvironment();
+    const submission = await submit(env, 'Name: Original Candidate\nRole: Backend engineer\nSkills: Go, Redis');
+    await processQueuedSubmission(env);
+
+    const extracted = (await privateReview(env, submission)).draft;
+    const approvedDraft = {
+      ...editableDraft(extracted),
+      name: 'Candidate Approved Name',
+      summary: 'This exact candidate-reviewed revision may be searched.',
+      skills: ['Go', 'SQLite']
+    };
+    const publishResponse = await decide(env, submission, { decision: 'publish', draft: approvedDraft });
+    expect(publishResponse.status).toBe(200);
+    const publication = await publishResponse.json();
+    const approvedPublicFields = {
+      name: approvedDraft.name,
+      role: approvedDraft.role,
+      summary: approvedDraft.summary,
+      location: approvedDraft.location,
+      mode: approvedDraft.workMode,
+      availability: approvedDraft.availability,
+      universities: approvedDraft.universities,
+      companies: approvedDraft.companies,
+      skills: approvedDraft.skills,
+      dateRanges: approvedDraft.dateRanges
+    };
+    expect(publication).toMatchObject({ status: 'published', idempotent: false, candidate: approvedPublicFields });
+    expect(publication.publishedAt).toBeString();
+
+    const published = await publicCandidates(env);
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject(approvedPublicFields);
+
+    const changedRetryDraft = { ...approvedDraft, name: 'A retry must not replace the approved revision' };
+    const repeatedPublish = await decide(env, submission, { decision: 'publish', draft: changedRetryDraft });
+    expect(repeatedPublish.status).toBe(200);
+    const repeatedPublication = await repeatedPublish.json();
+    expect(repeatedPublication).toMatchObject({ status: 'published', idempotent: true, candidate: approvedPublicFields });
+    expect(repeatedPublication.publishedAt).toBe(publication.publishedAt);
+    expect((await publicCandidates(env))[0]).toMatchObject(approvedPublicFields);
+
+    const editAfterPublish = await worker.fetch(
+      apiRequest(`/api/reviews/${submission.submissionId}`, 'PATCH', changedRetryDraft, submission.reviewToken),
+      env
+    );
+    expect(editAfterPublish.status).toBe(409);
+
+    const withdrawal = await decide(env, submission, { decision: 'refuse' });
+    expect(withdrawal.status).toBe(200);
+    expect(await withdrawal.json()).toMatchObject({ status: 'archived', idempotent: false, candidate: null, publishedAt: null });
+    expect(await publicCandidates(env)).toEqual([]);
+
+    const publishAfterWithdrawal = await decide(env, submission, { decision: 'publish', draft: approvedDraft });
+    expect(publishAfterWithdrawal.status).toBe(409);
+    expect(await publicCandidates(env)).toEqual([]);
+  });
+});
+
 test('extractProfile returns normalized collection fields', () => {
   expect(
     extractProfile('Name: Lin\nEducation: MIT; Stanford University\nSkills: TypeScript | Go | TypeScript\nExperience: 2019 to present\nLocation: Boston')
@@ -122,6 +233,31 @@ async function privateReview(env, submission) {
   return response.json();
 }
 
+async function submit(env, sourceText) {
+  const response = await worker.fetch(apiRequest('/api/submissions/text', 'POST', { sourceText }), env);
+  expect(response.status).toBe(202);
+  return response.json();
+}
+
+async function processQueuedSubmission(env) {
+  await worker.queue({ messages: [{ body: env.SUBMISSION_QUEUE.messages.at(-1), ack: () => {} }] }, env);
+}
+
+async function decide(env, submission, body) {
+  return worker.fetch(
+    apiRequest(`/api/reviews/${submission.submissionId}/decision`, 'POST', body, submission.reviewToken),
+    env
+  );
+}
+
+function editableDraft(draft) {
+  const editable = { ...draft };
+  delete editable.id;
+  delete editable.status;
+  delete editable.updatedAt;
+  return editable;
+}
+
 async function publicCandidates(env) {
   const response = await worker.fetch(apiRequest('/api/candidates'), env);
   expect(response.status).toBe(200);
@@ -137,205 +273,4 @@ function apiRequest(path, method = 'GET', body = null, token = '') {
     headers,
     body: body === null ? undefined : JSON.stringify(body)
   });
-}
-
-function createEnvironment() {
-  return {
-    DB: new MemoryD1(),
-    SUBMISSION_QUEUE: {
-      messages: [],
-      async send(message) {
-        this.messages.push(message);
-      }
-    }
-  };
-}
-
-class MemoryD1 {
-  constructor() {
-    this.submissions = new Map();
-    this.jobs = new Map();
-    this.revisions = new Map();
-  }
-
-  prepare(sql) {
-    return new MemoryStatement(this, sql);
-  }
-
-  async batch(statements) {
-    return Promise.all(statements.map((statement) => statement.run()));
-  }
-
-  publish(submissionId) {
-    const revision = this.revisions.get(submissionId);
-    revision.status = 'published';
-    revision.published_at = new Date().toISOString();
-  }
-}
-
-class MemoryStatement {
-  constructor(database, sql, values = []) {
-    this.database = database;
-    this.sql = sql.replace(/\s+/g, ' ').trim();
-    this.values = values;
-  }
-
-  bind(...values) {
-    return new MemoryStatement(this.database, this.sql, values);
-  }
-
-  async first() {
-    if (this.sql === 'SELECT source_text, status FROM submissions WHERE id = ?') {
-      const submission = this.database.submissions.get(this.values[0]);
-      return submission ? select(submission, ['source_text', 'status']) : null;
-    }
-    if (this.sql === 'SELECT id, review_token_hash, status FROM submissions WHERE id = ?') {
-      const submission = this.database.submissions.get(this.values[0]);
-      return submission ? select(submission, ['id', 'review_token_hash', 'status']) : null;
-    }
-    if (this.sql.includes('FROM profile_revisions') && this.sql.includes('WHERE submission_id = ?')) {
-      return this.database.revisions.get(this.values[0]) || null;
-    }
-    throw new Error(`Unsupported first statement: ${this.sql}`);
-  }
-
-  async all() {
-    if (this.sql.includes("WHERE status = 'published'")) {
-      const results = [...this.database.revisions.values()]
-        .filter((revision) => revision.status === 'published')
-        .sort((left, right) => right.published_at.localeCompare(left.published_at));
-      return { results };
-    }
-    throw new Error(`Unsupported all statement: ${this.sql}`);
-  }
-
-  async run() {
-    const [first, ...rest] = this.values;
-    if (this.sql.startsWith('INSERT INTO submissions')) {
-      const [id, sourceText, reviewTokenHash, createdAt, updatedAt] = this.values;
-      this.database.submissions.set(id, {
-        id,
-        source_kind: 'text',
-        source_text: sourceText,
-        review_token_hash: reviewTokenHash,
-        status: 'submitted',
-        created_at: createdAt,
-        updated_at: updatedAt
-      });
-      return success();
-    }
-    if (this.sql.startsWith('INSERT INTO jobs')) {
-      const [id, submissionId, createdAt, updatedAt] = this.values;
-      this.database.jobs.set(submissionId, {
-        id,
-        submission_id: submissionId,
-        kind: 'extract_profile',
-        status: 'queued',
-        attempts: 0,
-        error: null,
-        created_at: createdAt,
-        updated_at: updatedAt
-      });
-      return success();
-    }
-    if (this.sql.startsWith("UPDATE submissions SET status = 'processing'")) {
-      const submission = this.database.submissions.get(rest[0]);
-      if (submission?.status !== 'review_ready') Object.assign(submission, { status: 'processing', updated_at: first });
-      return success();
-    }
-    if (this.sql.startsWith("UPDATE jobs SET status = 'processing'")) {
-      const job = this.database.jobs.get(rest[0]);
-      Object.assign(job, { status: 'processing', attempts: job.attempts + 1, updated_at: first });
-      return success();
-    }
-    if (this.sql.startsWith('INSERT INTO profile_revisions')) {
-      const [
-        id,
-        submissionId,
-        name,
-        role,
-        summary,
-        location,
-        workMode,
-        availability,
-        universitiesJson,
-        companiesJson,
-        skillsJson,
-        dateRangesJson,
-        createdAt,
-        updatedAt
-      ] = this.values;
-      this.database.revisions.set(submissionId, {
-        id,
-        submission_id: submissionId,
-        status: 'review_ready',
-        name,
-        role,
-        summary,
-        location,
-        work_mode: workMode,
-        availability,
-        universities_json: universitiesJson,
-        companies_json: companiesJson,
-        skills_json: skillsJson,
-        date_ranges_json: dateRangesJson,
-        created_at: createdAt,
-        updated_at: updatedAt,
-        published_at: null
-      });
-      return success();
-    }
-    if (this.sql.startsWith("UPDATE submissions SET status = 'review_ready'")) {
-      const submission = this.database.submissions.get(rest[0]);
-      Object.assign(submission, { status: 'review_ready', source_text: '', updated_at: first });
-      return success();
-    }
-    if (this.sql.startsWith("UPDATE jobs SET status = 'completed'")) {
-      const job = this.database.jobs.get(rest[0]);
-      Object.assign(job, { status: 'completed', error: null, updated_at: first });
-      return success();
-    }
-    if (this.sql.startsWith('UPDATE profile_revisions')) {
-      const [
-        name,
-        role,
-        summary,
-        location,
-        workMode,
-        availability,
-        universitiesJson,
-        companiesJson,
-        skillsJson,
-        dateRangesJson,
-        updatedAt,
-        submissionId
-      ] = this.values;
-      const revision = this.database.revisions.get(submissionId);
-      Object.assign(revision, {
-        name,
-        role,
-        summary,
-        location,
-        work_mode: workMode,
-        availability,
-        universities_json: universitiesJson,
-        companies_json: companiesJson,
-        skills_json: skillsJson,
-        date_ranges_json: dateRangesJson,
-        updated_at: updatedAt
-      });
-      return success();
-    }
-    if (this.sql.startsWith("UPDATE submissions SET status = 'failed'")) return success();
-    if (this.sql.startsWith("UPDATE jobs SET status = 'failed'")) return success();
-    throw new Error(`Unsupported run statement: ${this.sql}`);
-  }
-}
-
-function select(value, keys) {
-  return Object.fromEntries(keys.map((key) => [key, value[key]]));
-}
-
-function success() {
-  return { success: true };
 }

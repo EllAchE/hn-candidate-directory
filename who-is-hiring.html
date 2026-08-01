@@ -74,6 +74,7 @@
             <div class="pipeline-row"><span class="pipeline-number">01</span><div><strong>Private submission</strong><small>Candidate submits source text for processing</small></div><span class="pipeline-state done">Ready</span></div>
             <div class="pipeline-row"><span class="pipeline-number">02</span><div><strong>Extract & normalize</strong><small>Companies · schools · skills · dates · locations</small></div><span class="pipeline-state done">Queued</span></div>
             <div class="pipeline-row"><span class="pipeline-number">03</span><div><strong>Candidate review</strong><small>Token-gated draft stays outside public search</small></div><span class="pipeline-state done">Private</span></div>
+            <div class="pipeline-row"><span class="pipeline-number">04</span><div><strong>Explicit consent</strong><small>Candidate approves the exact revision or declines listing</small></div><span class="pipeline-state consent">Required</span></div>
           </div>
         </div>
       </section>
@@ -89,8 +90,8 @@
     <dialog id="import-dialog" class="dialog dialog-wide">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div class="section-kicker">Private candidate submission</div>
-      <h2>Create a review draft</h2>
-      <p class="dialog-copy">Paste your HN listing or other source text. A background job extracts structured fields, then returns a private draft for you to review. This step cannot publish a profile.</p>
+      <h2>Review before you publish</h2>
+      <p class="dialog-copy">Paste your HN listing or other source text. A background job extracts structured fields into a private draft. Saving edits stays private; publication requires a separate, explicit approval.</p>
       <label class="field-label" for="import-text">Source text</label><textarea id="import-text" placeholder="Name: Ada Candidate\nRole: Backend engineer\nLocation: Toronto, Canada\nWork mode: Remote\nSkills: Rust, Go, PostgreSQL\nCompanies: Example Labs\nEducation: University of Waterloo\nExperience: 2021 - present"></textarea>
       <p class="privacy-note">Your review token stays in this tab. Pending and review-ready drafts are excluded from the public candidate endpoint.</p>
       <div class="dialog-actions"><button class="button button-ghost" data-close-dialog>Cancel</button><button class="button button-primary" id="run-import">Create private draft</button></div>
