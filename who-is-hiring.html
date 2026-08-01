@@ -69,9 +69,9 @@
       <section class="enrichment-section" id="enrichment">
         <div class="section-kicker">The expensive part, made explicit</div>
         <div class="enrichment-grid">
-          <div><h2>Turn a LinkedIn profile or source text into a private draft.</h2><p class="section-copy">Submit one allowlisted public LinkedIn profile or paste your own listing. Asynchronous processing extracts companies, universities, skills, dates, and locations into a private review draft. Nothing enters search during review.</p><button class="button button-dark" data-open-import>Submit a source <span>→</span></button></div>
+          <div><h2>Turn a resume, LinkedIn profile, or source text into a private draft.</h2><p class="section-copy">Upload a plain-text resume, submit one allowlisted public LinkedIn profile, or paste your own listing. Asynchronous processing extracts companies, universities, skills, dates, and locations into a private review draft. Nothing enters search during review.</p><button class="button button-dark" data-open-import>Submit a source <span>→</span></button></div>
           <div class="pipeline-card">
-            <div class="pipeline-row"><span class="pipeline-number">01</span><div><strong>Private submission</strong><small>Candidate submits an approved LinkedIn URL or source text</small></div><span class="pipeline-state done">Ready</span></div>
+            <div class="pipeline-row"><span class="pipeline-number">01</span><div><strong>Private submission</strong><small>Candidate submits a plain-text resume, approved LinkedIn URL, or source text</small></div><span class="pipeline-state done">Ready</span></div>
             <div class="pipeline-row"><span class="pipeline-number">02</span><div><strong>Extract & normalize</strong><small>Companies · schools · skills · dates · locations</small></div><span class="pipeline-state done">Queued</span></div>
             <div class="pipeline-row"><span class="pipeline-number">03</span><div><strong>Candidate review</strong><small>Token-gated draft stays outside public search</small></div><span class="pipeline-state done">Private</span></div>
             <div class="pipeline-row"><span class="pipeline-number">04</span><div><strong>Explicit consent</strong><small>Candidate approves the exact revision or declines listing</small></div><span class="pipeline-state consent">Required</span></div>
@@ -95,12 +95,18 @@
       <fieldset class="source-choice">
         <legend class="field-label">Submission source</legend>
         <label><input type="radio" name="import-source" value="url" /><span><strong>Public LinkedIn profile</strong><small>Fetched server-side through String Web Access</small></span></label>
+        <label><input type="radio" name="import-source" value="resume" /><span><strong>Resume file</strong><small>Private UTF-8 plain-text upload</small></span></label>
         <label><input type="radio" name="import-source" value="text" checked /><span><strong>Source text</strong><small>Paste your HN listing or resume text</small></span></label>
       </fieldset>
       <div id="import-url-panel" hidden>
         <label class="field-label" for="import-url">LinkedIn profile URL</label>
         <input id="import-url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://www.linkedin.com/in/your-profile" />
         <p class="privacy-note">Only public HTTPS <code>linkedin.com/in/…</code> profiles are accepted. Redirect, network, page, time, and byte controls run before a draft is stored.</p>
+      </div>
+      <div id="import-resume-panel" hidden>
+        <label class="field-label" for="import-resume">Plain-text resume</label>
+        <input id="import-resume" type="file" accept=".txt,text/plain" />
+        <p class="privacy-note">This first upload format accepts one UTF-8 <code>.txt</code> file up to 100,000 bytes with a simple ASCII filename. PDF, Word, HTML, archive, executable, and binary files are rejected. The private staging copy is deleted after successful extraction, with a short lifecycle as backstop.</p>
       </div>
       <div id="import-text-panel">
         <label class="field-label" for="import-text">Source text</label><textarea id="import-text" placeholder="Name: Ada Candidate\nRole: Backend engineer\nLocation: Toronto, Canada\nWork mode: Remote\nSkills: Rust, Go, PostgreSQL\nCompanies: Example Labs\nEducation: University of Waterloo\nExperience: 2021 - present"></textarea>

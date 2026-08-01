@@ -1,6 +1,8 @@
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
 const MAX_URL_REQUEST_BYTES = 4_096;
+const MAX_RESUME_BYTES = MAX_SOURCE_BYTES;
+const MAX_RESUME_FILENAME_BYTES = 128;
 const STRING_WEB_ACCESS_ENDPOINT = 'https://request.usestring.ai/v1/fetch';
 const STRING_WEB_ACCESS_LIMITS = Object.freeze({ requests: 1, pages: 1, timeoutMs: 12_000, responseBytes: 750_000 });
 const LINKEDIN_PROFILE_HOSTS = new Set(['linkedin.com', 'www.linkedin.com']);
@@ -18,6 +20,11 @@ export default {
     if (url.pathname === '/api/submissions/url') {
       if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
       return createUrlSubmission(request, env);
+    }
+
+    if (url.pathname === '/api/submissions/resume') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      return createResumeSubmission(request, env);
     }
 
     const decisionMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/decision$/);
@@ -112,6 +119,51 @@ async function createUrlSubmission(request, env) {
 }
 
 async function retryFailedUrlSubmission(env, submissionId, sourceText) {
+  const retry = await resetFailedSubmission(env, submissionId, sourceText, 'duplicate_url_submission');
+  if (retry instanceof Response) return retry;
+  return enqueueSubmission(env, submissionId, retry.reviewToken);
+}
+
+async function createResumeSubmission(request, env) {
+  if (!isPlainTextContentType(request.headers.get('content-type'))) return json({ error: 'resume_type_not_supported' }, 415);
+  if (!isSafeResumeFilename(request.headers.get('x-resume-filename'))) return json({ error: 'resume_type_not_supported' }, 415);
+
+  const resumeBytes = await readLimitedBytes(request, MAX_RESUME_BYTES);
+  if (resumeBytes instanceof Response) return resumeBytes;
+  const sourceText = decodeResumeText(resumeBytes);
+  if (!sourceText) return json({ error: 'resume_content_invalid' }, 400);
+  if (!env.DB || !env.SUBMISSION_QUEUE || !env.RESUME_STAGING) return json({ error: 'service_not_configured' }, 503);
+
+  const contentHash = await hashBytes(resumeBytes);
+  const submissionId = `resume-${contentHash}`;
+  let existingSubmission;
+  try {
+    existingSubmission = await env.DB.prepare('SELECT id, status FROM submissions WHERE id = ?').bind(submissionId).first();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+  if (existingSubmission && existingSubmission.status !== 'failed') return json({ error: 'duplicate_resume_submission' }, 409);
+
+  const pendingSubmission = existingSubmission
+    ? await resetFailedSubmission(env, submissionId, sourceText, 'duplicate_resume_submission')
+    : await persistQueuedSubmission(env, submissionId, sourceText, 'duplicate_resume_submission');
+  if (pendingSubmission instanceof Response) return pendingSubmission;
+
+  const objectKey = await resumeObjectKey(submissionId);
+  try {
+    await env.RESUME_STAGING.put(objectKey, resumeBytes);
+  } catch {
+    await failSubmissionSetup(env, submissionId, 'resume_staging_unavailable');
+    await deleteResumeObject(env, submissionId);
+    return json({ error: 'resume_staging_unavailable' }, 503);
+  }
+
+  const response = await enqueueSubmission(env, submissionId, pendingSubmission.reviewToken);
+  if (!response.ok) await deleteResumeObject(env, submissionId);
+  return response;
+}
+
+async function resetFailedSubmission(env, submissionId, sourceText, duplicateError) {
   const reviewToken = createToken();
   const reviewTokenHash = await hashToken(reviewToken);
   const updatedAt = new Date().toISOString();
@@ -135,11 +187,17 @@ async function retryFailedUrlSubmission(env, submissionId, sourceText) {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
 
-  if (results.some((result) => changedRows(result) !== 1)) return json({ error: 'duplicate_url_submission' }, 409);
-  return enqueueSubmission(env, submissionId, reviewToken);
+  if (results.some((result) => changedRows(result) !== 1)) return json({ error: duplicateError }, 409);
+  return { reviewToken };
 }
 
 async function createQueuedSubmission(env, submissionId, sourceText, duplicateError) {
+  const pendingSubmission = await persistQueuedSubmission(env, submissionId, sourceText, duplicateError);
+  if (pendingSubmission instanceof Response) return pendingSubmission;
+  return enqueueSubmission(env, submissionId, pendingSubmission.reviewToken);
+}
+
+async function persistQueuedSubmission(env, submissionId, sourceText, duplicateError) {
   const jobId = crypto.randomUUID();
   const reviewToken = createToken();
   const reviewTokenHash = await hashToken(reviewToken);
@@ -166,18 +224,14 @@ async function createQueuedSubmission(env, submissionId, sourceText, duplicateEr
     return duplicate ? json({ error: duplicateError }, 409) : json({ error: 'submission_storage_unavailable' }, 503);
   }
 
-  return enqueueSubmission(env, submissionId, reviewToken);
+  return { reviewToken };
 }
 
 async function enqueueSubmission(env, submissionId, reviewToken) {
   try {
     await env.SUBMISSION_QUEUE.send({ submissionId });
   } catch {
-    const failedAt = new Date().toISOString();
-    await env.DB.batch([
-      env.DB.prepare("UPDATE submissions SET status = 'failed', updated_at = ? WHERE id = ?").bind(failedAt, submissionId),
-      env.DB.prepare("UPDATE jobs SET status = 'failed', error = 'queue_unavailable', updated_at = ? WHERE submission_id = ?").bind(failedAt, submissionId)
-    ]);
+    await failSubmissionSetup(env, submissionId, 'queue_unavailable');
     return json({ error: 'queue_unavailable' }, 503);
   }
 
@@ -190,6 +244,22 @@ async function enqueueSubmission(env, submissionId, reviewToken) {
     },
     202
   );
+}
+
+async function failSubmissionSetup(env, submissionId, errorCode) {
+  const failedAt = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE submissions SET status = 'failed', updated_at = ? WHERE id = ?").bind(failedAt, submissionId),
+      env.DB.prepare("UPDATE jobs SET status = 'failed', error = ?, updated_at = ? WHERE submission_id = ?").bind(
+        errorCode,
+        failedAt,
+        submissionId
+      )
+    ]);
+  } catch {
+    return;
+  }
 }
 
 async function fetchCandidateSource(sourceUrl, apiKey) {
@@ -256,6 +326,94 @@ async function readLimitedText(response, maxBytes) {
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(bytes);
+}
+
+async function readLimitedBytes(request, maxBytes) {
+  const contentLength = request.headers.get('content-length');
+  if (contentLength && !/^\d+$/.test(contentLength)) return json({ error: 'resume_content_invalid' }, 400);
+  if (contentLength && Number(contentLength) > maxBytes) return json({ error: 'resume_too_large', maxBytes }, 413);
+  if (!request.body) return new Uint8Array();
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      return json({ error: 'resume_too_large', maxBytes }, 413);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function isPlainTextContentType(value) {
+  return /^text\/plain(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?$/i.test((value || '').trim());
+}
+
+function isSafeResumeFilename(value) {
+  if (typeof value !== 'string') return false;
+  const filename = value.normalize('NFKC').trim();
+  if (!filename || byteLength(filename) > MAX_RESUME_FILENAME_BYTES || /[\/\\\u0000-\u001f\u007f]/.test(filename)) return false;
+  const stem = filename.slice(0, -4);
+  return filename.toLowerCase().endsWith('.txt') && stem.length > 0 && !stem.includes('.') && /^[A-Za-z0-9][A-Za-z0-9 _()-]*$/.test(stem);
+}
+
+function decodeResumeText(bytes) {
+  if (bytes.byteLength === 0 || hasBlockedFileSignature(bytes)) return null;
+
+  let value;
+  try {
+    value = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
+  } catch {
+    return null;
+  }
+
+  if (!value.trim() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return null;
+  if (/<\/?[a-z][^>\n]{0,200}>/i.test(value) || /<!doctype\s+html\b/i.test(value)) return null;
+  return value.trim();
+}
+
+function hasBlockedFileSignature(bytes) {
+  const signatures = [
+    [0x25, 0x50, 0x44, 0x46, 0x2d],
+    [0x50, 0x4b, 0x03, 0x04],
+    [0x50, 0x4b, 0x05, 0x06],
+    [0x50, 0x4b, 0x07, 0x08],
+    [0x4d, 0x5a],
+    [0x7f, 0x45, 0x4c, 0x46],
+    [0x1f, 0x8b],
+    [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07],
+    [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c],
+    [0x89, 0x50, 0x4e, 0x47],
+    [0xff, 0xd8, 0xff],
+    [0x47, 0x49, 0x46, 0x38],
+    [0x00, 0x61, 0x73, 0x6d],
+    [0xca, 0xfe, 0xba, 0xbe],
+    [0xfe, 0xed, 0xfa, 0xce],
+    [0xfe, 0xed, 0xfa, 0xcf],
+    [0xce, 0xfa, 0xed, 0xfe],
+    [0xcf, 0xfa, 0xed, 0xfe]
+  ];
+  const leadingBytes = bytes.subarray(0, Math.min(bytes.byteLength, 64));
+  return signatures.some((signature) => containsBytes(leadingBytes, signature));
+}
+
+function containsBytes(bytes, signature) {
+  for (let offset = 0; offset <= bytes.byteLength - signature.length; offset += 1) {
+    if (signature.every((value, index) => bytes[offset + index] === value)) return true;
+  }
+  return false;
 }
 
 function isWebAccessEnvelope(value) {
@@ -594,6 +752,7 @@ async function processSubmissionMessage(message, env) {
     const submission = await env.DB.prepare('SELECT source_text, status FROM submissions WHERE id = ?').bind(submissionId).first();
     if (!submission) throw new Error('submission_not_found');
     if (submission.status === 'review_ready') {
+      await deleteResumeObject(env, submissionId);
       message.ack?.();
       return;
     }
@@ -638,14 +797,32 @@ async function processSubmissionMessage(message, env) {
       env.DB.prepare("UPDATE submissions SET status = 'review_ready', source_text = '', updated_at = ? WHERE id = ?").bind(completedAt, submissionId),
       env.DB.prepare("UPDATE jobs SET status = 'completed', error = NULL, updated_at = ? WHERE submission_id = ?").bind(completedAt, submissionId)
     ]);
+    await deleteResumeObject(env, submissionId);
     message.ack?.();
-  } catch (error) {
+  } catch {
     const failedAt = new Date().toISOString();
     await env.DB.batch([
       env.DB.prepare("UPDATE submissions SET status = 'failed', updated_at = ? WHERE id = ?").bind(failedAt, submissionId),
-      env.DB.prepare('UPDATE jobs SET status = \'failed\', error = ?, updated_at = ? WHERE submission_id = ?').bind(String(error.message || error).slice(0, 500), failedAt, submissionId)
+      env.DB.prepare("UPDATE jobs SET status = 'failed', error = 'extraction_failed', updated_at = ? WHERE submission_id = ?").bind(failedAt, submissionId)
     ]);
     message.retry?.();
+  }
+}
+
+async function resumeObjectKey(submissionId) {
+  const match = submissionId.match(/^resume-([a-f0-9]{64})$/);
+  if (!match) return '';
+  const keyHash = await hashToken(`resume-object:${match[1]}`);
+  return `resume-staging/${keyHash}`;
+}
+
+async function deleteResumeObject(env, submissionId) {
+  const objectKey = await resumeObjectKey(submissionId);
+  if (!objectKey || !env.RESUME_STAGING) return;
+  try {
+    await env.RESUME_STAGING.delete(objectKey);
+  } catch {
+    return;
   }
 }
 
@@ -810,7 +987,11 @@ function createToken() {
 }
 
 async function hashToken(token) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return hashBytes(new TextEncoder().encode(token));
+}
+
+async function hashBytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -833,4 +1014,4 @@ function json(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
 }
 
-export { MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl };
+export { MAX_RESUME_BYTES, MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl };

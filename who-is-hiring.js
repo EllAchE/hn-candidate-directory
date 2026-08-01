@@ -72,6 +72,7 @@ el('run-import').addEventListener('click', async () => {
   const sourceKind = document.querySelector('[name="import-source"]:checked')?.value || 'text';
   const sourceUrl = el('import-url').value.trim();
   const sourceText = el('import-text').value.trim();
+  const resumeFile = el('import-resume').files[0];
   if (sourceKind === 'url' && !sourceUrl) {
     showImportMessage('Enter a public LinkedIn profile URL before creating a draft.', true);
     return;
@@ -80,10 +81,19 @@ el('run-import').addEventListener('click', async () => {
     showImportMessage('Paste source text before creating a draft.', true);
     return;
   }
+  if (sourceKind === 'resume' && !resumeFile) {
+    showImportMessage('Choose a UTF-8 plain-text resume before creating a draft.', true);
+    return;
+  }
 
   setImportBusy(true, 'Submitting privately…');
   try {
-    const submission = sourceKind === 'url' ? await submitSourceUrl(sourceUrl) : await submitSourceText(sourceText);
+    const submission =
+      sourceKind === 'url'
+        ? await submitSourceUrl(sourceUrl)
+        : sourceKind === 'resume'
+          ? await submitResume(resumeFile)
+          : await submitSourceText(sourceText);
     if (!submission) {
       activeReview = { local: true };
       renderReviewDraft(extractLocalDraft(sourceText));
@@ -257,9 +267,33 @@ async function submitSourceUrl(url) {
   return response.json();
 }
 
+async function submitResume(file) {
+  if (file.type !== 'text/plain' || !/^[A-Za-z0-9][A-Za-z0-9 _()-]*\.txt$/i.test(file.name)) {
+    throw new Error('Resume upload supports UTF-8 plain-text .txt files with a simple ASCII filename only.');
+  }
+  if (file.size > 100_000) throw new Error('Resume upload is limited to 100,000 bytes.');
+
+  let response;
+  try {
+    response = await fetch(apiPath('/api/submissions/resume'), {
+      method: 'POST',
+      headers: { 'content-type': file.type, 'x-resume-filename': file.name },
+      body: file
+    });
+  } catch {
+    throw new Error('Resume upload requires the connected private Worker service.');
+  }
+  if ([404, 405, 501].includes(response.status)) {
+    throw new Error('Resume upload requires the connected private Worker service.');
+  }
+  if (!response.ok) throw new Error(await apiError(response, 'Resume upload failed'));
+  return response.json();
+}
+
 function syncImportSource() {
   const sourceKind = document.querySelector('[name="import-source"]:checked')?.value || 'text';
   el('import-url-panel').hidden = sourceKind !== 'url';
+  el('import-resume-panel').hidden = sourceKind !== 'resume';
   el('import-text-panel').hidden = sourceKind !== 'text';
 }
 
