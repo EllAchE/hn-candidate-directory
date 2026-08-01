@@ -1,0 +1,24 @@
+name = "hn-candidate-directory"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[assets]
+directory = "."
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hn-candidate-directory"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "SUBMISSION_QUEUE"
+queue = "hn-candidate-submissions"
+
+[[queues.consumers]]
+queue = "hn-candidate-submissions"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
