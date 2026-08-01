@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import worker, { MAX_RESUME_BYTES, MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl } from '../worker.js';
+import { REDACTION_MARKER } from '../sensitive-data.js';
 import { createEnvironment } from './memory-d1.js';
 
 describe('source-text review drafts', () => {
@@ -701,6 +702,137 @@ describe('candidate consent decisions', () => {
   });
 });
 
+describe('shared sensitive-field safety', () => {
+  test('produces redacted private drafts for source text, LinkedIn URL, and plain-text resume ingestion', async () => {
+    const textEnv = createEnvironment();
+    const textSecrets = ['text.candidate@example.com', '+1 (415) 555-2671', 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456'];
+    const textSubmission = await submit(
+      textEnv,
+      candidateSource('Text Candidate', `Contact ${textSecrets[0]} or ${textSecrets[1]}`, textSecrets[2])
+    );
+    await processQueuedSubmission(textEnv);
+    const textReview = await expectRedactedReview(textEnv, textSubmission, textSecrets);
+    const textPublicationResponse = await decide(textEnv, textSubmission, {
+      decision: 'publish',
+      draft: editableDraft(textReview.draft)
+    });
+    expect(textPublicationResponse.status).toBe(200);
+    const textPublication = await textPublicationResponse.text();
+    expect(textPublication).toContain(REDACTION_MARKER);
+    for (const secret of textSecrets) expect(textPublication).not.toContain(secret);
+
+    const urlEnv = createEnvironment();
+    urlEnv.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+    const urlSecrets = ['url-secret-value', '123-45-6789'];
+    await withWebAccessStub(
+      () => webAccessResponse(candidateSource('URL Candidate', `Password: ${urlSecrets[0]} and SSN ${urlSecrets[1]}`, 'Go')),
+      async () => {
+        const response = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/redacted-url-candidate' }),
+          urlEnv
+        );
+        expect(response.status).toBe(202);
+        const submission = await response.json();
+        await processQueuedSubmission(urlEnv);
+        await expectRedactedReview(urlEnv, submission, urlSecrets);
+      }
+    );
+
+    const resumeEnv = createEnvironment();
+    const resumeSecrets = ['4111 1111 1111 1111', '+44 20 7946 0958'];
+    const resumeSource = candidateSource('Resume Candidate', `Payment ${resumeSecrets[0]} and mobile ${resumeSecrets[1]}`, 'Rust');
+    const resumeResponse = await worker.fetch(resumeRequest(resumeSource), resumeEnv);
+    expect(resumeResponse.status).toBe(202);
+    const resumeSubmission = await resumeResponse.json();
+    expect(new TextDecoder().decode(resumeEnv.RESUME_STAGING.puts[0].bytes)).toBe(resumeSource);
+    await processQueuedSubmission(resumeEnv);
+    await expectRedactedReview(resumeEnv, resumeSubmission, resumeSecrets);
+    expect(resumeEnv.RESUME_STAGING.objects.size).toBe(0);
+  });
+
+  test('sanitizes a pre-existing private revision before returning it for review', async () => {
+    const env = createEnvironment();
+    const submission = await submit(env, candidateSource('Legacy Private Candidate', 'Safe summary', 'Go'));
+    await processQueuedSubmission(env);
+    const persisted = env.DB.revisions.get(submission.submissionId);
+    const legacySecrets = ['legacy.private@example.com', 'password=legacy-private-value'];
+    persisted.summary = `Contact ${legacySecrets[0]}`;
+    persisted.skills_json = JSON.stringify(['Go', legacySecrets[1], { secret: 'nested-object-value' }]);
+
+    expect(persisted.summary).toContain(legacySecrets[0]);
+    const reviewText = JSON.stringify((await privateReview(env, submission)).draft);
+    expect(reviewText).toContain(REDACTION_MARKER);
+    expect(reviewText).not.toContain('nested-object-value');
+    for (const secret of legacySecrets) expect(reviewText).not.toContain(secret);
+  });
+
+  test('rejects sensitive review edits and publishes safe candidate-approved fields unchanged', async () => {
+    const env = createEnvironment();
+    const submission = await submit(env, candidateSource('Approved Candidate', 'Safe summary', 'Go'));
+    await processQueuedSubmission(env);
+    const extracted = editableDraft((await privateReview(env, submission)).draft);
+    const secret = 'candidate.edit@example.com';
+    const sensitiveDraft = { ...extracted, summary: `Reach me at ${secret}` };
+
+    const saveResponse = await worker.fetch(
+      apiRequest(`/api/reviews/${submission.submissionId}`, 'PATCH', sensitiveDraft, submission.reviewToken),
+      env
+    );
+    expect(saveResponse.status).toBe(400);
+    expect(await saveResponse.text()).toBe('{"error":"sensitive_review_draft"}');
+    expect(env.DB.revisions.get(submission.submissionId).summary).toBe('Safe summary');
+
+    const rejectedPublication = await decide(env, submission, { decision: 'publish', draft: sensitiveDraft });
+    expect(rejectedPublication.status).toBe(400);
+    expect(await rejectedPublication.text()).toBe('{"error":"sensitive_review_draft"}');
+    expect(env.DB.revisions.get(submission.submissionId).status).toBe('review_ready');
+
+    const approvedDraft = {
+      ...extracted,
+      name: 'Ada Lovelace',
+      role: 'Staff Engineer at 37signals',
+      summary: 'C++, Go 1.22.3, ISO 27001, SOC 2, 2021 - 2024, https://ada.dev/portfolio?ref=hn',
+      location: 'Toronto, Canada 02139',
+      universities: ['MIT'],
+      companies: ['37signals'],
+      skills: ['C++', 'Go 1.22.3'],
+      dateRanges: ['2021 - 2024']
+    };
+    const publicationResponse = await decide(env, submission, { decision: 'publish', draft: approvedDraft });
+    expect(publicationResponse.status).toBe(200);
+    expect((await publicationResponse.json()).candidate).toMatchObject({
+      name: approvedDraft.name,
+      role: approvedDraft.role,
+      summary: approvedDraft.summary,
+      location: approvedDraft.location,
+      universities: approvedDraft.universities,
+      companies: approvedDraft.companies,
+      skills: approvedDraft.skills,
+      dateRanges: approvedDraft.dateRanges
+    });
+  });
+
+  test('sanitizes pre-existing published rows in list and idempotent decision responses', async () => {
+    const env = createEnvironment();
+    const publication = await publishSubmission(env, candidateSource('Legacy Public Candidate', 'Safe summary', 'Go'));
+    const persisted = env.DB.revisions.get(publication.submission.submissionId);
+    const legacySecrets = ['legacy.public@example.com', 'sk-live-secret-value-1234567890', '+1 (212) 555-0198'];
+    persisted.summary = `Contact ${legacySecrets[0]}`;
+    persisted.skills_json = JSON.stringify(['Go', legacySecrets[1]]);
+    persisted.availability = legacySecrets[2];
+
+    const publicText = JSON.stringify(await publicCandidates(env));
+    expect(publicText).toContain(REDACTION_MARKER);
+    for (const secret of legacySecrets) expect(publicText).not.toContain(secret);
+
+    const retryResponse = await decide(env, publication.submission, { decision: 'publish', draft: {} });
+    expect(retryResponse.status).toBe(200);
+    const retryText = await retryResponse.text();
+    expect(retryText).toContain(REDACTION_MARKER);
+    for (const secret of legacySecrets) expect(retryText).not.toContain(secret);
+  });
+});
+
 describe('published candidate management', () => {
   test('binds a management token to the exact candidate without changing visibility on failed authorization', async () => {
     const env = createEnvironment();
@@ -820,6 +952,29 @@ test('extractProfile returns normalized collection fields', () => {
     dateRanges: ['2019 to present']
   });
 });
+
+function candidateSource(name, summary, skill) {
+  return [
+    `Name: ${name}`,
+    'Role: Platform engineer',
+    'Location: Toronto, Canada',
+    'Work mode: Remote',
+    'Availability: Immediate',
+    'Education: University of Waterloo',
+    'Companies: Example Systems',
+    `Skills: ${skill}`,
+    `Summary: ${summary}`
+  ].join('\n');
+}
+
+async function expectRedactedReview(env, submission, secrets) {
+  const review = await privateReview(env, submission);
+  const reviewText = JSON.stringify(review.draft);
+  expect(review.status).toBe('review_ready');
+  expect(reviewText).toContain(REDACTION_MARKER);
+  for (const secret of secrets) expect(reviewText).not.toContain(secret);
+  return review;
+}
 
 async function privateReview(env, submission) {
   const response = await worker.fetch(apiRequest(`/api/reviews/${submission.submissionId}`, 'GET', null, submission.reviewToken), env);

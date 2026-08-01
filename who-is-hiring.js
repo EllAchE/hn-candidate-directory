@@ -96,7 +96,7 @@ el('run-import').addEventListener('click', async () => {
           : await submitSourceText(sourceText);
     if (!submission) {
       activeReview = { local: true };
-      renderReviewDraft(extractLocalDraft(sourceText));
+      renderReviewDraft(await extractLocalDraft(sourceText));
       return;
     }
 
@@ -386,12 +386,13 @@ function draftFromForm(form) {
   };
 }
 
-function extractLocalDraft(sourceText) {
+async function extractLocalDraft(sourceText) {
   const lines = sourceText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const labeled = Object.fromEntries(lines.map((line) => line.match(/^([^:]{2,30}):\s*(.+)$/)).filter(Boolean).map((match) => [match[1].toLowerCase(), match[2].trim()]));
   const valueFor = (...labels) => labels.map((label) => labeled[label]).find(Boolean) || '';
   const listFor = (...labels) => valueFor(...labels).split(/[,;|]/).map((item) => item.trim()).filter(Boolean);
-  return {
+  const { sanitizeCandidateDraft } = await import('./sensitive-data.js');
+  return sanitizeCandidateDraft({
     name: valueFor('name') || 'Name needs review',
     role: valueFor('role', 'title') || lines[0] || 'Role needs review',
     summary: valueFor('summary', 'about') || lines.slice(0, 3).join(' '),
@@ -402,7 +403,7 @@ function extractLocalDraft(sourceText) {
     companies: listFor('companies', 'company', 'previously', 'experience'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: [...sourceText.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map((match) => match[0])
-  };
+  }).draft;
 }
 
 function showImportMessage(message, error = false) {

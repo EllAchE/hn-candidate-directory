@@ -1,3 +1,5 @@
+import { sanitizeCandidateDraft } from './sensitive-data.js';
+
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
 const MAX_URL_REQUEST_BYTES = 4_096;
@@ -523,6 +525,7 @@ async function updateReview(request, env, submissionId) {
   if (body instanceof Response) return body;
   const draft = validateDraft(body);
   if (!draft) return json({ error: 'invalid_review_draft' }, 400);
+  if (sanitizeCandidateDraft(draft).detected) return json({ error: 'sensitive_review_draft' }, 400);
 
   const updatedAt = new Date().toISOString();
   const updateResult = await env.DB.prepare(
@@ -576,6 +579,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
 
   const approvedDraft = validateDraft(draftValue);
   if (!approvedDraft) return json({ error: 'approved_draft_required' }, 400);
+  if (sanitizeCandidateDraft(approvedDraft).detected) return json({ error: 'sensitive_review_draft' }, 400);
 
   const publishedAt = new Date().toISOString();
   const updateResult = await env.DB.prepare(
@@ -875,7 +879,7 @@ function extractProfile(sourceText) {
   const listFor = (...labels) => splitList(valueFor(...labels));
   const dateRanges = [...sourceText.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map((match) => match[0]);
 
-  return {
+  return sanitizeCandidateDraft({
     name: valueFor('name') || 'Name needs review',
     role: valueFor('role', 'title') || lines[0] || 'Role needs review',
     summary: valueFor('summary', 'about') || lines.slice(0, 3).join(' ').slice(0, 1_500),
@@ -886,7 +890,7 @@ function extractProfile(sourceText) {
     companies: listFor('companies', 'company', 'previously', 'experience', 'employers'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: unique(dateRanges).slice(0, 20)
-  };
+  }).draft;
 }
 
 function validateDraft(value) {
@@ -913,9 +917,39 @@ function validateDraft(value) {
 }
 
 function toReviewDraft(row) {
+  const sanitized = candidateDraftFromRow(row);
   return {
     id: row.id,
     status: row.status,
+    ...sanitized,
+    updatedAt: row.updated_at
+  };
+}
+
+function toPublicCandidate(row) {
+  const sanitized = candidateDraftFromRow(row);
+  return {
+    id: row.id,
+    name: sanitized.name,
+    role: sanitized.role,
+    summary: sanitized.summary,
+    location: sanitized.location,
+    mode: sanitized.workMode,
+    availability: sanitized.availability,
+    university: sanitized.universities[0] || 'Not specified',
+    universities: sanitized.universities,
+    companies: sanitized.companies,
+    skills: sanitized.skills,
+    dateRanges: sanitized.dateRanges,
+    source: 'Candidate submitted',
+    enriched: true,
+    posted: 0,
+    publishedAt: row.published_at
+  };
+}
+
+function candidateDraftFromRow(row) {
+  return sanitizeCandidateDraft({
     name: row.name,
     role: row.role,
     summary: row.summary,
@@ -925,31 +959,8 @@ function toReviewDraft(row) {
     universities: parseList(row.universities_json),
     companies: parseList(row.companies_json),
     skills: parseList(row.skills_json),
-    dateRanges: parseList(row.date_ranges_json),
-    updatedAt: row.updated_at
-  };
-}
-
-function toPublicCandidate(row) {
-  const universities = parseList(row.universities_json);
-  return {
-    id: row.id,
-    name: row.name,
-    role: row.role,
-    summary: row.summary,
-    location: row.location,
-    mode: row.work_mode,
-    availability: row.availability,
-    university: universities[0] || 'Not specified',
-    universities,
-    companies: parseList(row.companies_json),
-    skills: parseList(row.skills_json),
-    dateRanges: parseList(row.date_ranges_json),
-    source: 'Candidate submitted',
-    enriched: true,
-    posted: 0,
-    publishedAt: row.published_at
-  };
+    dateRanges: parseList(row.date_ranges_json)
+  }).draft;
 }
 
 async function readJson(request, maxBytes) {
@@ -975,7 +986,7 @@ function unique(values) {
 function parseList(value) {
   try {
     const parsed = JSON.parse(value || '[]');
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
   } catch {
     return [];
   }
