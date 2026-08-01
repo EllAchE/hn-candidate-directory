@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import worker, { MAX_SOURCE_BYTES, extractProfile } from '../worker.js';
+import worker, { MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl } from '../worker.js';
 import { createEnvironment } from './memory-d1.js';
 
 describe('source-text review drafts', () => {
@@ -97,6 +97,251 @@ describe('source-text review drafts', () => {
 
     const reviewResponse = await worker.fetch(apiRequest(`/api/reviews/${submission.submissionId}`, 'GET', null, 'wrong-token'), env);
     expect(reviewResponse.status).toBe(403);
+  });
+});
+
+describe('allowlisted URL review drafts', () => {
+  test('retrieves one canonical LinkedIn page through String Web Access and preserves private review and consent', async () => {
+    const env = createEnvironment();
+    env.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+    const sourceText = [
+      'Name: Web Candidate',
+      'Role: Reliability engineer',
+      'Location: Berlin, Germany',
+      'Work mode: Remote',
+      'Companies: Example Systems',
+      'Skills: Go, SRE',
+      'Summary: I build resilient infrastructure.'
+    ].join('\n');
+    const sourceHtml = `<html><head><style>.secret { display: none }</style></head><body>${sourceText
+      .split('\n')
+      .map((line) => `<p>${line}</p>`)
+      .join('')}</body></html>`;
+
+    await withWebAccessStub(
+      () => webAccessResponse(sourceHtml),
+      async (requests) => {
+        const response = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://linkedin.com/in/web-candidate/' }),
+          env
+        );
+        expect(response.status).toBe(202);
+        const submission = await response.json();
+        expect(submission.status).toBe('submitted');
+        expect(submission.submissionId).toStartWith('url-');
+        const storedSubmission = env.DB.submissions.get(submission.submissionId);
+        expect(storedSubmission).toMatchObject({ source_kind: 'text', source_text: sourceText });
+        expect(storedSubmission.source_url).toBeUndefined();
+        expect(env.SUBMISSION_QUEUE.messages).toEqual([{ submissionId: submission.submissionId }]);
+        expect(await publicCandidates(env)).toEqual([]);
+
+        expect(STRING_WEB_ACCESS_LIMITS).toMatchObject({ requests: 1, pages: 1 });
+        expect(requests).toHaveLength(1);
+        expect(requests[0].url).toBe('https://request.usestring.ai/v1/fetch');
+        expect(requests[0].init.method).toBe('POST');
+        expect(requests[0].init.headers.authorization).toBe('Bearer server-only-secret');
+        expect(JSON.parse(requests[0].init.body)).toEqual({
+          url: 'https://www.linkedin.com/in/web-candidate',
+          method: 'GET',
+          format: 'json',
+          executeJS: false,
+          solveCaptcha: false
+        });
+
+        await processQueuedSubmission(env);
+        expect(env.DB.submissions.get(submission.submissionId).source_text).toBe('');
+        const review = await privateReview(env, submission);
+        expect(review).toMatchObject({
+          status: 'review_ready',
+          draft: { name: 'Web Candidate', role: 'Reliability engineer', skills: ['Go', 'SRE'] }
+        });
+        expect(await publicCandidates(env)).toEqual([]);
+
+        const approvedDraft = editableDraft(review.draft);
+        const publicationResponse = await decide(env, submission, { decision: 'publish', draft: approvedDraft });
+        expect(publicationResponse.status).toBe(200);
+        expect(await publicCandidates(env)).toEqual([expect.objectContaining({ name: 'Web Candidate', skills: ['Go', 'SRE'] })]);
+      }
+    );
+  });
+
+  test('rejects non-allowlisted, network-sensitive, and ambiguous URLs before any upstream request', async () => {
+    const invalidUrls = [
+      'http://www.linkedin.com/in/candidate',
+      'https://user:password@www.linkedin.com/in/candidate',
+      'https://www.linkedin.com/in/candidate#details',
+      'https://www.linkedin.com/in/candidate?tracking=secret',
+      'https://www.linkedin.com:8443/in/candidate',
+      'https://127.0.0.1/in/candidate',
+      'https://10.0.0.8/in/candidate',
+      'https://169.254.169.254/latest/meta-data',
+      'https://[::1]/in/candidate',
+      'https://localhost/in/candidate',
+      'https://metadata.google.internal/computeMetadata/v1',
+      'https://linkedin.example/in/candidate',
+      'https://www.linkedin.com/company/example',
+      'https://www.linkedin.com/in/a',
+      'not a url'
+    ];
+    const env = createEnvironment();
+    env.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+
+    await withWebAccessStub(
+      () => {
+        throw new Error('upstream must not be called');
+      },
+      async (requests) => {
+        for (const url of invalidUrls) {
+          expect(validateCandidateSourceUrl(url)).toBeNull();
+          const response = await worker.fetch(apiRequest('/api/submissions/url', 'POST', { url }), env);
+          expect(response.status).toBe(400);
+          expect(await response.json()).toEqual({ error: 'url_not_allowed' });
+        }
+        expect(requests).toEqual([]);
+        expect(env.DB.submissions.size).toBe(0);
+
+        const oversizedRequest = apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/candidate' });
+        oversizedRequest.headers.set('content-length', '4097');
+        const oversizedResponse = await worker.fetch(oversizedRequest, env);
+        expect(oversizedResponse.status).toBe(413);
+        expect(await oversizedResponse.json()).toEqual({ error: 'request_too_large' });
+        expect(requests).toEqual([]);
+      }
+    );
+
+    expect(validateCandidateSourceUrl('https://linkedin.com/in/Candidate-123/')).toBe(
+      'https://www.linkedin.com/in/Candidate-123'
+    );
+  });
+
+  test('deduplicates a canonical URL durably after source clearing and under concurrent insertion', async () => {
+    const sourceText = 'Name: Deduplicated Candidate\nRole: Backend engineer';
+
+    await withWebAccessStub(
+      () => webAccessResponse(sourceText),
+      async (requests) => {
+        const durableEnv = createEnvironment();
+        durableEnv.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+        const firstResponse = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://linkedin.com/in/deduplicated-candidate/' }),
+          durableEnv
+        );
+        expect(firstResponse.status).toBe(202);
+        const first = await firstResponse.json();
+        await processQueuedSubmission(durableEnv);
+        expect(durableEnv.DB.submissions.get(first.submissionId).source_text).toBe('');
+
+        const repeatedResponse = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/deduplicated-candidate' }),
+          durableEnv
+        );
+        expect(repeatedResponse.status).toBe(409);
+        expect(await repeatedResponse.json()).toEqual({ error: 'duplicate_url_submission' });
+        expect(durableEnv.DB.submissions.size).toBe(1);
+        expect(durableEnv.SUBMISSION_QUEUE.messages).toHaveLength(1);
+
+        const concurrentEnv = createEnvironment();
+        concurrentEnv.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+        const concurrentResponses = await Promise.all([
+          worker.fetch(apiRequest('/api/submissions/url', 'POST', { url: 'https://linkedin.com/in/race-candidate/' }), concurrentEnv),
+          worker.fetch(apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/race-candidate' }), concurrentEnv)
+        ]);
+        expect(concurrentResponses.map((response) => response.status).sort()).toEqual([202, 409]);
+        expect(concurrentEnv.DB.submissions.size).toBe(1);
+        expect(concurrentEnv.DB.jobs.size).toBe(1);
+        expect(concurrentEnv.SUBMISSION_QUEUE.messages).toHaveLength(1);
+        expect(requests).toHaveLength(3);
+      }
+    );
+  });
+
+  test('recycles only a failed URL submission after a Queue outage', async () => {
+    const env = createEnvironment();
+    env.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+    let queueAvailable = false;
+    env.SUBMISSION_QUEUE.send = async function (message) {
+      if (!queueAvailable) throw new Error('queue secret detail');
+      this.messages.push(message);
+    };
+
+    await withWebAccessStub(
+      () => webAccessResponse('Name: Retry Candidate\nRole: Data engineer'),
+      async (requests) => {
+        const firstResponse = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/retry-candidate' }),
+          env
+        );
+        expect(firstResponse.status).toBe(503);
+        expect(await firstResponse.json()).toEqual({ error: 'queue_unavailable' });
+        const submissionId = [...env.DB.submissions.keys()][0];
+        expect(env.DB.submissions.get(submissionId).status).toBe('failed');
+        expect(env.DB.jobs.get(submissionId)).toMatchObject({ status: 'failed', error: 'queue_unavailable' });
+
+        queueAvailable = true;
+        const retryResponse = await worker.fetch(
+          apiRequest('/api/submissions/url', 'POST', { url: 'https://linkedin.com/in/retry-candidate/' }),
+          env
+        );
+        expect(retryResponse.status).toBe(202);
+        expect(await retryResponse.json()).toMatchObject({ submissionId, status: 'submitted' });
+        expect(env.DB.submissions.get(submissionId).status).toBe('submitted');
+        expect(env.DB.jobs.get(submissionId)).toMatchObject({ status: 'queued', attempts: 0, error: null });
+        expect(env.SUBMISSION_QUEUE.messages).toEqual([{ submissionId }]);
+        expect(requests).toHaveLength(2);
+      }
+    );
+  });
+
+  test('fails closed on redirects, malformed envelopes, timeouts, and byte-limit breaches without leaking details', async () => {
+    const env = createEnvironment();
+    env.UNBLOCKER_ORG_API_KEY = 'server-only-secret';
+    const secret = 'upstream-secret-cookie';
+    const targetDetail = 'http://169.254.169.254/latest/meta-data';
+    const attempts = [
+      () => webAccessResponse(secret, { statusCode: 302, headers: { location: targetDetail } }),
+      () => new Response(JSON.stringify({ statusCode: 200, headers: {}, data: { secret } })),
+      () => webAccessResponse(secret, { headers: { 'content-type': 'application/pdf' } }),
+      () => new Response(`${secret} ${targetDetail}`, { status: 502 }),
+      () => {
+        throw new DOMException(`${secret} ${targetDetail}`, 'AbortError');
+      },
+      () => webAccessResponse('x'.repeat(MAX_SOURCE_BYTES + 1)),
+      () =>
+        new Response(JSON.stringify({ statusCode: 200, headers: {}, data: secret }), {
+          headers: { 'content-length': String(STRING_WEB_ACCESS_LIMITS.responseBytes + 1) }
+        }),
+      () => new Response('x'.repeat(STRING_WEB_ACCESS_LIMITS.responseBytes + 1))
+    ];
+    const expectedStatuses = [502, 502, 502, 502, 504, 413, 413, 413];
+    const logs = [];
+    const originalConsole = { error: console.error, log: console.log, warn: console.warn };
+    console.error = (...values) => logs.push(values.join(' '));
+    console.log = (...values) => logs.push(values.join(' '));
+    console.warn = (...values) => logs.push(values.join(' '));
+
+    try {
+      for (let index = 0; index < attempts.length; index += 1) {
+        await withWebAccessStub(attempts[index], async () => {
+          const response = await worker.fetch(
+            apiRequest('/api/submissions/url', 'POST', { url: 'https://www.linkedin.com/in/private-candidate' }),
+            env
+          );
+          expect(response.status).toBe(expectedStatuses[index]);
+          const responseText = await response.text();
+          expect(responseText).not.toContain(secret);
+          expect(responseText).not.toContain(targetDetail);
+          expect(responseText).not.toContain('server-only-secret');
+        });
+      }
+    } finally {
+      console.error = originalConsole.error;
+      console.log = originalConsole.log;
+      console.warn = originalConsole.warn;
+    }
+
+    expect(logs).toEqual([]);
+    expect(env.DB.submissions.size).toBe(0);
+    expect(env.SUBMISSION_QUEUE.messages).toEqual([]);
   });
 });
 
@@ -398,4 +643,29 @@ function apiRequest(path, method = 'GET', body = null, token = '') {
     headers,
     body: body === null ? undefined : JSON.stringify(body)
   });
+}
+
+function webAccessResponse(data, overrides = {}) {
+  return new Response(
+    JSON.stringify({
+      statusCode: overrides.statusCode ?? 200,
+      headers: overrides.headers ?? { 'content-type': 'text/html; charset=utf-8' },
+      data
+    }),
+    { headers: { 'content-type': 'application/json' } }
+  );
+}
+
+async function withWebAccessStub(handler, callback) {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init });
+    return handler(url, init);
+  };
+  try {
+    return await callback(requests);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }

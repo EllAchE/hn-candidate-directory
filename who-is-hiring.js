@@ -51,6 +51,7 @@ document.querySelectorAll('[data-open-import]').forEach((button) => button.addEv
   el('import-result').classList.remove('review-ready');
   openDialog(el('import-dialog'));
 }));
+document.querySelectorAll('[name="import-source"]').forEach((input) => input.addEventListener('change', syncImportSource));
 document.querySelectorAll('[data-open-request]').forEach((button) => button.addEventListener('click', () => openManagementDialog()));
 document.addEventListener('click', (event) => {
   if (event.target.matches('[data-close-dialog]')) closeDialogs();
@@ -68,15 +69,21 @@ document.addEventListener('click', (event) => {
   }
 });
 el('run-import').addEventListener('click', async () => {
+  const sourceKind = document.querySelector('[name="import-source"]:checked')?.value || 'text';
+  const sourceUrl = el('import-url').value.trim();
   const sourceText = el('import-text').value.trim();
-  if (!sourceText) {
+  if (sourceKind === 'url' && !sourceUrl) {
+    showImportMessage('Enter a public LinkedIn profile URL before creating a draft.', true);
+    return;
+  }
+  if (sourceKind === 'text' && !sourceText) {
     showImportMessage('Paste source text before creating a draft.', true);
     return;
   }
 
   setImportBusy(true, 'Submitting privately…');
   try {
-    const submission = await submitSourceText(sourceText);
+    const submission = sourceKind === 'url' ? await submitSourceUrl(sourceUrl) : await submitSourceText(sourceText);
     if (!submission) {
       activeReview = { local: true };
       renderReviewDraft(extractLocalDraft(sourceText));
@@ -230,6 +237,30 @@ async function submitSourceText(sourceText) {
   if ([404, 405, 501].includes(response.status)) return null;
   if (!response.ok) throw new Error(await apiError(response, 'Submission failed'));
   return response.json();
+}
+
+async function submitSourceUrl(url) {
+  let response;
+  try {
+    response = await fetch(apiPath('/api/submissions/url'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+  } catch {
+    throw new Error('LinkedIn URL submission requires the connected private Worker service.');
+  }
+  if ([404, 405, 501].includes(response.status)) {
+    throw new Error('LinkedIn URL submission requires the connected private Worker service.');
+  }
+  if (!response.ok) throw new Error(await apiError(response, 'URL submission failed'));
+  return response.json();
+}
+
+function syncImportSource() {
+  const sourceKind = document.querySelector('[name="import-source"]:checked')?.value || 'text';
+  el('import-url-panel').hidden = sourceKind !== 'url';
+  el('import-text-panel').hidden = sourceKind !== 'text';
 }
 
 async function waitForReview(reviewAccess) {
