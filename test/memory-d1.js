@@ -46,6 +46,18 @@ class MemoryStatement {
       const submission = this.database.submissions.get(this.values[0]);
       return submission ? select(submission, ['id', 'review_token_hash', 'status']) : null;
     }
+    if (this.sql.includes('JOIN submissions s ON s.id = r.submission_id') && this.sql.includes('WHERE r.id = ?')) {
+      const revision = revisionById(this.database, this.values[0]);
+      const submission = revision ? this.database.submissions.get(revision.submission_id) : null;
+      return revision && submission
+        ? {
+            candidate_id: revision.id,
+            submission_id: revision.submission_id,
+            status: revision.status,
+            review_token_hash: submission.review_token_hash
+          }
+        : null;
+    }
     if (this.sql.includes('FROM profile_revisions') && this.sql.includes('WHERE submission_id = ?')) {
       return this.database.revisions.get(this.values[0]) || null;
     }
@@ -183,6 +195,20 @@ class MemoryStatement {
       });
       return success();
     }
+    if (this.sql.startsWith("UPDATE profile_revisions SET status = 'review_ready'")) {
+      const [updatedAt, candidateId, submissionId] = this.values;
+      const revision = revisionById(this.database, candidateId);
+      if (revision?.submission_id !== submissionId || revision.status !== 'published') return success(0);
+      Object.assign(revision, { status: 'review_ready', published_at: null, updated_at: updatedAt });
+      return success();
+    }
+    if (this.sql.startsWith("UPDATE profile_revisions SET status = 'archived'") && this.sql.includes('WHERE id = ?')) {
+      const [updatedAt, candidateId, submissionId] = this.values;
+      const revision = revisionById(this.database, candidateId);
+      if (revision?.submission_id !== submissionId || !['review_ready', 'published'].includes(revision.status)) return success(0);
+      Object.assign(revision, { status: 'archived', published_at: null, updated_at: updatedAt });
+      return success();
+    }
     if (this.sql.startsWith("UPDATE profile_revisions SET status = 'archived'")) {
       const [updatedAt, submissionId] = this.values;
       const revision = this.database.revisions.get(submissionId);
@@ -230,6 +256,10 @@ class MemoryStatement {
 
 function select(value, keys) {
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+function revisionById(database, candidateId) {
+  return [...database.revisions.values()].find((revision) => revision.id === candidateId) || null;
 }
 
 function success(changes = 1) {

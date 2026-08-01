@@ -1,17 +1,18 @@
 # Who wants to be hired directory
 
-This repository is building a candidate-controlled, searchable directory from Hacker News “Who wants to be hired?” posts. The current flow supports private source-text ingestion, candidate review, explicit consent, refusal, publication, and withdrawal. Resume uploads, URL retrieval, email verification, and verified update/removal requests are intentionally not part of this slice.
+This repository is building a candidate-controlled, searchable directory from Hacker News “Who wants to be hired?” posts. The current flow supports private source-text ingestion, candidate review, explicit consent, refusal, publication, and token-verified update/removal management. Resume uploads, URL retrieval, and outbound email delivery are intentionally not part of this slice.
 
 ## What works
 
-The same-origin Cloudflare Worker serves the static directory and four API routes:
+The same-origin Cloudflare Worker serves the static directory and five API route groups:
 
 - `POST /api/submissions/text` accepts up to 100,000 UTF-8 bytes, writes a `submitted` D1 record with a hashed review token, creates a queued extraction job, and returns the one-time raw review token to the submitting tab.
 - `GET` and `PATCH /api/reviews/:submissionId` require that token, expose the asynchronous `review_ready` draft, and allow edits without publishing it.
 - `POST /api/reviews/:submissionId/decision` requires the same token and an explicit `publish` or `refuse` decision. Publication accepts the exact reviewed draft in the request, atomically makes that revision public, and stamps `published_at`. Refusal archives a private draft; the same action withdraws a published profile. Repeated identical decisions are safe, while an archived revision cannot be published later.
+- `POST /api/candidates/:candidateId/manage` accepts `update` or `remove` only after the bearer token matches the submission that owns that exact profile revision. Starting an update moves the published revision back to private `review_ready` state and hides it during editing; the candidate must review and explicitly consent again before it becomes searchable. Removal archives the revision immediately. Safe retries return the current state, while an archived profile cannot start another update.
 - `GET /api/candidates` reads only revisions whose status is `published`. `submitted`, `processing`, `review_ready`, `archived`, and `failed` records cannot enter public search.
 
-The Queue consumer extracts normalized locations, work modes, availability, universities, companies, skills, and date ranges. It clears the source text after successful processing and acknowledges redelivery of an already-ready draft without replacing it. The browser polls for the private draft and renders an editable review form. Saving remains separate from the consent checkbox and publish action. Candidates may decline before publication or withdraw afterward; both states stay outside public search. When the API is unavailable, the static demo performs an in-tab preview that cannot publish.
+The Queue consumer extracts normalized locations, work modes, availability, universities, companies, skills, and date ranges. It clears the source text after successful processing and acknowledges redelivery of an already-ready draft without replacing it. The browser polls for the private draft and renders an editable review form. Saving remains separate from the consent checkbox and publish action. The raw management token is returned once, kept only in page memory, and never written to `localStorage`; D1 stores only its SHA-256 hash. Candidates may use that token to reopen a published profile for private editing or archive it. When the API is unavailable, the static demo performs an in-tab preview that cannot publish or manage a listing.
 
 `worker.js` contains no String Web Access or other service credential. Later URL ingestion will add the server-side String Web Access adapter and its allowlisting, SSRF, redirect, page, byte, deduplication, and redaction controls as a separate reviewable increment.
 
