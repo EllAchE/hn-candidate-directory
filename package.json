@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
-    "check": "bun test && node --check worker.js && node --check who-is-hiring.js"
+    "check": "bun test && node --check worker.js && node --check who-is-hiring.js && node --check scripts/staging-smoke.js",
+    "smoke:staging": "node scripts/staging-smoke.js"
   }
 }
