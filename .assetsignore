@@ -1,8 +1,10 @@
 .git*
 .assetsignore
 package.json
+OPERATIONS.md
+scripts/**
 test/**
 migrations/**
 worker.js
-wrangler.toml
+wrangler*.toml
 WHO-IS-HIRING.md
