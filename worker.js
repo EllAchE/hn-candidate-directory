@@ -55,64 +55,64 @@ const HN_MAPPED_LABELS = new Set([
   ...HN_NAME_LABELS
 ]);
 const HN_UNKNOWN = 'Not specified';
+const HN_INGEST_TOKEN_MIN_LENGTH = 32;
+const MAX_BEARER_TOKEN_CHARS = 256;
+const MAX_JSON_DEPTH = 32;
+const INVISIBLE_TEXT_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+const MAX_HTML_SOURCE_CHARS = 400_000;
+const MAX_PUBLIC_CANDIDATES = 1_000;
+const DRAFT_FIELD_LIMITS = Object.freeze({
+  name: 200,
+  role: 300,
+  summary: 2_000,
+  location: 300,
+  workMode: 100,
+  availability: 100,
+  listItem: 200
+});
+const RATE_LIMITS = Object.freeze({
+  submissionBurst: { limit: 10, windowSeconds: 60 },
+  submissionDaily: { limit: 40, windowSeconds: 86_400 },
+  submissionGlobal: { limit: 3_000, windowSeconds: 21_600 },
+  authFailure: { limit: 20, windowSeconds: 600 },
+  ingestRequest: { limit: 10, windowSeconds: 600 },
+  ingestRun: { limit: 1, windowSeconds: 900 }
+});
+const STORAGE_LIMITS = Object.freeze({
+  pendingSubmissions: 5_000,
+  abandonedSubmissionDays: 30,
+  rateLimitRetentionSeconds: 172_800
+});
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  'upgrade-insecure-requests'
+].join('; ');
+const SECURITY_HEADERS = Object.freeze({
+  'content-security-policy': CONTENT_SECURITY_POLICY,
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+  'cross-origin-opener-policy': 'same-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+});
+const JSON_RESPONSE_HEADERS = Object.freeze({ ...JSON_HEADERS, ...SECURITY_HEADERS });
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    if (url.pathname === '/api/submissions/text') {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return createTextSubmission(request, env);
+    try {
+      return await routeRequest(request, env);
+    } catch {
+      return json({ error: 'internal_error' }, 500);
     }
-
-    if (url.pathname === '/api/submissions/url') {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return createUrlSubmission(request, env);
-    }
-
-    if (url.pathname === '/api/submissions/resume') {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return createResumeSubmission(request, env);
-    }
-
-    const decisionMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/decision$/);
-    if (decisionMatch) {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return decideReview(request, env, decisionMatch[1]);
-    }
-
-    const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
-    if (reviewMatch) {
-      if (request.method === 'GET') return getReview(request, env, reviewMatch[1]);
-      if (request.method === 'PATCH') return updateReview(request, env, reviewMatch[1]);
-      return json({ error: 'method_not_allowed' }, 405);
-    }
-
-    const managementMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/manage$/);
-    if (managementMatch) {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return manageCandidate(request, env, managementMatch[1]);
-    }
-
-    if (url.pathname === '/api/candidates') {
-      if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-      return listPublishedCandidates(env);
-    }
-
-    if (url.pathname === '/api/admin/ingest/hn') {
-      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
-      return runHackerNewsIngest(request, env);
-    }
-
-    if (url.pathname.startsWith('/api/')) return json({ error: 'not_found' }, 404);
-    if (!env.ASSETS) return new Response('Not found', { status: 404 });
-
-    if (url.pathname === '/') {
-      url.pathname = '/who-is-hiring.html';
-      return env.ASSETS.fetch(new Request(url, request));
-    }
-
-    return env.ASSETS.fetch(request);
   },
 
   async queue(batch, env) {
@@ -120,33 +120,243 @@ export default {
   },
 
   async scheduled(_event, env) {
-    await ingestHackerNews(env);
+    await maintainStorage(env);
+    if (!(await reserveIngestRun(env))) return;
+    try {
+      await ingestHackerNews(env);
+    } catch {
+      return;
+    }
   }
 };
+
+async function routeRequest(request, env) {
+  const url = new URL(request.url);
+
+  if (url.pathname.startsWith('/api/')) {
+    if (request.method === 'OPTIONS') return json({ error: 'method_not_allowed' }, 405);
+    if (request.method !== 'GET' && isDisallowedOrigin(request, url, env)) {
+      return json({ error: 'cross_origin_request_blocked' }, 403);
+    }
+  }
+
+  if (url.pathname === '/api/submissions/text') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return createTextSubmission(request, env);
+  }
+
+  if (url.pathname === '/api/submissions/url') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return createUrlSubmission(request, env);
+  }
+
+  if (url.pathname === '/api/submissions/resume') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return createResumeSubmission(request, env);
+  }
+
+  const decisionMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/decision$/);
+  if (decisionMatch) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return decideReview(request, env, decisionMatch[1]);
+  }
+
+  const reviewMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)$/);
+  if (reviewMatch) {
+    if (request.method === 'GET') return getReview(request, env, reviewMatch[1]);
+    if (request.method === 'PATCH') return updateReview(request, env, reviewMatch[1]);
+    return json({ error: 'method_not_allowed' }, 405);
+  }
+
+  const managementMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/manage$/);
+  if (managementMatch) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return manageCandidate(request, env, managementMatch[1]);
+  }
+
+  if (url.pathname === '/api/candidates') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return listPublishedCandidates(request, env);
+  }
+
+  if (url.pathname === '/api/admin/ingest/hn') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return runHackerNewsIngest(request, env);
+  }
+
+  if (url.pathname.startsWith('/api/')) return json({ error: 'not_found' }, 404);
+  if (!['GET', 'HEAD'].includes(request.method)) return json({ error: 'method_not_allowed' }, 405);
+  if (!env.ASSETS) return new Response('Not found', { status: 404, headers: SECURITY_HEADERS });
+
+  if (url.pathname === '/') {
+    url.pathname = '/who-is-hiring.html';
+    return withSecurityHeaders(await env.ASSETS.fetch(new Request(url, request)));
+  }
+
+  return withSecurityHeaders(await env.ASSETS.fetch(request));
+}
+
+function isDisallowedOrigin(request, url, env) {
+  const origin = request.headers.get('origin');
+  if (!origin) return false;
+  const allowed = new Set([
+    url.origin,
+    ...String(env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  ]);
+  return !allowed.has(origin);
+}
+
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  Object.entries(SECURITY_HEADERS).forEach(([name, value]) => headers.set(name, value));
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
 
 function processQueueMessage(message, env) {
   if (message.body?.hnComment) return processHnCommentMessage(message, env);
   return processSubmissionMessage(message, env);
 }
 
-async function createTextSubmission(request, env) {
-  const contentLength = Number(request.headers.get('content-length') || 0);
-  if (contentLength > MAX_REQUEST_BYTES) return json({ error: 'source_text_too_large', maxBytes: MAX_SOURCE_BYTES }, 413);
+// Cloudflare rewrites `cf-connecting-ip` on every edge request, so it is the only client
+// identifier a caller cannot forge. Anything else would let one client poison another's bucket.
+async function clientKey(env, request) {
+  const address = request.headers.get('cf-connecting-ip') || 'unattributed';
+  return (await hashToken(`${env.RATE_LIMIT_SALT || 'hn-candidate-directory'}|${address}`)).slice(0, 24);
+}
 
-  const requestText = await request.text();
-  if (byteLength(requestText) > MAX_REQUEST_BYTES) return json({ error: 'source_text_too_large', maxBytes: MAX_SOURCE_BYTES }, 413);
+async function consumeQuota(env, bucket, rule) {
+  const nowMs = Date.now();
+  const nowSeconds = Math.floor(nowMs / 1_000);
+  const windowStart = Math.floor(nowSeconds / rule.windowSeconds) * rule.windowSeconds;
+  const row = await env.DB.prepare(
+    `INSERT INTO rate_limits (bucket, window_start, hits, updated_at)
+     VALUES (?, ?, 1, ?)
+     ON CONFLICT(bucket) DO UPDATE SET
+       hits = CASE WHEN rate_limits.window_start = excluded.window_start THEN rate_limits.hits + 1 ELSE 1 END,
+       window_start = excluded.window_start,
+       updated_at = excluded.updated_at
+     RETURNING hits`
+  )
+    .bind(bucket, windowStart, new Date(nowMs).toISOString())
+    .first();
 
-  let body;
+  const hits = Number(row?.hits ?? Number.MAX_SAFE_INTEGER);
+  return { hits, allowed: hits <= rule.limit, retryAfter: Math.max(1, windowStart + rule.windowSeconds - nowSeconds) };
+}
+
+async function consumeEdgeQuota(env, key) {
+  if (typeof env.RATE_LIMITER?.limit !== 'function') return null;
   try {
-    body = JSON.parse(requestText);
+    const outcome = await env.RATE_LIMITER.limit({ key });
+    return outcome?.success === false ? rateLimited(60) : null;
   } catch {
-    return json({ error: 'invalid_json' }, 400);
+    return null;
   }
+}
+
+async function enforceQuota(env, name, scopeKey) {
+  const edge = await consumeEdgeQuota(env, `${name}:${scopeKey}`);
+  if (edge) return edge;
+
+  try {
+    const outcome = await consumeQuota(env, `${name}:${scopeKey}`, RATE_LIMITS[name]);
+    return outcome.allowed ? null : rateLimited(outcome.retryAfter);
+  } catch {
+    return json({ error: 'rate_limit_unavailable' }, 503);
+  }
+}
+
+async function reserveSubmissionCapacity(request, env) {
+  const key = await clientKey(env, request);
+  const burst = await enforceQuota(env, 'submissionBurst', key);
+  if (burst) return burst;
+  const daily = await enforceQuota(env, 'submissionDaily', key);
+  if (daily) return daily;
+
+  let global;
+  try {
+    global = await consumeQuota(env, 'submissionGlobal:all', RATE_LIMITS.submissionGlobal);
+  } catch {
+    return json({ error: 'rate_limit_unavailable' }, 503);
+  }
+  if (!global.allowed) return rateLimited(global.retryAfter);
+  if (await isSubmissionStorageFull(env, global.hits)) return json({ error: 'submission_capacity_reached' }, 503);
+  return null;
+}
+
+// `pending_submissions` is a cron-refreshed measurement, so the live window counter is added to it
+// rather than trusting a value that can be up to one cron interval stale.
+async function isSubmissionStorageFull(env, windowHits) {
+  try {
+    const row = await env.DB.prepare('SELECT value FROM service_state WHERE key = ?').bind('pending_submissions').first();
+    return Number(row?.value ?? 0) + windowHits > STORAGE_LIMITS.pendingSubmissions;
+  } catch {
+    return true;
+  }
+}
+
+async function denyAuthorization(request, env, response) {
+  try {
+    const outcome = await consumeQuota(env, `authFailure:${await clientKey(env, request)}`, RATE_LIMITS.authFailure);
+    return outcome.allowed ? response : rateLimited(outcome.retryAfter);
+  } catch {
+    return response;
+  }
+}
+
+async function reserveIngestRun(env) {
+  if (!env.DB) return false;
+  try {
+    return (await consumeQuota(env, 'ingestRun:all', RATE_LIMITS.ingestRun)).allowed;
+  } catch {
+    return false;
+  }
+}
+
+async function maintainStorage(env) {
+  if (!env.DB) return;
+  const nowMs = Date.now();
+  const abandonedBefore = new Date(nowMs - STORAGE_LIMITS.abandonedSubmissionDays * 86_400_000).toISOString();
+  const staleWindowStart = Math.floor(nowMs / 1_000) - STORAGE_LIMITS.rateLimitRetentionSeconds;
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM submissions WHERE status IN ('submitted', 'failed') AND updated_at < ?").bind(abandonedBefore),
+      env.DB.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(staleWindowStart)
+    ]);
+    const pending = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM submissions WHERE status IN ('submitted', 'processing', 'failed')"
+    ).first();
+    await env.DB.prepare(
+      `INSERT INTO service_state (key, value, updated_at) VALUES ('pending_submissions', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    )
+      .bind(Number(pending?.total ?? 0), new Date(nowMs).toISOString())
+      .run();
+  } catch {
+    return;
+  }
+}
+
+function rateLimited(retryAfter) {
+  return json({ error: 'rate_limited' }, 429, { 'retry-after': String(retryAfter) });
+}
+
+async function createTextSubmission(request, env) {
+  const oversized = () => json({ error: 'source_text_too_large', maxBytes: MAX_SOURCE_BYTES }, 413);
+  const body = await readJson(request, MAX_REQUEST_BYTES, oversized);
+  if (body instanceof Response) return body;
 
   const sourceText = typeof body?.sourceText === 'string' ? body.sourceText.trim() : '';
   if (!sourceText) return json({ error: 'source_text_required' }, 400);
-  if (byteLength(sourceText) > MAX_SOURCE_BYTES) return json({ error: 'source_text_too_large', maxBytes: MAX_SOURCE_BYTES }, 413);
+  if (byteLength(sourceText) > MAX_SOURCE_BYTES) return oversized();
   if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
+
+  const quota = await reserveSubmissionCapacity(request, env);
+  if (quota) return quota;
 
   return createQueuedSubmission(env, crypto.randomUUID(), sourceText, 'submission_conflict');
 }
@@ -158,6 +368,9 @@ async function createUrlSubmission(request, env) {
   const sourceUrl = validateCandidateSourceUrl(body?.url);
   if (!sourceUrl) return json({ error: 'url_not_allowed' }, 400);
   if (!env.DB || !env.SUBMISSION_QUEUE || !env.UNBLOCKER_ORG_API_KEY) return json({ error: 'service_not_configured' }, 503);
+
+  const quota = await reserveSubmissionCapacity(request, env);
+  if (quota) return quota;
 
   const submissionId = `url-${(await hashToken(sourceUrl)).slice(0, 32)}`;
   let existingSubmission;
@@ -195,6 +408,9 @@ async function createResumeSubmission(request, env) {
   const sourceText = decodeResumeText(resumeBytes);
   if (!sourceText) return json({ error: 'resume_content_invalid' }, 400);
   if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
+
+  const quota = await reserveSubmissionCapacity(request, env);
+  if (quota) return quota;
 
   const contentHash = await hashBytes(resumeBytes);
   const submissionId = `resume-${contentHash}`;
@@ -322,6 +538,7 @@ async function fetchCandidateSource(sourceUrl, apiKey) {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ url: sourceUrl, method: 'GET', format: 'json', executeJS: false, solveCaptcha: false }),
+      redirect: 'error',
       signal: controller.signal
     });
     if (!response.ok) throw new UrlSubmissionError('url_fetch_failed', 502);
@@ -379,10 +596,12 @@ async function readLimitedText(response, maxBytes) {
   return new TextDecoder().decode(bytes);
 }
 
-async function readLimitedBytes(request, maxBytes) {
+// A declared `Content-Length` only short-circuits the read; the streamed body is counted
+// independently so a lying or absent header cannot buffer an unbounded request into memory.
+async function readLimitedBytes(request, maxBytes, oversized = () => json({ error: 'resume_too_large', maxBytes }, 413)) {
   const contentLength = request.headers.get('content-length');
-  if (contentLength && !/^\d+$/.test(contentLength)) return json({ error: 'resume_content_invalid' }, 400);
-  if (contentLength && Number(contentLength) > maxBytes) return json({ error: 'resume_too_large', maxBytes }, 413);
+  if (contentLength && !/^\d+$/.test(contentLength)) return json({ error: 'invalid_content_length' }, 400);
+  if (contentLength && Number(contentLength) > maxBytes) return oversized();
   if (!request.body) return new Uint8Array();
 
   const reader = request.body.getReader();
@@ -394,7 +613,7 @@ async function readLimitedBytes(request, maxBytes) {
     totalBytes += value.byteLength;
     if (totalBytes > maxBytes) {
       await reader.cancel();
-      return json({ error: 'resume_too_large', maxBytes }, 413);
+      return oversized();
     }
     chunks.push(value);
   }
@@ -492,10 +711,14 @@ function normalizeWebAccessData(data, headers) {
 
   return decodeHtmlEntities(
     data
-      .replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-      .replace(/<\/?(?:address|article|aside|blockquote|br|div|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tr|ul)\b[^>]*>/gi, '\n')
-      .replace(/<[^>]*>/g, ' ')
+      .slice(0, MAX_HTML_SOURCE_CHARS)
+      .replace(/<!--[\s\S]{0,20000}?-->/g, ' ')
+      .replace(/<(script|style|noscript|template)\b[^>]{0,2000}>[\s\S]{0,20000}?<\/\1>/gi, ' ')
+      .replace(
+        /<\/?(?:address|article|aside|blockquote|br|div|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tr|ul)\b[^>]{0,2000}>/gi,
+        '\n'
+      )
+      .replace(/<[^>]{0,2000}>/g, ' ')
   )
     .replace(/[\t ]+/g, ' ')
     .replace(/ *\n */g, '\n')
@@ -706,17 +929,26 @@ async function getReviewRevision(env, submissionId) {
   ).bind(submissionId).first();
 }
 
-async function listPublishedCandidates(env) {
+async function listPublishedCandidates(request, env) {
   if (!env.DB) return json({ error: 'service_not_configured' }, 503);
-  const result = await env.DB.prepare(
-    `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
-            r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
-            i.hn_permalink, i.thread_month
-       FROM profile_revisions r
-       LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
-      WHERE r.status = 'published' AND i.suppressed_at IS NULL
-      ORDER BY r.published_at DESC`
-  ).all();
+  const edge = await consumeEdgeQuota(env, `candidates:${await clientKey(env, request)}`);
+  if (edge) return edge;
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
+              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
+              i.hn_permalink, i.thread_month
+         FROM profile_revisions r
+         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+        WHERE r.status = 'published' AND i.suppressed_at IS NULL
+        ORDER BY r.published_at DESC
+        LIMIT ${MAX_PUBLIC_CANDIDATES}`
+    ).all();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
 
   return json({ candidates: result.results.map(toPublicCandidate) });
 }
@@ -864,20 +1096,30 @@ async function processSubmissionMessage(message, env) {
 
 async function runHackerNewsIngest(request, env) {
   if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
-  if (!env.HN_INGEST_TOKEN) return json({ error: 'ingest_not_configured' }, 503);
 
-  const authorization = request.headers.get('authorization') || '';
-  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  if (!token) return json({ error: 'ingest_token_required' }, 401);
+  const quota = await enforceQuota(env, 'ingestRequest', await clientKey(env, request));
+  if (quota) return quota;
+  if (!isUsableIngestToken(env.HN_INGEST_TOKEN)) return json({ error: 'ingest_not_configured' }, 503);
+
+  const token = bearerToken(request);
+  if (!token) return denyAuthorization(request, env, json({ error: 'ingest_token_required' }, 401));
   if (!constantTimeEqual(await hashToken(token), await hashToken(env.HN_INGEST_TOKEN))) {
-    return json({ error: 'ingest_token_invalid' }, 403);
+    return denyAuthorization(request, env, json({ error: 'ingest_token_invalid' }, 403));
   }
+
+  if (!(await reserveIngestRun(env))) return json({ error: 'ingest_in_progress' }, 429);
 
   try {
     return json(await ingestHackerNews(env), 202);
   } catch {
     return json({ error: 'ingest_failed' }, 502);
   }
+}
+
+// An unset, blank, or short secret must never degrade into an open endpoint, and a value too
+// short to resist guessing is no better than none.
+function isUsableIngestToken(value) {
+  return typeof value === 'string' && value.trim().length >= HN_INGEST_TOKEN_MIN_LENGTH;
 }
 
 async function ingestHackerNews(env, options = {}) {
@@ -1136,7 +1378,7 @@ function extractHnProfile(record) {
     (match) => match[0]
   );
 
-  return sanitizeCandidateDraft({
+  return boundedDraft(sanitizeCandidateDraft({
     name: (valueFor(HN_NAME_LABELS) || record.author || HN_UNKNOWN).slice(0, 200),
     role: (role || prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || HN_UNKNOWN).slice(0, 300),
     summary: prose.join(separator).slice(0, 1_500) || HN_UNKNOWN,
@@ -1147,7 +1389,7 @@ function extractHnProfile(record) {
     companies: listFor(HN_COMPANY_LABELS),
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
-  }).draft;
+  }).draft);
 }
 
 function hnWorkMode(remoteValue, sourceText) {
@@ -1167,12 +1409,15 @@ function normalizeHnLabel(label) {
     .trim();
 }
 
+// Every quantifier here is bounded: the comment body is attacker-authored, so an unbounded lazy
+// scan across repeated openers would let one post stall the queue consumer.
 function decodeHnCommentText(html) {
   return decodeHtmlEntities(
     html
-      .replace(/<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>[\s\S]*?<\/a>/gi, ' $1 ')
-      .replace(/<\/?(?:p|br|div|li|ul|ol|pre|blockquote)\b[^>]*>/gi, '\n')
-      .replace(/<[^>]*>/g, '')
+      .slice(0, HN_INGEST_LIMITS.commentChars)
+      .replace(/<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>[\s\S]{0,4096}?<\/a>/gi, ' $1 ')
+      .replace(/<\/?(?:p|br|div|li|ul|ol|pre|blockquote)\b[^>]{0,512}>/gi, '\n')
+      .replace(/<[^>]{0,2048}>/g, '')
   )
     .replace(/\r/g, '')
     .replace(/[\t ]+/g, ' ')
@@ -1217,30 +1462,62 @@ async function fetchHnJson(url) {
   }
 }
 
+// A missing record and a wrong token answer identically. Submission ids for URL and resume
+// submissions are derived from their content, so a distinguishable 404 would tell any caller
+// whether a given LinkedIn profile or resume had ever been submitted.
 async function authorizeReview(request, env, submissionId) {
   if (!env.DB) return json({ error: 'service_not_configured' }, 503);
-  const authorization = request.headers.get('authorization') || '';
-  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  if (!token) return json({ error: 'review_token_required' }, 401);
+  const token = bearerToken(request);
+  if (!token) return denyAuthorization(request, env, json({ error: 'review_token_required' }, 401));
 
-  const submission = await env.DB.prepare('SELECT id, review_token_hash, status FROM submissions WHERE id = ?').bind(submissionId).first();
-  if (!submission) return json({ error: 'review_not_found' }, 404);
+  let submission;
+  try {
+    submission = await env.DB.prepare('SELECT id, review_token_hash, status FROM submissions WHERE id = ?').bind(submissionId).first();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
   const tokenHash = await hashToken(token);
-  if (!constantTimeEqual(tokenHash, submission.review_token_hash)) return json({ error: 'review_token_invalid' }, 403);
+  if (!constantTimeEqual(tokenHash, submission?.review_token_hash ?? unmatchableHash())) {
+    return denyAuthorization(request, env, json({ error: 'review_token_invalid' }, 403));
+  }
   return submission;
 }
 
 async function authorizeCandidateManagement(request, env, candidateId) {
   if (!env.DB) return json({ error: 'service_not_configured' }, 503);
-  const authorization = request.headers.get('authorization') || '';
-  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  if (!token) return json({ error: 'management_token_required' }, 401);
+  const token = bearerToken(request);
+  if (!token) return denyAuthorization(request, env, json({ error: 'management_token_required' }, 401));
 
-  const management = await getCandidateManagementRecord(env, candidateId);
-  if (!management) return json({ error: 'candidate_not_found' }, 404);
+  let management;
+  try {
+    management = await getCandidateManagementRecord(env, candidateId);
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
   const tokenHash = await hashToken(token);
-  if (!constantTimeEqual(tokenHash, management.review_token_hash)) return json({ error: 'management_token_invalid' }, 403);
+  if (!constantTimeEqual(tokenHash, management?.review_token_hash ?? unmatchableHash())) {
+    return denyAuthorization(request, env, json({ error: 'management_token_invalid' }, 403));
+  }
   return management;
+}
+
+function bearerToken(request) {
+  const authorization = request.headers.get('authorization') || '';
+  if (!/^Bearer /.test(authorization)) return '';
+  const token = authorization.slice(7).trim();
+  return token && token.length <= MAX_BEARER_TOKEN_CHARS ? token : '';
+}
+
+// Workers forbid random generation during module evaluation, so the comparison decoy is
+// materialized on first use and kept for the isolate's lifetime.
+let absentTokenHash = '';
+function unmatchableHash() {
+  if (!absentTokenHash) {
+    absentTokenHash = [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  return absentTokenHash;
 }
 
 async function getCandidateManagementRecord(env, candidateId) {
@@ -1266,7 +1543,7 @@ function extractProfile(sourceText) {
   const listFor = (...labels) => splitList(valueFor(...labels));
   const dateRanges = [...sourceText.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map((match) => match[0]);
 
-  return sanitizeCandidateDraft({
+  return boundedDraft(sanitizeCandidateDraft({
     name: valueFor('name') || 'Name needs review',
     role: valueFor('role', 'title') || lines[0] || 'Role needs review',
     summary: valueFor('summary', 'about') || lines.slice(0, 3).join(' ').slice(0, 1_500),
@@ -1277,30 +1554,64 @@ function extractProfile(sourceText) {
     companies: listFor('companies', 'company', 'previously', 'experience', 'employers'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: unique(dateRanges).slice(0, 20)
-  }).draft;
+  }).draft);
 }
 
 function validateDraft(value) {
-  if (!value || typeof value !== 'object') return null;
-  const text = (key, maxLength) => (typeof value[key] === 'string' && value[key].trim().length <= maxLength ? value[key].trim() : null);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const text = (key, maxLength) => {
+    if (typeof value[key] !== 'string') return null;
+    const normalized = normalizeStoredText(value[key]);
+    return normalized.length <= maxLength ? normalized : null;
+  };
   const list = (key) => {
     if (!Array.isArray(value[key]) || value[key].length > 50) return null;
-    const items = value[key].map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
-    return items.every((item) => item.length <= 200) ? unique(items) : null;
+    const items = value[key].map((item) => (typeof item === 'string' ? normalizeStoredText(item) : '')).filter(Boolean);
+    return items.every((item) => item.length <= DRAFT_FIELD_LIMITS.listItem) ? unique(items) : null;
   };
   const draft = {
-    name: text('name', 200),
-    role: text('role', 300),
-    summary: text('summary', 2_000),
-    location: text('location', 300),
-    workMode: text('workMode', 100),
-    availability: text('availability', 100),
+    name: text('name', DRAFT_FIELD_LIMITS.name),
+    role: text('role', DRAFT_FIELD_LIMITS.role),
+    summary: text('summary', DRAFT_FIELD_LIMITS.summary),
+    location: text('location', DRAFT_FIELD_LIMITS.location),
+    workMode: text('workMode', DRAFT_FIELD_LIMITS.workMode),
+    availability: text('availability', DRAFT_FIELD_LIMITS.availability),
     universities: list('universities'),
     companies: list('companies'),
     skills: list('skills'),
     dateRanges: list('dateRanges')
   };
   return Object.values(draft).some((field) => field === null) ? null : draft;
+}
+
+// Bidi overrides and zero-width characters survive escaping and reorder or hide text in every consumer.
+function normalizeStoredText(value, maxChars = Number.MAX_SAFE_INTEGER) {
+  return value
+    .normalize('NFC')
+    .replace(INVISIBLE_TEXT_PATTERN, '')
+    .replace(/[\t\f\v ]+/g, ' ')
+    .trim()
+    .slice(0, maxChars);
+}
+
+function boundedDraft(draft) {
+  return {
+    ...draft,
+    name: normalizeStoredText(draft.name, DRAFT_FIELD_LIMITS.name),
+    role: normalizeStoredText(draft.role, DRAFT_FIELD_LIMITS.role),
+    summary: normalizeStoredText(draft.summary, DRAFT_FIELD_LIMITS.summary),
+    location: normalizeStoredText(draft.location, DRAFT_FIELD_LIMITS.location),
+    workMode: normalizeStoredText(draft.workMode, DRAFT_FIELD_LIMITS.workMode),
+    availability: normalizeStoredText(draft.availability, DRAFT_FIELD_LIMITS.availability),
+    universities: boundedList(draft.universities),
+    companies: boundedList(draft.companies),
+    skills: boundedList(draft.skills),
+    dateRanges: boundedList(draft.dateRanges)
+  };
+}
+
+function boundedList(items) {
+  return unique(items.map((item) => normalizeStoredText(item, DRAFT_FIELD_LIMITS.listItem)).filter(Boolean)).slice(0, 50);
 }
 
 function toReviewDraft(row) {
@@ -1365,16 +1676,55 @@ function candidateDraftFromRow(row) {
   }).draft;
 }
 
-async function readJson(request, maxBytes) {
-  const contentLength = request.headers.get('content-length');
-  if (/^\d+$/.test(contentLength || '') && Number(contentLength) > maxBytes) return json({ error: 'request_too_large' }, 413);
-  const text = await request.text();
-  if (byteLength(text) > maxBytes) return json({ error: 'request_too_large' }, 413);
+async function readJson(request, maxBytes, oversized = () => json({ error: 'request_too_large' }, 413)) {
+  if (!isJsonContentType(request.headers.get('content-type'))) return json({ error: 'unsupported_media_type' }, 415);
+
+  const bytes = await readLimitedBytes(request, maxBytes, oversized);
+  if (bytes instanceof Response) return bytes;
+
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return json({ error: 'invalid_json' }, 400);
+  }
+  if (jsonNestingDepth(text) > MAX_JSON_DEPTH) return json({ error: 'invalid_json' }, 400);
+
   try {
     return JSON.parse(text);
   } catch {
     return json({ error: 'invalid_json' }, 400);
   }
+}
+
+function isJsonContentType(value) {
+  return /^application\/(?:[a-z0-9.+-]+\+)?json\s*(?:;.*)?$/i.test((value || '').trim());
+}
+
+// `JSON.parse` recurses per nesting level, so a small body of bare brackets can exhaust the stack
+// before any size or shape check ever runs.
+function jsonNestingDepth(text) {
+  let depth = 0;
+  let deepest = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{' || character === '[') {
+      depth += 1;
+      if (depth > deepest) deepest = depth;
+    } else if (character === '}' || character === ']') depth -= 1;
+  }
+
+  return deepest;
 }
 
 function splitList(value) {
@@ -1423,8 +1773,8 @@ function changedRows(result) {
   return Number(result?.meta?.changes ?? result?.changes ?? 0);
 }
 
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
+function json(value, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(value), { status, headers: { ...JSON_RESPONSE_HEADERS, ...extraHeaders } });
 }
 
 export {

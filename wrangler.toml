@@ -28,3 +28,12 @@ queue = "hn-candidate-submissions"
 max_batch_size = 10
 max_batch_timeout = 5
 max_retries = 3
+
+# Free per-colo pre-filter in front of the D1 counters. It is best effort and never authoritative:
+# every write quota is still enforced in D1, so dropping this binding costs throughput, not safety.
+# `namespace_id` is local to this Worker and is not an account resource to provision.
+[[unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
