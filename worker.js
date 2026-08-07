@@ -134,7 +134,7 @@ async function createResumeSubmission(request, env) {
   if (resumeBytes instanceof Response) return resumeBytes;
   const sourceText = decodeResumeText(resumeBytes);
   if (!sourceText) return json({ error: 'resume_content_invalid' }, 400);
-  if (!env.DB || !env.SUBMISSION_QUEUE || !env.RESUME_STAGING) return json({ error: 'service_not_configured' }, 503);
+  if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
 
   const contentHash = await hashBytes(resumeBytes);
   const submissionId = `resume-${contentHash}`;
@@ -151,18 +151,7 @@ async function createResumeSubmission(request, env) {
     : await persistQueuedSubmission(env, submissionId, sourceText, 'duplicate_resume_submission');
   if (pendingSubmission instanceof Response) return pendingSubmission;
 
-  const objectKey = await resumeObjectKey(submissionId);
-  try {
-    await env.RESUME_STAGING.put(objectKey, resumeBytes);
-  } catch {
-    await failSubmissionSetup(env, submissionId, 'resume_staging_unavailable');
-    await deleteResumeObject(env, submissionId);
-    return json({ error: 'resume_staging_unavailable' }, 503);
-  }
-
-  const response = await enqueueSubmission(env, submissionId, pendingSubmission.reviewToken);
-  if (!response.ok) await deleteResumeObject(env, submissionId);
-  return response;
+  return enqueueSubmission(env, submissionId, pendingSubmission.reviewToken);
 }
 
 async function resetFailedSubmission(env, submissionId, sourceText, duplicateError) {
@@ -756,7 +745,6 @@ async function processSubmissionMessage(message, env) {
     const submission = await env.DB.prepare('SELECT source_text, status FROM submissions WHERE id = ?').bind(submissionId).first();
     if (!submission) throw new Error('submission_not_found');
     if (submission.status === 'review_ready') {
-      await deleteResumeObject(env, submissionId);
       message.ack?.();
       return;
     }
@@ -801,7 +789,6 @@ async function processSubmissionMessage(message, env) {
       env.DB.prepare("UPDATE submissions SET status = 'review_ready', source_text = '', updated_at = ? WHERE id = ?").bind(completedAt, submissionId),
       env.DB.prepare("UPDATE jobs SET status = 'completed', error = NULL, updated_at = ? WHERE submission_id = ?").bind(completedAt, submissionId)
     ]);
-    await deleteResumeObject(env, submissionId);
     message.ack?.();
   } catch {
     const failedAt = new Date().toISOString();
@@ -810,23 +797,6 @@ async function processSubmissionMessage(message, env) {
       env.DB.prepare("UPDATE jobs SET status = 'failed', error = 'extraction_failed', updated_at = ? WHERE submission_id = ?").bind(failedAt, submissionId)
     ]);
     message.retry?.();
-  }
-}
-
-async function resumeObjectKey(submissionId) {
-  const match = submissionId.match(/^resume-([a-f0-9]{64})$/);
-  if (!match) return '';
-  const keyHash = await hashToken(`resume-object:${match[1]}`);
-  return `resume-staging/${keyHash}`;
-}
-
-async function deleteResumeObject(env, submissionId) {
-  const objectKey = await resumeObjectKey(submissionId);
-  if (!objectKey || !env.RESUME_STAGING) return;
-  try {
-    await env.RESUME_STAGING.delete(objectKey);
-  } catch {
-    return;
   }
 }
 

@@ -364,16 +364,10 @@ describe('plain-text resume review drafts', () => {
     expect(response.status).toBe(202);
     const responseText = await response.text();
     const submission = JSON.parse(responseText);
-    const staged = env.RESUME_STAGING.puts[0];
     expect(submission).toMatchObject({ status: 'submitted', reviewEndpoint: `/api/reviews/${submission.submissionId}` });
     expect(submission.submissionId).toStartWith('resume-');
-    expect(staged.key).toStartWith('resume-staging/');
-    expect(new TextDecoder().decode(staged.bytes)).toBe(sourceText);
-    expect(staged.options).toBeUndefined();
     expect(responseText).not.toContain(sourceText);
     expect(responseText).not.toContain(filename);
-    expect(responseText).not.toContain(staged.key);
-    expect(responseText).not.toContain('RESUME_STAGING');
 
     const stored = env.DB.submissions.get(submission.submissionId);
     expect(stored).toMatchObject({ source_kind: 'text', source_text: sourceText, status: 'submitted' });
@@ -385,8 +379,6 @@ describe('plain-text resume review drafts', () => {
 
     await processQueuedSubmission(env);
     expect(env.DB.submissions.get(submission.submissionId).source_text).toBe('');
-    expect(env.RESUME_STAGING.objects.size).toBe(0);
-    expect(env.RESUME_STAGING.deletes).toEqual([staged.key]);
     const review = await privateReview(env, submission);
     expect(review).toMatchObject({
       status: 'review_ready',
@@ -397,7 +389,6 @@ describe('plain-text resume review drafts', () => {
     const duplicateResponse = await worker.fetch(resumeRequest(sourceText, { filename }), env);
     expect(duplicateResponse.status).toBe(409);
     expect(await duplicateResponse.json()).toEqual({ error: 'duplicate_resume_submission' });
-    expect(env.RESUME_STAGING.puts).toHaveLength(1);
 
     const publicationResponse = await decide(env, submission, { decision: 'publish', draft: editableDraft(review.draft) });
     expect(publicationResponse.status).toBe(200);
@@ -424,7 +415,6 @@ describe('plain-text resume review drafts', () => {
       expect(response.status).toBe(testCase.status);
       expect(await response.json()).toEqual({ error: testCase.error });
       expect(env.DB.submissions.size).toBe(0);
-      expect(env.RESUME_STAGING.puts).toEqual([]);
       expect(env.SUBMISSION_QUEUE.messages).toEqual([]);
     }
 
@@ -435,17 +425,15 @@ describe('plain-text resume review drafts', () => {
     expect(preflightResponse.status).toBe(413);
     expect(await preflightResponse.json()).toEqual({ error: 'resume_too_large', maxBytes: MAX_RESUME_BYTES });
     expect(preflightEnv.DB.submissions.size).toBe(0);
-    expect(preflightEnv.RESUME_STAGING.puts).toEqual([]);
 
     const streamingEnv = createEnvironment();
     const streamingResponse = await worker.fetch(resumeRequest('x'.repeat(MAX_RESUME_BYTES + 1)), streamingEnv);
     expect(streamingResponse.status).toBe(413);
     expect(await streamingResponse.json()).toEqual({ error: 'resume_too_large', maxBytes: MAX_RESUME_BYTES });
     expect(streamingEnv.DB.submissions.size).toBe(0);
-    expect(streamingEnv.RESUME_STAGING.puts).toEqual([]);
   });
 
-  test('deduplicates concurrent exact content before R2 and never exposes the losing token or object key', async () => {
+  test('deduplicates concurrent exact content and never exposes the losing review token', async () => {
     const env = createEnvironment();
     const sourceText = 'Name: Concurrent Candidate\nRole: Backend engineer';
     const responses = await Promise.all([
@@ -460,32 +448,10 @@ describe('plain-text resume review drafts', () => {
     expect(duplicateBody).not.toContain(JSON.parse(successBody).reviewToken);
     expect(env.DB.submissions.size).toBe(1);
     expect(env.DB.jobs.size).toBe(1);
-    expect(env.RESUME_STAGING.puts).toHaveLength(1);
-    expect(env.RESUME_STAGING.objects.size).toBe(1);
-    expect(env.RESUME_STAGING.deletes).toEqual([]);
-    expect(successBody).not.toContain(env.RESUME_STAGING.puts[0].key);
-    expect(duplicateBody).not.toContain(env.RESUME_STAGING.puts[0].key);
   });
 
-  test('fails closed around R2 and Queue setup and permits a same-content Queue retry', async () => {
+  test('fails closed around Queue setup and permits a same-content Queue retry', async () => {
     const sourceText = 'Name: Retry Resume\nRole: Data engineer';
-    const stagingFailureEnv = createEnvironment();
-    stagingFailureEnv.RESUME_STAGING.put = async () => {
-      throw new Error('r2-private-bucket-secret');
-    };
-    const stagingResponse = await worker.fetch(resumeRequest(sourceText, { filename: 'Private Resume.txt' }), stagingFailureEnv);
-    expect(stagingResponse.status).toBe(503);
-    const stagingBody = await stagingResponse.text();
-    expect(stagingBody).toBe('{"error":"resume_staging_unavailable"}');
-    expect(stagingBody).not.toContain(sourceText);
-    expect(stagingBody).not.toContain('Private Resume.txt');
-    expect(stagingBody).not.toContain('r2-private-bucket-secret');
-    const failedSubmissionId = [...stagingFailureEnv.DB.submissions.keys()][0];
-    expect(stagingFailureEnv.DB.submissions.get(failedSubmissionId).status).toBe('failed');
-    expect(stagingFailureEnv.DB.jobs.get(failedSubmissionId)).toMatchObject({ status: 'failed', error: 'resume_staging_unavailable' });
-    expect(stagingFailureEnv.SUBMISSION_QUEUE.messages).toEqual([]);
-    expect(stagingFailureEnv.RESUME_STAGING.deletes).toHaveLength(1);
-
     const queueEnv = createEnvironment();
     let queueAvailable = false;
     queueEnv.SUBMISSION_QUEUE.send = async function (message) {
@@ -498,7 +464,6 @@ describe('plain-text resume review drafts', () => {
     const submissionId = [...queueEnv.DB.submissions.keys()][0];
     expect(queueEnv.DB.submissions.get(submissionId).status).toBe('failed');
     expect(queueEnv.DB.jobs.get(submissionId)).toMatchObject({ status: 'failed', error: 'queue_unavailable' });
-    expect(queueEnv.RESUME_STAGING.objects.size).toBe(0);
 
     queueAvailable = true;
     const retryResponse = await worker.fetch(resumeRequest(sourceText), queueEnv);
@@ -506,12 +471,10 @@ describe('plain-text resume review drafts', () => {
     expect(await retryResponse.json()).toMatchObject({ submissionId, status: 'submitted' });
     expect(queueEnv.DB.submissions.get(submissionId).status).toBe('submitted');
     expect(queueEnv.DB.jobs.get(submissionId)).toMatchObject({ status: 'queued', attempts: 0, error: null });
-    expect(queueEnv.RESUME_STAGING.puts).toHaveLength(2);
-    expect(queueEnv.RESUME_STAGING.objects.size).toBe(1);
     expect(queueEnv.SUBMISSION_QUEUE.messages).toEqual([{ submissionId }]);
   });
 
-  test('retains staged data for Queue retry and treats R2 deletion as a lifecycle-backed best effort', async () => {
+  test('retains D1 source text for Queue retry and clears it once extraction succeeds', async () => {
     const retryEnv = createEnvironment();
     const submissionResponse = await worker.fetch(resumeRequest('Name: Processing Retry\nRole: Security engineer'), retryEnv);
     const submission = await submissionResponse.json();
@@ -530,39 +493,14 @@ describe('plain-text resume review drafts', () => {
     expect(retryEnv.DB.submissions.get(submission.submissionId).status).toBe('failed');
     expect(retryEnv.DB.submissions.get(submission.submissionId).source_text).toContain('Processing Retry');
     expect(retryEnv.DB.jobs.get(submission.submissionId).error).toBe('extraction_failed');
-    expect(retryEnv.RESUME_STAGING.objects.size).toBe(1);
 
     let acknowledged = false;
     await worker.queue({ messages: [{ body: { submissionId: submission.submissionId }, ack: () => { acknowledged = true; } }] }, retryEnv);
     expect(acknowledged).toBe(true);
     expect(retryEnv.DB.submissions.get(submission.submissionId)).toMatchObject({ status: 'review_ready', source_text: '' });
-    expect(retryEnv.RESUME_STAGING.objects.size).toBe(0);
-
-    const deleteFailureEnv = createEnvironment();
-    const deleteFailureResponse = await worker.fetch(resumeRequest('Name: Lifecycle Candidate\nRole: Product engineer'), deleteFailureEnv);
-    const deleteFailureSubmission = await deleteFailureResponse.json();
-    deleteFailureEnv.RESUME_STAGING.delete = async () => {
-      throw new Error('private-r2-delete-detail');
-    };
-    let deleteFailureAck = false;
-    let deleteFailureRetry = false;
-    await worker.queue(
-      {
-        messages: [{
-          body: { submissionId: deleteFailureSubmission.submissionId },
-          ack: () => { deleteFailureAck = true; },
-          retry: () => { deleteFailureRetry = true; }
-        }]
-      },
-      deleteFailureEnv
-    );
-    expect(deleteFailureAck).toBe(true);
-    expect(deleteFailureRetry).toBe(false);
-    expect(deleteFailureEnv.DB.submissions.get(deleteFailureSubmission.submissionId)).toMatchObject({ status: 'review_ready', source_text: '' });
-    expect(deleteFailureEnv.RESUME_STAGING.objects.size).toBe(1);
   });
 
-  test('keeps Queue-send and D1-marking failures generic while deleting the staged object', async () => {
+  test('keeps Queue-send and D1-marking failures generic', async () => {
     const env = createEnvironment();
     env.SUBMISSION_QUEUE.send = async () => {
       throw new Error('queue-transport-secret');
@@ -582,8 +520,6 @@ describe('plain-text resume review drafts', () => {
     expect(responseText).not.toContain('queue-transport-secret');
     expect(responseText).not.toContain('database-marking-secret');
     expect(responseText).not.toContain('Setup Failure Candidate');
-    expect(env.RESUME_STAGING.objects.size).toBe(0);
-    expect(env.RESUME_STAGING.deletes).toHaveLength(1);
     expect(env.SUBMISSION_QUEUE.messages).toEqual([]);
   });
 });
@@ -744,10 +680,10 @@ describe('shared sensitive-field safety', () => {
     const resumeResponse = await worker.fetch(resumeRequest(resumeSource), resumeEnv);
     expect(resumeResponse.status).toBe(202);
     const resumeSubmission = await resumeResponse.json();
-    expect(new TextDecoder().decode(resumeEnv.RESUME_STAGING.puts[0].bytes)).toBe(resumeSource);
+    expect(resumeEnv.DB.submissions.get(resumeSubmission.submissionId).source_text).toBe(resumeSource);
     await processQueuedSubmission(resumeEnv);
     await expectRedactedReview(resumeEnv, resumeSubmission, resumeSecrets);
-    expect(resumeEnv.RESUME_STAGING.objects.size).toBe(0);
+    expect(resumeEnv.DB.submissions.get(resumeSubmission.submissionId).source_text).toBe('');
   });
 
   test('sanitizes a pre-existing private revision before returning it for review', async () => {
