@@ -9,6 +9,52 @@ const STRING_WEB_ACCESS_ENDPOINT = 'https://request.usestring.ai/v1/fetch';
 const STRING_WEB_ACCESS_LIMITS = Object.freeze({ requests: 1, pages: 1, timeoutMs: 12_000, responseBytes: 750_000 });
 const LINKEDIN_PROFILE_HOSTS = new Set(['linkedin.com', 'www.linkedin.com']);
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+const HN_ALGOLIA_ENDPOINT = 'https://hn.algolia.com/api/v1/search';
+const HN_THREAD_QUERY = Object.freeze({ query: 'who wants to be hired', tags: 'story,author_whoishiring' });
+const HN_INGEST_LIMITS = Object.freeze({
+  threads: 2,
+  threadCandidates: 20,
+  commentPages: 8,
+  pageSize: 100,
+  queueBatch: 100,
+  commentChars: 16_000,
+  minProseChars: 120,
+  timeoutMs: 10_000,
+  responseBytes: 4_000_000
+});
+const HN_MONTHS = Object.freeze([
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December'
+]);
+const HN_LOCATION_LABELS = Object.freeze(['location', 'based in', 'based', 'city', 'country']);
+const HN_REMOTE_LABELS = Object.freeze(['remote', 'remote work', 'remote?']);
+const HN_ROLE_LABELS = Object.freeze(['role', 'title', 'position', 'seeking', 'looking for', 'interested in']);
+const HN_SKILL_LABELS = Object.freeze(['technologies', 'technology', 'tech', 'tech stack', 'stack', 'skills', 'tools']);
+const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'school', 'schools', 'degree']);
+const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'experience', 'employers', 'worked at']);
+const HN_AVAILABILITY_LABELS = Object.freeze(['availability', 'available', 'start date', 'notice period']);
+const HN_NAME_LABELS = Object.freeze(['name']);
+const HN_MAPPED_LABELS = new Set([
+  ...HN_LOCATION_LABELS,
+  ...HN_REMOTE_LABELS,
+  ...HN_ROLE_LABELS,
+  ...HN_SKILL_LABELS,
+  ...HN_UNIVERSITY_LABELS,
+  ...HN_COMPANY_LABELS,
+  ...HN_AVAILABILITY_LABELS,
+  ...HN_NAME_LABELS
+]);
+const HN_UNKNOWN = 'Not specified';
 
 export default {
   async fetch(request, env) {
@@ -53,6 +99,11 @@ export default {
       return listPublishedCandidates(env);
     }
 
+    if (url.pathname === '/api/admin/ingest/hn') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      return runHackerNewsIngest(request, env);
+    }
+
     if (url.pathname.startsWith('/api/')) return json({ error: 'not_found' }, 404);
     if (!env.ASSETS) return new Response('Not found', { status: 404 });
 
@@ -65,9 +116,18 @@ export default {
   },
 
   async queue(batch, env) {
-    await Promise.all(batch.messages.map((message) => processSubmissionMessage(message, env)));
+    await Promise.all(batch.messages.map((message) => processQueueMessage(message, env)));
+  },
+
+  async scheduled(_event, env) {
+    await ingestHackerNews(env);
   }
 };
+
+function processQueueMessage(message, env) {
+  if (message.body?.hnComment) return processHnCommentMessage(message, env);
+  return processSubmissionMessage(message, env);
+}
 
 async function createTextSubmission(request, env) {
   const contentLength = Number(request.headers.get('content-length') || 0);
@@ -649,11 +709,13 @@ async function getReviewRevision(env, submissionId) {
 async function listPublishedCandidates(env) {
   if (!env.DB) return json({ error: 'service_not_configured' }, 503);
   const result = await env.DB.prepare(
-    `SELECT id, name, role, summary, location, work_mode, availability,
-            universities_json, companies_json, skills_json, date_ranges_json, published_at
-       FROM profile_revisions
-      WHERE status = 'published'
-      ORDER BY published_at DESC`
+    `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
+            r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
+            i.hn_permalink, i.thread_month
+       FROM profile_revisions r
+       LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+      WHERE r.status = 'published' AND i.suppressed_at IS NULL
+      ORDER BY r.published_at DESC`
   ).all();
 
   return json({ candidates: result.results.map(toPublicCandidate) });
@@ -800,6 +862,361 @@ async function processSubmissionMessage(message, env) {
   }
 }
 
+async function runHackerNewsIngest(request, env) {
+  if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
+  if (!env.HN_INGEST_TOKEN) return json({ error: 'ingest_not_configured' }, 503);
+
+  const authorization = request.headers.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!token) return json({ error: 'ingest_token_required' }, 401);
+  if (!constantTimeEqual(await hashToken(token), await hashToken(env.HN_INGEST_TOKEN))) {
+    return json({ error: 'ingest_token_invalid' }, 403);
+  }
+
+  try {
+    return json(await ingestHackerNews(env), 202);
+  } catch {
+    return json({ error: 'ingest_failed' }, 502);
+  }
+}
+
+async function ingestHackerNews(env, options = {}) {
+  if (!env.DB || !env.SUBMISSION_QUEUE) return { threads: 0, queued: 0, skipped: 0 };
+
+  const transport = options.transport || fetchHnJson;
+  const threads = (await discoverHnThreads(transport)).slice(0, options.threads || HN_INGEST_LIMITS.threads);
+  const results = await Promise.all(threads.map((thread) => queueHnThread(env, transport, thread)));
+
+  return {
+    threads: threads.length,
+    queued: results.reduce((total, result) => total + result.queued, 0),
+    skipped: results.reduce((total, result) => total + result.skipped, 0)
+  };
+}
+
+async function previewHackerNewsIngest(options = {}) {
+  const transport = options.transport || fetchHnJson;
+  const extractor = options.extractor || DETERMINISTIC_HN_EXTRACTOR;
+  const threads = (await discoverHnThreads(transport)).slice(0, options.threads || 1);
+
+  return Promise.all(
+    threads.map(async (thread) => {
+      const comments = await fetchHnThreadComments(transport, thread.id);
+      const records = (await Promise.all(comments.map((hit) => toHnRecord(thread, hit)))).filter(Boolean);
+      const drafts = records.map((record) => extractor.extract(record)).filter(Boolean);
+      return { threadId: thread.id, threadMonth: thread.month, comments: comments.length, extracted: drafts.length, drafts };
+    })
+  );
+}
+
+async function discoverHnThreads(transport) {
+  const payload = await transport(hnSearchUrl({ ...HN_THREAD_QUERY, hitsPerPage: HN_INGEST_LIMITS.threadCandidates }));
+
+  return (payload?.hits || [])
+    .filter((hit) => /who wants to be hired/i.test(String(hit?.title || '')))
+    .map((hit) => ({ id: String(hit?.objectID ?? ''), month: monthOf(hit?.created_at), createdAt: String(hit?.created_at || '') }))
+    .filter((thread) => isHnItemId(thread.id) && thread.month)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+async function queueHnThread(env, transport, thread) {
+  const known = await loadHnThreadState(env, thread.id);
+  const comments = await fetchHnThreadComments(transport, thread.id);
+  const records = (await Promise.all(comments.map((hit) => toHnRecord(thread, hit)))).filter(Boolean);
+  const pending = records.filter((record) => {
+    const state = known.get(record.itemId);
+    return !state?.suppressed_at && state?.comment_hash !== record.commentHash;
+  });
+
+  await sendHnMessages(env, pending);
+
+  return { queued: pending.length, skipped: records.length - pending.length };
+}
+
+async function fetchHnThreadComments(transport, threadId) {
+  const hits = [];
+  for (let page = 0; page < HN_INGEST_LIMITS.commentPages; page += 1) {
+    const payload = await transport(
+      hnSearchUrl({ tags: `comment,story_${threadId}`, hitsPerPage: HN_INGEST_LIMITS.pageSize, page })
+    );
+    const pageHits = payload?.hits || [];
+    hits.push(...pageHits);
+    if (pageHits.length < HN_INGEST_LIMITS.pageSize) break;
+    if (Number.isInteger(payload?.nbPages) && page + 1 >= payload.nbPages) break;
+  }
+  return hits;
+}
+
+async function sendHnMessages(env, records) {
+  for (let start = 0; start < records.length; start += HN_INGEST_LIMITS.queueBatch) {
+    const group = records.slice(start, start + HN_INGEST_LIMITS.queueBatch).map((record) => ({ hnComment: record.comment }));
+    if (typeof env.SUBMISSION_QUEUE.sendBatch === 'function') {
+      await env.SUBMISSION_QUEUE.sendBatch(group.map((body) => ({ body })));
+      continue;
+    }
+    await Promise.all(group.map((body) => env.SUBMISSION_QUEUE.send(body)));
+  }
+}
+
+async function loadHnThreadState(env, threadId) {
+  const result = await env.DB.prepare(
+    'SELECT hn_item_id, comment_hash, suppressed_at FROM hn_ingests WHERE thread_id = ?'
+  )
+    .bind(threadId)
+    .all();
+
+  return new Map((result?.results || []).map((row) => [row.hn_item_id, row]));
+}
+
+async function processHnCommentMessage(message, env) {
+  try {
+    await ingestHnComment(env, message.body.hnComment);
+    message.ack?.();
+  } catch {
+    message.retry?.();
+  }
+}
+
+async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRACTOR) {
+  const record = await toHnRecord(null, comment);
+  if (!record) return 'skipped_invalid';
+
+  const existing = await env.DB.prepare(
+    'SELECT submission_id, comment_hash, suppressed_at FROM hn_ingests WHERE hn_item_id = ?'
+  )
+    .bind(record.itemId)
+    .first();
+  if (existing?.suppressed_at) return 'skipped_suppressed';
+  if (existing && existing.comment_hash === record.commentHash) return 'unchanged';
+
+  const draft = extractor.extract(record);
+  const submissionId = existing?.submission_id || (draft ? `hn-${record.itemId}` : null);
+  const ingestedAt = new Date().toISOString();
+  const profileStatements = draft ? await hnProfileStatements(env, submissionId, record, draft, ingestedAt) : [];
+
+  await env.DB.batch([...profileStatements, hnIngestStatement(env, record, submissionId, ingestedAt)]);
+
+  if (!draft) return 'skipped_unstructured';
+  return existing ? 'updated' : 'created';
+}
+
+async function hnProfileStatements(env, submissionId, record, draft, ingestedAt) {
+  const reviewTokenHash = await hashToken(createToken());
+
+  return [
+    env.DB.prepare(
+      `INSERT INTO submissions (id, source_kind, source_text, review_token_hash, status, created_at, updated_at)
+       VALUES (?, 'hn_comment', '', ?, 'ingested', ?, ?)
+       ON CONFLICT(id) DO UPDATE SET status = 'ingested', updated_at = excluded.updated_at`
+    ).bind(submissionId, reviewTokenHash, ingestedAt, ingestedAt),
+    env.DB.prepare(
+      `INSERT INTO profile_revisions (
+         id, submission_id, status, name, role, summary, location, work_mode, availability,
+         universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at
+       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(submission_id) DO UPDATE SET
+         name = excluded.name, role = excluded.role, summary = excluded.summary,
+         location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
+         universities_json = excluded.universities_json, companies_json = excluded.companies_json,
+         skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
+         updated_at = excluded.updated_at
+       WHERE profile_revisions.status = 'published'`
+    ).bind(
+      crypto.randomUUID(),
+      submissionId,
+      draft.name,
+      draft.role,
+      draft.summary,
+      draft.location,
+      draft.workMode,
+      draft.availability,
+      JSON.stringify(draft.universities),
+      JSON.stringify(draft.companies),
+      JSON.stringify(draft.skills),
+      JSON.stringify(draft.dateRanges),
+      ingestedAt,
+      ingestedAt,
+      record.createdAt
+    )
+  ];
+}
+
+// An unextractable comment still earns an ingest row. Without the recorded hash, every run would
+// re-queue the same unparsable thread noise forever.
+function hnIngestStatement(env, record, submissionId, ingestedAt) {
+  return env.DB.prepare(
+    `INSERT INTO hn_ingests (
+       hn_item_id, submission_id, hn_author, hn_permalink, thread_id, thread_month,
+       comment_hash, comment_created_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(hn_item_id) DO UPDATE SET
+       submission_id = excluded.submission_id, hn_author = excluded.hn_author,
+       hn_permalink = excluded.hn_permalink, thread_id = excluded.thread_id,
+       thread_month = excluded.thread_month, comment_hash = excluded.comment_hash,
+       updated_at = excluded.updated_at
+     WHERE hn_ingests.suppressed_at IS NULL`
+  ).bind(
+    record.itemId,
+    submissionId,
+    record.author,
+    record.permalink,
+    record.threadId,
+    record.threadMonth,
+    record.commentHash,
+    record.createdAt,
+    ingestedAt,
+    ingestedAt
+  );
+}
+
+async function toHnRecord(thread, hit) {
+  const itemId = String(hit?.objectID ?? hit?.itemId ?? '').trim();
+  if (!isHnItemId(itemId)) return null;
+  if (thread && String(hit?.parent_id ?? '') !== thread.id) return null;
+
+  const commentHtml = String(hit?.comment_text ?? hit?.commentText ?? '').slice(0, HN_INGEST_LIMITS.commentChars);
+  const text = decodeHnCommentText(commentHtml);
+  if (!text) return null;
+
+  const createdAt = hnTimestamp(hit?.created_at ?? hit?.createdAt);
+  if (!createdAt) return null;
+  const threadId = thread ? thread.id : String(hit?.threadId ?? '');
+  if (!isHnItemId(threadId)) return null;
+
+  const comment = {
+    itemId,
+    author: hnAuthor(hit?.author),
+    commentText: commentHtml,
+    createdAt,
+    threadId,
+    threadMonth: thread ? thread.month : monthOf(hit?.threadMonth) || String(hit?.threadMonth ?? '')
+  };
+  if (!/^\d{4}-\d{2}$/.test(comment.threadMonth)) return null;
+
+  return {
+    ...comment,
+    comment,
+    text,
+    permalink: `https://news.ycombinator.com/item?id=${itemId}`,
+    commentHash: await hashToken(text)
+  };
+}
+
+const DETERMINISTIC_HN_EXTRACTOR = Object.freeze({
+  id: 'deterministic-labels-v1',
+  extract: (record) => extractHnProfile(record)
+});
+
+function extractHnProfile(record) {
+  const entries = record.text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([^:]{2,32}):\s*(.*)$/);
+      return { line, label: match ? normalizeHnLabel(match[1]) : '', value: match ? match[2].trim() : '' };
+    });
+
+  const labeled = new Map();
+  entries.filter((entry) => entry.label && entry.value).forEach((entry) => {
+    if (!labeled.has(entry.label)) labeled.set(entry.label, entry.value);
+  });
+  const valueFor = (labels) => labels.map((label) => labeled.get(label)).find(Boolean) || '';
+  const listFor = (labels) => splitList(valueFor(labels));
+
+  const location = valueFor(HN_LOCATION_LABELS);
+  const skills = listFor(HN_SKILL_LABELS);
+  const role = valueFor(HN_ROLE_LABELS);
+  const leftovers = entries.filter((entry) => !entry.label || !HN_MAPPED_LABELS.has(entry.label) || !labeled.has(entry.label));
+  const prose = leftovers.map((entry) => entry.line);
+  if (!location && !skills.length && !role && prose.join(' ').length < HN_INGEST_LIMITS.minProseChars) return null;
+
+  const separator = prose.some((line) => /^[^:]{2,32}:\s/.test(line)) ? ' · ' : ' ';
+  const dateRanges = [...record.text.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map(
+    (match) => match[0]
+  );
+
+  return sanitizeCandidateDraft({
+    name: (valueFor(HN_NAME_LABELS) || record.author || HN_UNKNOWN).slice(0, 200),
+    role: (role || prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || HN_UNKNOWN).slice(0, 300),
+    summary: prose.join(separator).slice(0, 1_500) || HN_UNKNOWN,
+    location: (location || HN_UNKNOWN).slice(0, 300),
+    workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
+    availability: valueFor(HN_AVAILABILITY_LABELS).slice(0, 100) || HN_UNKNOWN,
+    universities: listFor(HN_UNIVERSITY_LABELS),
+    companies: listFor(HN_COMPANY_LABELS),
+    skills,
+    dateRanges: unique(dateRanges).slice(0, 20)
+  }).draft;
+}
+
+function hnWorkMode(remoteValue, sourceText) {
+  if (/^(yes|yes\b.*|remote|remote only|only remote|preferred|strongly preferred)$/i.test(remoteValue)) return 'Remote';
+  if (/^(no|no\b.*|onsite|on-site|office|not preferred)$/i.test(remoteValue)) return 'On-site';
+  if (remoteValue) return remoteValue.slice(0, 100);
+  if (/\bremote\b/i.test(sourceText)) return 'Remote';
+  return HN_UNKNOWN;
+}
+
+function normalizeHnLabel(label) {
+  return label
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[\s/]+/g, ' ')
+    .trim();
+}
+
+function decodeHnCommentText(html) {
+  return decodeHtmlEntities(
+    html
+      .replace(/<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>[\s\S]*?<\/a>/gi, ' $1 ')
+      .replace(/<\/?(?:p|br|div|li|ul|ol|pre|blockquote)\b[^>]*>/gi, '\n')
+      .replace(/<[^>]*>/g, '')
+  )
+    .replace(/\r/g, '')
+    .replace(/[\t ]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+function hnAuthor(value) {
+  const author = String(value ?? '').trim();
+  return /^[A-Za-z0-9_-]{2,32}$/.test(author) ? author : '';
+}
+
+function hnTimestamp(value) {
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+}
+
+function monthOf(value) {
+  return hnTimestamp(value).slice(0, 7);
+}
+
+function isHnItemId(value) {
+  return /^\d{1,20}$/.test(value);
+}
+
+function hnSearchUrl(parameters) {
+  const url = new URL(HN_ALGOLIA_ENDPOINT);
+  Object.entries(parameters).forEach(([name, value]) => url.searchParams.set(name, String(value)));
+  return url.href;
+}
+
+async function fetchHnJson(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HN_INGEST_LIMITS.timeoutMs);
+  try {
+    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' }, redirect: 'error', signal: controller.signal });
+    if (!response.ok) throw new Error('hn_fetch_failed');
+    return JSON.parse(await readLimitedText(response, HN_INGEST_LIMITS.responseBytes));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function authorizeReview(request, env, submissionId) {
   if (!env.DB) return json({ error: 'service_not_configured' }, 503);
   const authorization = request.headers.get('authorization') || '';
@@ -898,6 +1315,7 @@ function toReviewDraft(row) {
 
 function toPublicCandidate(row) {
   const sanitized = candidateDraftFromRow(row);
+  const fromHackerNews = Boolean(row.hn_permalink);
   return {
     id: row.id,
     name: sanitized.name,
@@ -906,16 +1324,30 @@ function toPublicCandidate(row) {
     location: sanitized.location,
     mode: sanitized.workMode,
     availability: sanitized.availability,
-    university: sanitized.universities[0] || 'Not specified',
+    university: sanitized.universities[0] || HN_UNKNOWN,
     universities: sanitized.universities,
     companies: sanitized.companies,
     skills: sanitized.skills,
     dateRanges: sanitized.dateRanges,
-    source: 'Candidate submitted',
-    enriched: true,
-    posted: 0,
+    source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
+    sourceUrl: fromHackerNews ? row.hn_permalink : '',
+    enriched: fromHackerNews ? sanitized.companies.length > 0 || sanitized.universities.length > 0 : true,
+    posted: daysSince(row.published_at),
     publishedAt: row.published_at
   };
+}
+
+function monthLabel(threadMonth) {
+  const match = /^(\d{4})-(\d{2})$/.exec(threadMonth || '');
+  if (!match) return 'Hacker News';
+  const month = HN_MONTHS[Number(match[2]) - 1];
+  return month ? `${month} ${match[1]}` : 'Hacker News';
+}
+
+function daysSince(timestamp) {
+  const published = Date.parse(timestamp || '');
+  if (!Number.isFinite(published)) return 0;
+  return Math.max(0, Math.floor((Date.now() - published) / 86_400_000));
 }
 
 function candidateDraftFromRow(row) {
@@ -995,4 +1427,17 @@ function json(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
 }
 
-export { MAX_RESUME_BYTES, MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl };
+export {
+  DETERMINISTIC_HN_EXTRACTOR,
+  HN_INGEST_LIMITS,
+  MAX_RESUME_BYTES,
+  MAX_SOURCE_BYTES,
+  STRING_WEB_ACCESS_LIMITS,
+  decodeHnCommentText,
+  extractProfile,
+  ingestHackerNews,
+  ingestHnComment,
+  previewHackerNewsIngest,
+  toHnRecord,
+  validateCandidateSourceUrl
+};
