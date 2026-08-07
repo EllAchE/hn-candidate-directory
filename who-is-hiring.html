@@ -36,31 +36,21 @@
       </section>
 
       <section class="workspace" id="directory">
-        <aside class="filters-panel">
-          <div class="panel-heading"><span>Filter directory</span><button class="clear-button" id="clear-filters">Clear all</button></div>
-          <label class="field-label" for="search">Search</label>
-          <div class="search-field"><span>⌕</span><input id="search" type="search" placeholder="Name, skill, company…" /></div>
+        <aside class="filters-panel" id="filters-panel">
+          <div class="panel-heading"><span>Filter directory</span><button class="clear-button" type="button" id="clear-filters" data-clear-filters>Clear all</button></div>
+          <label class="field-label" for="search">Search everything</label>
+          <div class="search-field"><span>⌕</span><input id="search" type="search" autocomplete="off" aria-describedby="search-hint" placeholder="Search all fields — name, role, location, school, company, skill…" /></div>
+          <p class="field-hint" id="search-hint">One box, every field: name, role, location, university, companies, skills, and summary.</p>
 
-          <label class="field-label" for="availability">Availability</label>
-          <select id="availability"><option value="">Any availability</option><option>Immediate</option><option>1 month</option><option>3 months</option></select>
-
-          <label class="field-label" for="work-mode">Work mode</label>
-          <select id="work-mode"><option value="">Any work mode</option><option>Remote</option><option>Hybrid</option><option>On-site</option></select>
-
-          <label class="field-label" for="university">University</label>
-          <select id="university"><option value="">Any university</option><option>University of Texas at Dallas</option><option>Carnegie Mellon University</option><option>University of Waterloo</option><option>Georgia Tech</option></select>
-
-          <label class="field-label" for="company">Previously at</label>
-          <select id="company"><option value="">Any company</option><option>Google</option><option>Meta</option><option>Microsoft</option><option>Stripe</option><option>YC startup</option></select>
-
-          <label class="field-label" for="skill">Skill or stack</label>
-          <div class="tag-input"><input id="skill" type="text" placeholder="e.g. Rust" /><span>↵</span></div>
+          <button class="filters-toggle" type="button" id="filters-toggle" aria-expanded="false" aria-controls="filters-body"><span>Filters</span><span class="filters-badge" id="filters-badge">none selected</span></button>
+          <div class="filters-body" id="filters-body"></div>
 
           <div class="filter-note"><span class="spark">✦</span><p>Enriched profiles include education and employment history extracted from public resumes and LinkedIn links.</p></div>
         </aside>
 
         <section class="results-panel" aria-live="polite">
-          <div class="results-toolbar"><div><span class="result-count" id="result-count">6</span> candidates <span class="muted">matching your filters</span></div><select id="sort"><option value="relevant">Most relevant</option><option value="recent">Recently posted</option><option value="enriched">Most enriched</option></select></div>
+          <div class="active-filters" id="active-filters" hidden></div>
+          <div class="results-toolbar"><div><span class="result-count" id="result-count">6</span> candidates <span class="muted">matching your filters</span></div><select id="sort" aria-label="Sort candidates"><option value="relevant">Most relevant</option><option value="recent">Recently posted</option><option value="enriched">Most enriched</option></select></div>
           <div id="candidate-list" class="candidate-list"></div>
           <div class="empty-state" id="empty-state" hidden><div class="empty-icon">⌕</div><h3>No candidates found</h3><p>Try removing a filter or searching a broader skill.</p></div>
         </section>
