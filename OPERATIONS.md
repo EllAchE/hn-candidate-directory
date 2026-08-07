@@ -39,6 +39,8 @@ Uploaded resume content is held only as `submissions.source_text` in D1 and is c
 
    Review the output before proceeding. The committed `[assets]` directory is `.`; confirm the asset manifest contains only intentionally public static assets. Stop if private data, credentials, generated environment configs, operator documentation, scripts, tests, migrations, Worker source, or local artifacts appear.
 
+   `test/assets-manifest.test.js` pins the publishable set to `sensitive-data.js`, `who-is-hiring.css`, `who-is-hiring.html`, and `who-is-hiring.js`, so `bun run check` in step 3 already fails on a stray artifact. The dry-run review stays the authority: it sees the working tree the deploy will actually upload, including files created after the gate ran.
+
 Before any deploy, the environment config must have this effective shape:
 
 ```toml

@@ -1,5 +1,5 @@
-.git*
-.assetsignore
+.*
+node_modules/**
 package.json
 OPERATIONS.md
 scripts/**
