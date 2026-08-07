@@ -18,6 +18,7 @@ const PUBLIC_CANDIDATES = [
     skills: ['Rust', 'Kubernetes', 'Go'],
     summary: 'Builds reliable storage systems for high-throughput products.',
     source: 'HN · July 2026',
+    sourceUrl: 'https://news.ycombinator.com/item?id=44601001',
     enriched: true,
     posted: 4,
     publishedAt: '2026-07-27T12:00:00.000Z'
@@ -34,6 +35,7 @@ const PUBLIC_CANDIDATES = [
     skills: ['Python', 'PyTorch', 'Experimentation'],
     summary: 'Evaluates trustworthy climate models with product and research teams.',
     source: 'HN · July 2026',
+    sourceUrl: 'http://news.ycombinator.com/item?id=44601002',
     enriched: true,
     posted: 1,
     publishedAt: '2026-07-30T12:00:00.000Z'
@@ -66,6 +68,7 @@ const PUBLIC_CANDIDATES = [
     skills: ['Rust', 'PostgreSQL', 'SaaS'],
     summary: 'Scales payment systems for async software teams.',
     source: 'HN · July 2026',
+    sourceUrl: 'https://news.ycombinator.com/item?id=44601004',
     enriched: true,
     posted: 2,
     publishedAt: '2026-07-29T12:00:00.000Z'
@@ -82,6 +85,7 @@ const PUBLIC_CANDIDATES = [
     skills: ['Go', 'Security', 'Cloud'],
     summary: 'Builds practical fintech security controls for early-stage teams.',
     source: 'HN · July 2026',
+    sourceUrl: 'javascript:alert(document.domain)',
     enriched: true,
     posted: 7,
     publishedAt: '2026-07-24T12:00:00.000Z'
@@ -98,6 +102,7 @@ const PUBLIC_CANDIDATES = [
     skills: ['TypeScript', 'Product', 'Node.js'],
     summary: 'Ships education products from customer discovery through launch.',
     source: 'HN · July 2026',
+    sourceUrl: 'https://news.ycombinator.com/item?id=44601006&x="><script>alert(1)</script>',
     enriched: false,
     posted: 3,
     publishedAt: '2026-07-28T12:00:00.000Z'
@@ -385,6 +390,71 @@ test(
   30_000
 );
 
+test(
+  'candidate cards link a source only when its URL is https, and never render a hostile scheme',
+  async () => {
+    await withPage(async (cdp) => {
+      expect(await sourceCells(cdp)).toEqual([
+        { name: 'Ada Rivera', text: 'from HN · July 2026', href: 'https://news.ycombinator.com/item?id=44601001', target: '_blank', rel: 'noopener noreferrer' },
+        { name: 'Beatrice Okafor', text: 'from HN · July 2026', href: null, target: null, rel: null },
+        { name: 'Chen Ito', text: 'from HN · June 2026', href: null, target: null, rel: null },
+        { name: 'Diego Silva', text: 'from HN · July 2026', href: 'https://news.ycombinator.com/item?id=44601004', target: '_blank', rel: 'noopener noreferrer' },
+        { name: 'Evelyn Stone', text: 'from HN · July 2026', href: null, target: null, rel: null },
+        {
+          name: 'Fatima Noor',
+          text: 'from HN · July 2026',
+          href: 'https://news.ycombinator.com/item?id=44601006&x=%22%3E%3Cscript%3Ealert(1)%3C/script%3E',
+          target: '_blank',
+          rel: 'noopener noreferrer'
+        }
+      ]);
+      expect(await evaluate(cdp, `[...document.querySelectorAll('a')].some((link) => link.protocol === 'javascript:')`)).toBe(false);
+      expect(await evaluate(cdp, `document.querySelectorAll('script').length`)).toBe(1);
+
+      await selectFacetOption(cdp, 'mode', 'Hybrid');
+      expect(await sourceCells(cdp)).toEqual([
+        { name: 'Beatrice Okafor', text: 'from HN · July 2026', href: null, target: null, rel: null },
+        { name: 'Evelyn Stone', text: 'from HN · July 2026', href: null, target: null, rel: null }
+      ]);
+      await clearFilters(cdp);
+    });
+  },
+  30_000
+);
+
+test(
+  'the page carries an unbranded identity, no submission-first framing, and only derived statistics',
+  async () => {
+    await withPage(async (cdp) => {
+      expect(await evaluate(cdp, 'document.title')).toBe('Who wants to be hired · Candidate directory');
+      expect(await textContent(cdp, '.brand')).toBe('Who wants to be hired');
+      expect(await evaluate(cdp, `/ellache|built in public/i.test(document.documentElement.innerHTML)`)).toBe(false);
+      expect(await evaluate(cdp, `document.querySelector('.pipeline-card')`)).toBe(null);
+
+      expect(await evaluate(cdp, `[...document.querySelectorAll('.stats div')].map((stat) => [stat.querySelector('strong').textContent, stat.querySelector('span').textContent])`)).toEqual([
+        ['6', 'candidate profiles'],
+        ['4', 'universities represented'],
+        ['4', 'profiles enriched']
+      ]);
+
+      const markup = await evaluate(cdp, `fetch('/who-is-hiring.html').then((response) => response.text())`);
+      for (const fabricated of ['1,284', '>38<', '>612<', '100%', 'source-linked']) expect(markup).not.toContain(fabricated);
+
+      expect(await evaluate(cdp, `[...document.querySelectorAll('.hero-actions > *')].map((action) => [action.tagName, action.className])`)).toEqual([
+        ['A', 'button button-primary'],
+        ['BUTTON', 'text-link']
+      ]);
+      expect(await evaluate(cdp, `[...document.querySelectorAll('[data-open-import]')].map((button) => button.className)`)).toEqual(['text-link', 'text-link']);
+
+      await click(cdp, '.hero-actions [data-open-import]');
+      expect(await evaluate(cdp, `document.getElementById('import-dialog').open`)).toBe(true);
+      await click(cdp, '#import-dialog [data-close-dialog]');
+      expect(await evaluate(cdp, `document.getElementById('import-dialog').open`)).toBe(false);
+    });
+  },
+  30_000
+);
+
 async function withPage(run) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
   let server;
@@ -653,6 +723,23 @@ async function waitFor(cdp, expression) {
 
 async function candidateNames(cdp) {
   return evaluate(cdp, `[...document.querySelectorAll('.candidate-name')].map((element) => element.textContent)`);
+}
+
+async function sourceCells(cdp) {
+  return evaluate(
+    cdp,
+    `[...document.querySelectorAll('.candidate-card')].map((card) => {
+      const cell = card.querySelector('.source-cell');
+      const link = cell.querySelector('a');
+      return {
+        name: card.querySelector('.candidate-name').textContent,
+        text: cell.textContent,
+        href: link ? link.getAttribute('href') : null,
+        target: link ? link.getAttribute('target') : null,
+        rel: link ? link.getAttribute('rel') : null
+      };
+    })`
+  );
 }
 
 async function textContent(cdp, selector) {

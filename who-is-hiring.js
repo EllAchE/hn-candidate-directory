@@ -30,12 +30,20 @@ function render() {
   if (el('sort').value === 'recent') filtered.sort((a, b) => a.posted - b.posted);
   if (el('sort').value === 'enriched') filtered.sort((a, b) => Number(b.enriched) - Number(a.enriched));
   el('result-count').textContent = filtered.length;
-  el('candidate-count').textContent = candidates.length.toLocaleString();
+  renderStats();
   el('candidate-list').innerHTML = filtered.map(card).join('');
   el('empty-state').hidden = filtered.length > 0;
   FACETS.forEach((facet) => renderFacet(facet, query));
   renderActiveFilters(query);
   syncFilterDrawer();
+}
+
+function renderStats() {
+  const universityFacet = FACETS.find((facet) => facet.key === 'university');
+  const universities = new Set(candidates.flatMap((candidate) => facetValues(universityFacet, candidate).map((value) => facetKeyFor(universityFacet, value))).filter((key) => key !== 'not specified'));
+  el('candidate-count').textContent = candidates.length.toLocaleString();
+  el('university-count').textContent = universities.size.toLocaleString();
+  el('enriched-count').textContent = candidates.filter((candidate) => candidate.enriched).length.toLocaleString();
 }
 
 function searchableText(candidate) {
@@ -214,7 +222,22 @@ function card(candidate) {
   const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
   const enrichment = candidate.enriched ? `<span class="chip enriched">✦ enriched</span>` : '';
   const companies = candidate.companies.length ? `<span>Previously at <b>${escapeHtml(candidate.companies.join(', '))}</b></span>` : '<span>Employment history <b>not enriched</b></span>';
-  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span>from <b>${escapeHtml(candidate.source)}</b></span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+}
+
+function sourceLink(candidate) {
+  const label = escapeHtml(candidate.source);
+  const href = httpsUrl(candidate.sourceUrl);
+  return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : `<b>${label}</b>`;
+}
+
+function httpsUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char])); }

@@ -9,30 +9,29 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="./">ellache<span>.labs</span></a>
+      <a class="brand" href="./">Who wants<span> to be hired</span></a>
       <nav aria-label="Main navigation">
         <a href="#directory">Directory</a>
-        <a href="#enrichment">Enrichment</a>
-        <button class="button button-small button-outline" data-open-request>Manage your profile</button>
+        <a href="#about">About</a>
+        <button class="text-link" data-open-request>Manage your listing</button>
       </nav>
     </header>
 
     <main>
       <section class="hero">
-        <div class="eyebrow"><span class="pulse"></span> Open candidate index · July 2026</div>
+        <div class="eyebrow"><span class="pulse"></span> Open candidate index</div>
         <h1>Find the people behind the HN posts.</h1>
-        <p class="hero-copy">A structured, searchable directory of candidates from Hacker News' “Who wants to be hired?” threads — enriched with the context that helps a good introduction happen.</p>
+        <p class="hero-copy">A structured, searchable directory of candidates from Hacker News' “Who wants to be hired?” threads — every profile links back to the comment it came from.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="#directory">Browse candidates <span>↓</span></a>
-          <button class="button button-ghost" data-open-import>Submit your listing <span>＋</span></button>
+          <button class="text-link" data-open-import>Add your own listing</button>
         </div>
       </section>
 
       <section class="stats" aria-label="Directory summary">
-        <div><strong id="candidate-count">1,284</strong><span>candidate profiles</span></div>
-        <div><strong>38</strong><span>universities represented</span></div>
-        <div><strong>612</strong><span>profiles enriched</span></div>
-        <div><strong>100%</strong><span>source-linked</span></div>
+        <div><strong id="candidate-count">—</strong><span>candidate profiles</span></div>
+        <div><strong id="university-count">—</strong><span>universities represented</span></div>
+        <div><strong id="enriched-count">—</strong><span>profiles enriched</span></div>
       </section>
 
       <section class="workspace" id="directory">
@@ -56,21 +55,16 @@
         </section>
       </section>
 
-      <section class="enrichment-section" id="enrichment">
-        <div class="section-kicker">The expensive part, made explicit</div>
-        <div class="enrichment-grid">
-          <div><h2>Turn a resume, LinkedIn profile, or source text into a private draft.</h2><p class="section-copy">Upload a plain-text resume, submit one allowlisted public LinkedIn profile, or paste your own listing. Asynchronous processing extracts companies, universities, skills, dates, and locations into a private review draft. Nothing enters search during review.</p><button class="button button-dark" data-open-import>Submit a source <span>→</span></button></div>
-          <div class="pipeline-card">
-            <div class="pipeline-row"><span class="pipeline-number">01</span><div><strong>Private submission</strong><small>Candidate submits a plain-text resume, approved LinkedIn URL, or source text</small></div><span class="pipeline-state done">Ready</span></div>
-            <div class="pipeline-row"><span class="pipeline-number">02</span><div><strong>Extract & normalize</strong><small>Companies · schools · skills · dates · locations</small></div><span class="pipeline-state done">Queued</span></div>
-            <div class="pipeline-row"><span class="pipeline-number">03</span><div><strong>Candidate review</strong><small>Token-gated draft stays outside public search</small></div><span class="pipeline-state done">Private</span></div>
-            <div class="pipeline-row"><span class="pipeline-number">04</span><div><strong>Explicit consent</strong><small>Candidate approves the exact revision or declines listing</small></div><span class="pipeline-state consent">Required</span></div>
-          </div>
-        </div>
+      <section class="about-section" id="about">
+        <div class="section-kicker">How profiles get here</div>
+        <h2>Public posts, made searchable.</h2>
+        <p class="section-copy">Listings are read from Hacker News “Who wants to be hired?” threads and normalized into companies, universities, skills, dates, and locations. Each card links back to the comment it came from.</p>
+        <p class="section-copy">Candidates keep control of their own listing. A submitted resume, LinkedIn profile, or source text becomes a private draft that stays out of search until it is reviewed and explicitly approved, and any listing can be updated or removed later.</p>
+        <p class="about-actions"><button class="text-link" data-open-import>Add your own listing</button><button class="text-link" data-open-request>Update or remove your listing</button></p>
       </section>
     </main>
 
-    <footer><span>ellache.labs · built in public</span><a href="https://github.com/EllAchE/EllAchE.github.io">View source on GitHub ↗</a></footer>
+    <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="#about">How this works</a></footer>
 
     <dialog id="candidate-dialog" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
