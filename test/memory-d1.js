@@ -1,7 +1,6 @@
 export function createEnvironment() {
   return {
     DB: new MemoryD1(),
-    RESUME_STAGING: new MemoryR2(),
     SUBMISSION_QUEUE: {
       messages: [],
       async send(message) {
@@ -9,25 +8,6 @@ export function createEnvironment() {
       }
     }
   };
-}
-
-class MemoryR2 {
-  constructor() {
-    this.objects = new Map();
-    this.puts = [];
-    this.deletes = [];
-  }
-
-  async put(key, value, options) {
-    const bytes = new Uint8Array(value);
-    this.objects.set(key, bytes);
-    this.puts.push({ key, bytes, options });
-  }
-
-  async delete(key) {
-    this.objects.delete(key);
-    this.deletes.push(key);
-  }
 }
 
 class MemoryD1 {

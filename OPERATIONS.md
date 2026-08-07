@@ -1,10 +1,10 @@
 # Candidate directory operations
 
-This runbook is the release boundary for the Cloudflare Worker, D1 database, Queue, and private R2 resume-staging bucket. It deliberately separates local verification from Cloudflare mutations.
+This runbook is the release boundary for the Cloudflare Worker, D1 database, and Queue. It deliberately separates local verification from Cloudflare mutations.
 
 ## Authorization boundary
 
-Do not run a command in a **mutation** block until an operator explicitly authorizes that exact environment and block. Creating a D1 database, Queue, or R2 bucket; changing an R2 lifecycle; applying a migration; writing a secret; deploying or rolling back a Worker; changing traffic; and running the write canary are all external mutations. Staging approval does not authorize production. A deploy approval does not authorize a canary or rollback.
+Do not run a command in a **mutation** block until an operator explicitly authorizes that exact environment and block. Creating a D1 database or Queue; applying a migration; writing a secret; deploying or rolling back a Worker; changing traffic; and running the write canary are all external mutations. Staging approval does not authorize production. A deploy approval does not authorize a canary or rollback.
 
 The commands below are instructions for a human operator. They were not run while this runbook was authored. Never paste a secret into a command argument, commit a generated environment config, or delete durable resources as part of a code rollback.
 
@@ -15,10 +15,9 @@ The commands below are instructions for a human operator. They were not run whil
 | Worker | `hn-candidate-directory-staging` | `hn-candidate-directory` |
 | D1 | `hn-candidate-directory-staging` | `hn-candidate-directory` |
 | Queue | `hn-candidate-submissions-staging` | `hn-candidate-submissions` |
-| Private R2 bucket | `hn-candidate-resume-staging-staging` | `hn-candidate-resume-staging` |
 | Temporary config | `wrangler.staging.toml` | `wrangler.production.toml` |
 
-The R2 bucket names are intentionally explicit about their environment and purpose. Both buckets must remain private. Their `resume-staging/` objects are transient inputs, not backups or public assets.
+Uploaded resume content is held only as `submissions.source_text` in D1 and is cleared on successful extraction. The deployment requires no object storage.
 
 ## Prerequisites and local release gate
 
@@ -31,7 +30,7 @@ The R2 bucket names are intentionally explicit about their environment and purpo
    git diff --check
    ```
 
-4. Copy `wrangler.toml` to the temporary config named in the table. Do not commit it. Set the environment-specific Worker and resource names. For this local-only check, replace the all-zero D1 ID with the syntactically valid placeholder `11111111-1111-1111-1111-111111111111`. Preserve these bindings exactly: `ASSETS`, `DB`, `RESUME_STAGING`, and `SUBMISSION_QUEUE`.
+4. Copy `wrangler.toml` to the temporary config named in the table. Do not commit it. Set the environment-specific Worker and resource names. For this local-only check, replace the all-zero D1 ID with the syntactically valid placeholder `11111111-1111-1111-1111-111111111111`. Preserve these bindings exactly: `ASSETS`, `DB`, and `SUBMISSION_QUEUE`.
 5. Inspect the deploy bundle without contacting a live Worker:
 
    ```sh
@@ -58,10 +57,6 @@ database_name = "<D1_NAME>"
 database_id = "<D1_ID_FROM_CREATE>"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "RESUME_STAGING"
-bucket_name = "<PRIVATE_R2_BUCKET>"
-
 [[queues.producers]]
 binding = "SUBMISSION_QUEUE"
 queue = "<QUEUE_NAME>"
@@ -82,7 +77,6 @@ Obtain separate operator approval for each mutation block. Stop on any unexpecte
 ```sh
 wrangler d1 create hn-candidate-directory-staging --config wrangler.staging.toml --update-config=false
 wrangler queues create hn-candidate-submissions-staging --config wrangler.staging.toml
-wrangler r2 bucket create hn-candidate-resume-staging-staging --config wrangler.staging.toml --update-config=false
 ```
 
 Copy the returned D1 database ID into `wrangler.staging.toml`, replacing the local-only placeholder. Do not substitute the database name where the config requires an ID.
@@ -95,18 +89,7 @@ wrangler deploy --dry-run --outdir /tmp/claude/hn-candidate-directory-staging-dr
 
 Confirm the result matches the pre-creation dry run before proceeding.
 
-### 2. Enforce private transient resume storage — mutation
-
-R2 buckets are private by default. Do not enable an `r2.dev` domain or custom public domain. Add a one-day expiry scoped to the application prefix, then inspect it:
-
-```sh
-wrangler r2 bucket lifecycle add hn-candidate-resume-staging-staging expire-resume-staging-after-one-day resume-staging/ --expire-days 1 --config wrangler.staging.toml
-wrangler r2 bucket lifecycle list hn-candidate-resume-staging-staging --config wrangler.staging.toml
-```
-
-The list output must show the `resume-staging/` prefix and one-day expiry. Stop if another rule would retain objects longer or make them public.
-
-### 3. Apply the staging schema — mutation
+### 2. Apply the staging schema — mutation
 
 This is DDL and must be run by the authorized human operator, never by an agent:
 
@@ -118,7 +101,7 @@ wrangler d1 migrations list hn-candidate-directory-staging --remote --config wra
 
 Confirm `migrations/0001_review_drafts.sql` is applied exactly once. Do not deploy against an empty or partially migrated database.
 
-### 4. Deploy the staging code — mutation
+### 3. Deploy the staging code — mutation
 
 Capture the currently active version first if the Worker already exists:
 
@@ -128,9 +111,9 @@ wrangler deploy --config wrangler.staging.toml
 wrangler deployments status --config wrangler.staging.toml
 ```
 
-Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the four bindings in deploy output before continuing.
+Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the three bindings in deploy output before continuing.
 
-### 5. Write the staging Web Access secret — mutation and immediate deploy
+### 4. Write the staging Web Access secret — mutation and immediate deploy
 
 `wrangler secret put` creates a new Worker version and deploys it immediately. Treat it as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely:
 
@@ -141,7 +124,7 @@ wrangler deployments status --config wrangler.staging.toml
 
 Do not pass the value on the command line or place it in `.dev.vars`, config files, logs, or the change record. If the operator uses Wrangler's versioned-secret workflow instead, create the secret-bearing version with `wrangler versions secret put` and explicitly authorize the later `wrangler versions deploy`; creating the version does not itself authorize traffic changes.
 
-### 6. Read-only staging smoke — externally visible traffic
+### 5. Read-only staging smoke — externally visible traffic
 
 After explicit authorization to contact the staging URL, run:
 
@@ -159,17 +142,17 @@ Staging smoke passed: 2 assets, 0 public candidates
 
 An existing staging directory may report a nonzero candidate count. Any failure blocks rollout.
 
-### 7. Observe before canary
+### 6. Observe before canary
 
-With read-only access authorized, inspect Worker logs, request/error rates, Queue backlog and consumer failures, D1 errors and latency, and R2 operation errors. Keep a tail open only for the bounded observation window:
+With read-only access authorized, inspect Worker logs, request/error rates, Queue backlog and consumer failures, and D1 errors and latency. Keep a tail open only for the bounded observation window:
 
 ```sh
 wrangler tail --config wrangler.staging.toml
 ```
 
-No secret, review token, source text, resume content, object key, or authorization header may appear in logs. Stop and enter incident handling if it does.
+No secret, review token, source text, resume content, or authorization header may appear in logs. Stop and enter incident handling if it does.
 
-### 8. Controlled staging canary — mutation
+### 7. Controlled staging canary — mutation
 
 Obtain explicit canary authorization. In a private browser window, use the staging UI to perform one synthetic flow with unmistakably fictional data:
 
@@ -179,7 +162,7 @@ Obtain explicit canary authorization. In a private browser window, use the stagi
 4. Confirm Queue processing produces a private draft and clears stored source text.
 5. Edit the draft, explicitly publish it, and confirm only the documented public fields appear.
 6. Use the same private token to withdraw the candidate. Confirm it disappears from the public endpoint.
-7. Confirm no `resume-staging/` object was created by the source-text flow and no sensitive value reached logs.
+7. Confirm no sensitive value reached logs.
 
 Delete no durable resource after the canary. Retain only the non-sensitive evidence: timestamps, HTTP status classes, and pass/fail results.
 
@@ -194,9 +177,6 @@ Run these only if the corresponding production resources do not already exist:
 ```sh
 wrangler d1 create hn-candidate-directory --config wrangler.production.toml --update-config=false
 wrangler queues create hn-candidate-submissions --config wrangler.production.toml
-wrangler r2 bucket create hn-candidate-resume-staging --config wrangler.production.toml --update-config=false
-wrangler r2 bucket lifecycle add hn-candidate-resume-staging expire-resume-staging-after-one-day resume-staging/ --expire-days 1 --config wrangler.production.toml
-wrangler r2 bucket lifecycle list hn-candidate-resume-staging --config wrangler.production.toml
 ```
 
 If a resource exists, inspect and reuse it only after its ownership and data-retention policy are verified. Never recreate, replace, or delete it to make a command pass.
@@ -247,11 +227,10 @@ A rollback changes live traffic immediately and requires explicit authorization 
    wrangler deployments status --config wrangler.<ENVIRONMENT>.toml
    ```
 
-4. With read-only traffic authorized, run the smoke against that environment and observe logs, Queue processing, D1, and R2.
-5. Do not delete, recreate, empty, or rename D1, Queue, or R2 during code rollback. Worker rollback does not revert durable resources, migrations, secrets, queued/in-flight messages, lifecycle rules, or candidate data.
+4. With read-only traffic authorized, run the smoke against that environment and observe logs, Queue processing, and D1.
+5. Do not delete, recreate, empty, or rename D1 or the Queue during code rollback. Worker rollback does not revert durable resources, migrations, secrets, queued/in-flight messages, lifecycle rules, or candidate data.
 6. Do not reverse a D1 migration. If an older Worker is not forward-compatible with the current schema, keep traffic on a compatible version and prepare a reviewed forward fix.
-7. Preserve the R2 one-day lifecycle while investigating. Do not bulk-delete transient objects without separate authorization and an object-level recovery assessment.
-8. Close the incident only after public reads, private review isolation, Queue drain, and redaction checks are healthy.
+7. Close the incident only after public reads, private review isolation, Queue drain, and redaction checks are healthy.
 
 ## Failure playbooks
 
@@ -263,13 +242,6 @@ A rollback changes live traffic immediately and requires explicit authorization 
 - Fix the consumer or roll back code only after checking schema compatibility. Observe until backlog and retry rate return to normal.
 - Sample logs by submission ID only. Never log or copy source text or review tokens.
 
-### R2 upload, cleanup, or lifecycle failure
-
-- Disable resume-upload canaries while leaving text submission and public reads untouched if healthy.
-- Confirm the bucket remains private and the `resume-staging/` one-day lifecycle still exists.
-- Compare failed submission IDs with object presence without downloading resume contents. Worker cleanup should remove an object after processing; lifecycle expiry is the backstop.
-- Do not make the bucket public, weaken expiry, or bulk-delete objects. Obtain separate authorization for any object mutation.
-
 ### D1 errors or migration mismatch
 
 - Stop write canaries and promotion. Preserve the database and capture the migration list, query error class, active Worker version, and Queue backlog.
@@ -279,7 +251,7 @@ A rollback changes live traffic immediately and requires explicit authorization 
 
 ### Sensitive-data exposure
 
-- Treat a review token, source text, resume content, object key, secret, email, phone, or private status on a public response or in logs as an incident.
+- Treat a review token, source text, resume content, secret, email, phone, or private status on a public response or in logs as an incident.
 - Stop canaries and promotion. Preserve restricted evidence without reposting the sensitive value.
 - Roll back code only with explicit authorization; revoke or rotate an exposed secret through the separately authorized secret workflow.
 - Verify the public endpoint is `Cache-Control: no-store`, contains only the documented candidate shape, and excludes non-published revisions before reopening traffic.

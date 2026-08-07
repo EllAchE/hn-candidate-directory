@@ -13,10 +13,6 @@ database_name = "hn-candidate-directory"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "RESUME_STAGING"
-bucket_name = "hn-candidate-resume-staging"
-
 [[queues.producers]]
 binding = "SUBMISSION_QUEUE"
 queue = "hn-candidate-submissions"
