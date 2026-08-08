@@ -29,12 +29,17 @@ export async function deliverQueuedMessages(env, worker) {
   return { delivered: messages.length, acknowledged, retried };
 }
 
+const PENDING_STATUSES = new Set(['submitted', 'processing', 'failed']);
+const ABANDONED_STATUSES = new Set(['submitted', 'failed']);
+
 class MemoryD1 {
   constructor() {
     this.submissions = new Map();
     this.jobs = new Map();
     this.revisions = new Map();
     this.hnIngests = new Map();
+    this.rateLimits = new Map();
+    this.serviceState = new Map();
     this.batchTail = Promise.resolve();
   }
 
@@ -106,6 +111,20 @@ class MemoryStatement {
     if (this.sql.includes('FROM profile_revisions') && this.sql.includes('WHERE submission_id = ?')) {
       return this.database.revisions.get(this.values[0]) || null;
     }
+    if (this.sql.startsWith('INSERT INTO rate_limits')) {
+      const [bucket, windowStart, updatedAt] = this.values;
+      const existing = this.database.rateLimits.get(bucket);
+      const hits = existing && existing.window_start === windowStart ? existing.hits + 1 : 1;
+      this.database.rateLimits.set(bucket, { bucket, window_start: windowStart, hits, updated_at: updatedAt });
+      return { hits };
+    }
+    if (this.sql === 'SELECT value FROM service_state WHERE key = ?') {
+      const state = this.database.serviceState.get(this.values[0]);
+      return state ? { value: state.value } : null;
+    }
+    if (this.sql.startsWith('SELECT COUNT(*) AS total FROM submissions')) {
+      return { total: [...this.database.submissions.values()].filter((row) => PENDING_STATUSES.has(row.status)).length };
+    }
     throw new Error(`Unsupported first statement: ${this.sql}`);
   }
 
@@ -130,6 +149,26 @@ class MemoryStatement {
 
   async run() {
     const [first, ...rest] = this.values;
+    if (this.sql.startsWith("DELETE FROM submissions WHERE status IN ('submitted', 'failed')")) {
+      const stale = [...this.database.submissions.values()].filter(
+        (row) => ABANDONED_STATUSES.has(row.status) && row.updated_at < first
+      );
+      stale.forEach((row) => this.database.submissions.delete(row.id));
+      return success(stale.length);
+    }
+    if (this.sql.startsWith('DELETE FROM rate_limits')) {
+      const stale = [...this.database.rateLimits.values()].filter((row) => row.window_start < first);
+      stale.forEach((row) => this.database.rateLimits.delete(row.bucket));
+      return success(stale.length);
+    }
+    if (this.sql.startsWith('INSERT INTO service_state')) {
+      this.database.serviceState.set('pending_submissions', {
+        key: 'pending_submissions',
+        value: first,
+        updated_at: rest[0]
+      });
+      return success();
+    }
     if (this.sql.startsWith('INSERT INTO submissions') && this.sql.includes("'hn_comment'")) {
       const [id, reviewTokenHash, createdAt, updatedAt] = this.values;
       const existing = this.database.submissions.get(id);

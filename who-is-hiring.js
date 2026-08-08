@@ -1,42 +1,309 @@
+
 let candidates = [];
 let activeReview = null;
 const el = (id) => document.getElementById(id);
 
+const FACETS = [
+  { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
+  { key: 'mode', label: 'Work mode', kind: 'toggle', values: (candidate) => [candidate.mode] },
+  { key: 'location', label: 'Location', kind: 'combobox', placeholder: 'Type a city, region, or “remote”', values: (candidate) => [candidate.location] },
+  { key: 'university', label: 'University', kind: 'combobox', placeholder: 'Type a university', values: (candidate) => [candidate.university] },
+  { key: 'company', label: 'Previously at', kind: 'combobox', placeholder: 'Type a company', values: (candidate) => candidate.companies },
+  { key: 'skill', label: 'Skill or stack', kind: 'combobox', placeholder: 'Type a skill or stack', values: (candidate) => candidate.skills }
+];
+const selections = new Map(FACETS.map((facet) => [facet.key, new Set()]));
+const selectionLabels = new Map();
+const comboState = new Map(FACETS.filter((facet) => facet.kind === 'combobox').map((facet) => [facet.key, { query: '', open: false, active: '' }]));
+let filtersOpen = false;
+
 function render() {
   const query = el('search').value.toLowerCase().trim();
-  const mode = el('work-mode').value;
-  const availability = el('availability').value;
-  const university = el('university').value;
-  const company = el('company').value;
-  const skill = el('skill').value.toLowerCase().trim();
-  let filtered = candidates.filter((candidate) => {
-    const searchable = [candidate.name, candidate.role, candidate.location, candidate.university, ...candidate.companies, ...candidate.skills, candidate.summary].join(' ').toLowerCase();
-    return (!query || searchable.includes(query)) && (!mode || candidate.mode === mode) && (!availability || candidate.availability === availability) && (!university || candidate.university === university) && (!company || candidate.companies.includes(company)) && (!skill || candidate.skills.join(' ').toLowerCase().includes(skill));
-  });
+  const filtered = candidates.filter((candidate) => matchesQuery(candidate, query) && matchesFacets(candidate, null));
   if (el('sort').value === 'recent') filtered.sort((a, b) => a.posted - b.posted);
   if (el('sort').value === 'enriched') filtered.sort((a, b) => Number(b.enriched) - Number(a.enriched));
   el('result-count').textContent = filtered.length;
-  el('candidate-count').textContent = candidates.length.toLocaleString();
-  el('university-count').textContent = new Set(candidates.map((candidate) => candidate.university).filter(Boolean)).size.toLocaleString();
-  el('enriched-count').textContent = candidates.filter((candidate) => candidate.enriched).length.toLocaleString();
+  renderStats();
   el('candidate-list').innerHTML = filtered.map(card).join('');
   el('empty-state').hidden = filtered.length > 0;
+  FACETS.forEach((facet) => renderFacet(facet, query));
+  renderActiveFilters(query);
+  syncFilterDrawer();
+}
+
+function renderStats() {
+  const universityFacet = FACETS.find((facet) => facet.key === 'university');
+  const universities = new Set(candidates.flatMap((candidate) => facetValues(universityFacet, candidate).map((value) => facetKeyFor(universityFacet, value))).filter((key) => key !== 'not specified'));
+  el('candidate-count').textContent = candidates.length.toLocaleString();
+  el('university-count').textContent = universities.size.toLocaleString();
+  el('enriched-count').textContent = candidates.filter((candidate) => candidate.enriched).length.toLocaleString();
+}
+
+function searchableText(candidate) {
+  return [candidate.name, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary].filter(Boolean).join(' ').toLowerCase();
+}
+
+function matchesQuery(candidate, query) {
+  return !query || searchableText(candidate).includes(query);
+}
+
+function matchesFacets(candidate, exceptKey) {
+  return FACETS.every((facet) => {
+    const selected = selections.get(facet.key);
+    if (facet.key === exceptKey || !selected.size) return true;
+    return facetValues(facet, candidate).some((value) => selected.has(facetKeyFor(facet, value)));
+  });
+}
+
+function facetValues(facet, candidate) {
+  const raw = facet.values(candidate);
+  return (Array.isArray(raw) ? raw : [raw]).map((value) => String(value ?? '').trim()).filter(Boolean);
+}
+
+function facetKeyFor(facet, value) {
+  const grouped = facet.key === 'location' ? value.replace(/[·|/–—]+/g, ',') : value;
+  return grouped.toLowerCase().replace(/\s*,\s*/g, ', ').replace(/\s+/g, ' ').replace(/[.,]+$/, '').trim();
+}
+
+function facetOptions(facet, pool) {
+  const groups = new Map();
+  pool.forEach((candidate) => {
+    const perCandidate = new Map(facetValues(facet, candidate).map((value) => [facetKeyFor(facet, value), value]));
+    perCandidate.forEach((value, key) => {
+      const group = groups.get(key) || { key, count: 0, labels: new Map() };
+      group.count += 1;
+      group.labels.set(value, (group.labels.get(value) || 0) + 1);
+      groups.set(key, group);
+    });
+  });
+  const options = [...groups.values()].map((group) => ({
+    key: group.key,
+    count: group.count,
+    label: [...group.labels].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0]
+  }));
+  const selected = selections.get(facet.key);
+  const missing = [...selected].filter((key) => !groups.has(key)).map((key) => ({ key, count: 0, label: labelFor(facet.key, key) }));
+  return [...options.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)), ...missing];
+}
+
+function labelFor(facetKey, value) {
+  return selectionLabels.get(`${facetKey}:${value}`) || value;
+}
+
+function renderFacet(facet, query) {
+  const pool = candidates.filter((candidate) => matchesQuery(candidate, query) && matchesFacets(candidate, facet.key));
+  const options = facetOptions(facet, pool);
+  const selected = selections.get(facet.key);
+  if (facet.kind === 'toggle') {
+    el(`facet-${facet.key}-options`).innerHTML = options.map((option) => togglePill(facet, option, selected.has(option.key))).join('');
+    return;
+  }
+
+  const state = comboState.get(facet.key);
+  const needle = state.query.toLowerCase().trim();
+  const shown = options.filter((option) => !needle || option.label.toLowerCase().includes(needle) || option.key.includes(needle));
+  if (!shown.some((option) => option.key === state.active)) state.active = shown[0]?.key || '';
+  const list = el(`facet-${facet.key}-listbox`);
+  list.innerHTML = shown.length
+    ? shown.map((option, index) => optionRow(facet, option, index, selected.has(option.key), option.key === state.active)).join('')
+    : '<li class="combo-empty" role="presentation">No matching options</li>';
+  list.hidden = !state.open;
+  const input = el(`facet-${facet.key}-input`);
+  input.setAttribute('aria-expanded', String(state.open));
+  const activeIndex = shown.findIndex((option) => option.key === state.active);
+  if (state.open && activeIndex >= 0) input.setAttribute('aria-activedescendant', `facet-${facet.key}-option-${activeIndex}`);
+  else input.removeAttribute('aria-activedescendant');
+  el(`facet-${facet.key}-selected`).innerHTML = [...selected].map((key) => selectedPill(facet, key)).join('');
+  if (state.open) list.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+}
+
+function togglePill(facet, option, isSelected) {
+  return `<button class="pill${isSelected ? ' is-selected' : ''}" type="button" aria-pressed="${isSelected}" data-facet-toggle="${facet.key}" data-value="${escapeHtml(option.key)}" data-label="${escapeHtml(option.label)}">${escapeHtml(option.label)}<span class="pill-count">${option.count}</span></button>`;
+}
+
+function optionRow(facet, option, index, isSelected, isActive) {
+  return `<li class="combo-option${isActive ? ' is-active' : ''}${isSelected ? ' is-selected' : ''}" id="facet-${facet.key}-option-${index}" role="option" aria-selected="${isSelected}" data-facet-option="${facet.key}" data-value="${escapeHtml(option.key)}" data-label="${escapeHtml(option.label)}"><span>${escapeHtml(option.label)}</span><span class="option-count">${option.count}</span></li>`;
+}
+
+function selectedPill(facet, key) {
+  const label = labelFor(facet.key, key);
+  return `<button class="pill is-selected" type="button" data-facet-remove="${facet.key}" data-value="${escapeHtml(key)}" aria-label="Remove ${escapeHtml(facet.label)} filter ${escapeHtml(label)}">${escapeHtml(label)}<span class="pill-remove" aria-hidden="true">×</span></button>`;
+}
+
+function renderActiveFilters(query) {
+  const chips = FACETS.flatMap((facet) => [...selections.get(facet.key)].map((key) => activeChip(facet, key)));
+  const count = chips.length;
+  if (query) chips.unshift(`<button class="pill is-selected" type="button" data-clear-search aria-label="Clear the search box">Search: ${escapeHtml(query)}<span class="pill-remove" aria-hidden="true">×</span></button>`);
+  const bar = el('active-filters');
+  bar.hidden = chips.length === 0;
+  bar.innerHTML = chips.length ? `<span class="active-filters-label">Active</span>${chips.join('')}<button class="clear-button" type="button" data-clear-filters>Clear all</button>` : '';
+  el('filters-badge').textContent = count ? `${count} selected` : 'none selected';
+}
+
+function activeChip(facet, key) {
+  const label = labelFor(facet.key, key);
+  return `<button class="pill is-selected" type="button" data-facet-remove="${facet.key}" data-value="${escapeHtml(key)}" aria-label="Remove ${escapeHtml(facet.label)} filter ${escapeHtml(label)}"><span class="pill-facet">${escapeHtml(facet.label)}</span>${escapeHtml(label)}<span class="pill-remove" aria-hidden="true">×</span></button>`;
+}
+
+function buildFacets() {
+  el('filters-body').innerHTML = FACETS.map((facet) => {
+    const labelId = `facet-${facet.key}-label`;
+    if (facet.kind === 'toggle') {
+      return `<div class="facet"><div class="field-label" id="${labelId}">${escapeHtml(facet.label)}</div><div class="pill-row" role="group" aria-labelledby="${labelId}" id="facet-${facet.key}-options"></div></div>`;
+    }
+    return `<div class="facet"><label class="field-label" id="${labelId}" for="facet-${facet.key}-input">${escapeHtml(facet.label)}</label><div class="combobox"><input class="combo-input" id="facet-${facet.key}-input" data-combo="${facet.key}" type="text" role="combobox" aria-expanded="false" aria-controls="facet-${facet.key}-listbox" aria-haspopup="listbox" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(facet.placeholder)}" /><button class="combo-toggle" type="button" tabindex="-1" data-combo-toggle="${facet.key}" aria-label="Show all ${escapeHtml(facet.label.toLowerCase())} options">▾</button><ul class="combo-list" id="facet-${facet.key}-listbox" role="listbox" aria-multiselectable="true" aria-labelledby="${labelId}" hidden></ul></div><div class="pill-row" id="facet-${facet.key}-selected"></div></div>`;
+  }).join('');
+}
+
+function toggleSelection(facetKey, value, label) {
+  const selected = selections.get(facetKey);
+  if (!selected) return;
+  if (selected.has(value)) selected.delete(value);
+  else {
+    selected.add(value);
+    if (label) selectionLabels.set(`${facetKey}:${value}`, label);
+  }
+  render();
+}
+
+function comboOptionElements(facetKey) {
+  return [...el(`facet-${facetKey}-listbox`).querySelectorAll('[data-facet-option]')];
+}
+
+function moveCombo(facetKey, delta) {
+  const state = comboState.get(facetKey);
+  const values = comboOptionElements(facetKey).map((option) => option.dataset.value);
+  if (!values.length) return;
+  const index = values.indexOf(state.active);
+  state.active = values[(index + delta + values.length) % values.length];
+  render();
+}
+
+function setComboOpen(facetKey, open) {
+  const state = comboState.get(facetKey);
+  if (state.open === open) return;
+  state.open = open;
+  render();
+}
+
+function closeCombos() {
+  if (![...comboState.values()].some((state) => state.open)) return;
+  comboState.forEach((state) => { state.open = false; });
+  render();
+}
+
+function clearFilters() {
+  el('search').value = '';
+  selections.forEach((selected) => selected.clear());
+  comboState.forEach((state, facetKey) => {
+    state.query = '';
+    state.open = false;
+    state.active = '';
+    el(`facet-${facetKey}-input`).value = '';
+  });
+  render();
+}
+
+function syncFilterDrawer() {
+  const toggle = el('filters-toggle');
+  const collapsible = getComputedStyle(toggle).display !== 'none';
+  el('filters-panel').classList.toggle('is-open', filtersOpen);
+  toggle.setAttribute('aria-expanded', String(!collapsible || filtersOpen));
 }
 
 function card(candidate) {
   const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
   const enrichment = candidate.enriched ? `<span class="chip enriched">✦ enriched</span>` : '';
   const companies = candidate.companies.length ? `<span>Previously at <b>${escapeHtml(candidate.companies.join(', '))}</b></span>` : '<span>Employment history <b>not enriched</b></span>';
-  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span>from <b>${escapeHtml(candidate.source)}</b></span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+}
+
+function sourceLink(candidate) {
+  const label = escapeHtml(candidate.source);
+  const href = httpsUrl(candidate.sourceUrl);
+  return href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : `<b>${label}</b>`;
+}
+
+function httpsUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char])); }
 function openDialog(dialog) { dialog.showModal(); }
 function closeDialogs() { document.querySelectorAll('dialog').forEach((dialog) => dialog.close()); }
 
-document.querySelectorAll('input,select').forEach((input) => input.addEventListener('input', render));
+el('search').addEventListener('input', render);
 el('sort').addEventListener('change', render);
-el('clear-filters').addEventListener('click', () => { ['search', 'skill'].forEach((id) => { el(id).value = ''; }); ['availability', 'work-mode', 'university', 'company'].forEach((id) => { el(id).value = ''; }); render(); });
+el('filters-toggle').addEventListener('click', () => { filtersOpen = !filtersOpen; syncFilterDrawer(); });
+window.addEventListener('resize', syncFilterDrawer);
+document.addEventListener('input', (event) => {
+  const input = event.target.closest('.combo-input');
+  if (!input) return;
+  const state = comboState.get(input.dataset.combo);
+  state.query = input.value;
+  state.open = true;
+  state.active = '';
+  render();
+});
+document.addEventListener('mousedown', (event) => { if (event.target.closest('.combo-list')) event.preventDefault(); });
+document.addEventListener('focusout', (event) => {
+  const combobox = event.target.closest('.combobox');
+  if (combobox && !combobox.contains(event.relatedTarget)) setComboOpen(combobox.querySelector('.combo-input').dataset.combo, false);
+});
+document.addEventListener('keydown', (event) => {
+  const input = event.target.closest('.combo-input');
+  if (!input) return;
+  const facetKey = input.dataset.combo;
+  const state = comboState.get(facetKey);
+  const optionValues = () => comboOptionElements(facetKey).map((option) => option.dataset.value);
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (state.open) moveCombo(facetKey, event.key === 'ArrowDown' ? 1 : -1);
+    else setComboOpen(facetKey, true);
+  } else if (event.key === 'Home' || event.key === 'End') {
+    const values = state.open ? optionValues() : [];
+    if (!values.length) return;
+    event.preventDefault();
+    state.active = event.key === 'Home' ? values[0] : values[values.length - 1];
+    render();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (!state.open) return setComboOpen(facetKey, true);
+    const active = comboOptionElements(facetKey).find((option) => option.dataset.value === state.active);
+    if (active) toggleSelection(facetKey, active.dataset.value, active.dataset.label);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    if (state.open) return setComboOpen(facetKey, false);
+    if (!state.query) return;
+    state.query = '';
+    input.value = '';
+    render();
+  } else if (event.key === 'Backspace' && !input.value) {
+    const selected = [...selections.get(facetKey)];
+    if (selected.length) toggleSelection(facetKey, selected[selected.length - 1]);
+  }
+});
+document.addEventListener('click', (event) => {
+  if (event.target.closest('[data-clear-filters]')) return clearFilters();
+  if (event.target.closest('[data-clear-search]')) {
+    el('search').value = '';
+    return render();
+  }
+  const pill = event.target.closest('[data-facet-toggle],[data-facet-remove],[data-facet-option]');
+  if (pill) return toggleSelection(pill.dataset.facetToggle || pill.dataset.facetRemove || pill.dataset.facetOption, pill.dataset.value, pill.dataset.label);
+  const comboToggle = event.target.closest('[data-combo-toggle]');
+  if (comboToggle) {
+    const facetKey = comboToggle.dataset.comboToggle;
+    setComboOpen(facetKey, !comboState.get(facetKey).open);
+    el(`facet-${facetKey}-input`).focus();
+    return;
+  }
+  if (!event.target.closest('.combobox')) closeCombos();
+});
 document.querySelectorAll('[data-open-import]').forEach((button) => button.addEventListener('click', () => {
   activeReview = null;
   el('run-import').closest('.dialog-actions').hidden = false;
@@ -210,6 +477,7 @@ el('request-form').addEventListener('submit', async (event) => {
     setManagementBusy(false);
   }
 });
+buildFacets();
 render();
 loadPublishedCandidates();
 

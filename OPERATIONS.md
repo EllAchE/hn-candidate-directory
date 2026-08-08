@@ -102,7 +102,7 @@ wrangler d1 migrations apply hn-candidate-directory-staging --remote --config wr
 wrangler d1 migrations list hn-candidate-directory-staging --remote --config wrangler.staging.toml
 ```
 
-Confirm `migrations/0001_review_drafts.sql` and `migrations/0002_hacker_news_ingest.sql` are each applied exactly once, and that the pre-migration row counts for `submissions`, `jobs`, and `profile_revisions` survived the rebuild. Do not deploy against an empty or partially migrated database. Migrations are forward-only; a failed rebuild is recovered by restoring the export, never by reversing the migration or hand-editing the schema.
+Confirm `migrations/0001_review_drafts.sql`, `migrations/0002_hacker_news_ingest.sql`, and `migrations/0003_abuse_controls.sql` are each applied exactly once, and that the pre-migration row counts for `submissions`, `jobs`, and `profile_revisions` survived the rebuild. Do not deploy against an empty or partially migrated database. Migrations are forward-only; a failed rebuild is recovered by restoring the export, never by reversing the migration or hand-editing the schema.
 
 ### 3. Deploy the staging code — mutation
 
@@ -114,7 +114,7 @@ wrangler deploy --config wrangler.staging.toml
 wrangler deployments status --config wrangler.staging.toml
 ```
 
-Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the three bindings and the `17 */6 * * *` cron trigger in deploy output before continuing. The deploy arms that schedule, so treat it as authorizing outbound Hacker News requests and ingest writes on this environment.
+Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the bindings (`ASSETS`, `DB`, `SUBMISSION_QUEUE`, `RATE_LIMITER`) and the `17 */6 * * *` cron trigger in deploy output before continuing. `0003_abuse_controls.sql` must already be applied: the write quotas live in D1 and fail closed, so deploying this code against a database without `rate_limits` and `service_state` answers `503 rate_limit_unavailable` to every submission. The deploy arms that schedule, so treat it as authorizing outbound Hacker News requests and ingest writes on this environment.
 
 ### 4. Write the staging secrets — mutation and immediate deploy
 
@@ -126,7 +126,7 @@ wrangler secret put HN_INGEST_TOKEN --config wrangler.staging.toml
 wrangler deployments status --config wrangler.staging.toml
 ```
 
-Without `HN_INGEST_TOKEN` the on-demand route answers `503 ingest_not_configured` and the scheduled trigger still runs; the secret gates the manual endpoint only. Do not pass either value on the command line or place it in `.dev.vars`, config files, logs, or the change record. If the operator uses Wrangler's versioned-secret workflow instead, create the secret-bearing version with `wrangler versions secret put` and explicitly authorize the later `wrangler versions deploy`; creating the version does not itself authorize traffic changes.
+`HN_INGEST_TOKEN` must be at least 32 characters; generate it with `openssl rand -hex 32`. A missing, blank, or shorter value is treated as *not configured*, not as *no auth required*: the on-demand route answers `503 ingest_not_configured` for every caller, authenticated or not. The scheduled trigger still runs, so the secret gates the manual endpoint only. Do not pass either value on the command line or place it in `.dev.vars`, config files, logs, or the change record. If the operator uses Wrangler's versioned-secret workflow instead, create the secret-bearing version with `wrangler versions secret put` and explicitly authorize the later `wrangler versions deploy`; creating the version does not itself authorize traffic changes.
 
 ### 5. Read-only staging smoke — externally visible traffic
 
@@ -214,7 +214,7 @@ If a resource exists, inspect and reuse it only after its ownership and data-ret
 
 ### Production schema, deploy, and secret — separate mutations
 
-After separate approvals, export the database and apply and verify the production migrations. The export is not optional: `0002` rebuilds three tables and copies their rows, and the only recovery from a failed rebuild is that file.
+After separate approvals, export the database and apply and verify the production migrations. The export is not optional: `0002` rebuilds three tables and copies their rows, and the only recovery from a failed rebuild is that file. `0003_abuse_controls.sql` only adds `rate_limits`, `service_state`, and one index, but it must land **before** the deploy — the write quotas fail closed without those tables.
 
 ```sh
 wrangler d1 export hn-candidate-directory --remote --output /tmp/claude/hn-candidate-directory-pre-0002.sql --config wrangler.production.toml
@@ -274,7 +274,44 @@ A rollback changes live traffic immediately and requires explicit authorization 
 6. Do not reverse a D1 migration. If an older Worker is not forward-compatible with the current schema, keep traffic on a compatible version and prepare a reviewed forward fix.
 7. Close the incident only after public reads, private review isolation, Queue drain, and redaction checks are healthy.
 
+## Abuse controls
+
+The public upload endpoints are unauthenticated, so every write passes a quota before it reaches D1 or the Queue. All of it runs on the Cloudflare free tier.
+
+| Control | Bucket | Limit |
+| --- | --- | --- |
+| Submission burst | per client address | 10 / 60s |
+| Submission daily | per client address | 40 / 24h |
+| Submission global | whole service | 3,000 / 6h |
+| Authorization failure | per client address | 20 / 10m |
+| Ingest request | per client address | 10 / 10m |
+| Ingest run | whole service | 1 / 15m |
+
+Counters live in the D1 `rate_limits` table as fixed windows, keyed on a salted hash of `cf-connecting-ip`. The `RATE_LIMITER` binding in `wrangler.toml` is a free per-colo pre-filter in front of those counters; it is best effort and never authoritative, so removing it costs throughput, not safety.
+
+**These limits fail closed.** If D1 cannot serve the counter, submissions answer `503 rate_limit_unavailable` and nothing is written. A `503 rate_limit_unavailable` in production means the database is unreachable or migration `0003` has not been applied — it is not a tuning problem, and it must never be resolved by weakening the limiter.
+
+Storage is bounded by a 5,000-row pending-submission cap and a 30-day expiry of abandoned `submitted` and `failed` rows, both maintained by the existing 6-hour cron. A full service answers `503 submission_capacity_reached`. Raising the cap is a reviewed code change, not a console edit.
+
+Two optional plain vars tune this. Neither is required:
+
+- `RATE_LIMIT_SALT` — salts the client-address hash so stored buckets are not reversible to raw addresses. Set a per-environment random value; defaults to a fixed string.
+- `ALLOWED_ORIGINS` — comma-separated extra origins permitted to send writes. The Worker's own origin is always allowed and a browser write from any other origin is rejected `403 cross_origin_request_blocked`. Leave unset for the same-origin app.
+
+```sh
+wrangler secret put RATE_LIMIT_SALT --config wrangler.staging.toml
+```
+
+Paid upgrade path, if the free-tier controls stop being enough: a WAF rate-limiting rule enforces at the edge before the request reaches the Worker, Turnstile adds a challenge to the submission form, and Bot Management scores traffic. All three are paid and none are configured here.
+
 ## Failure playbooks
+
+### Rate limiting or capacity rejections
+
+- `429 rate_limited` is the control working. Confirm the source distribution before touching a limit; a single abusive address is expected to see this.
+- `503 rate_limit_unavailable` is a D1 fault or a missing `0003` migration. Fix the database, do not relax the limiter.
+- `503 submission_capacity_reached` means the pending backlog is at its cap. Check that the queue consumer is draining and that the 6-hour cron is firing before considering a cap change.
+- Never disable a quota to clear a backlog. That converts a throttled incident into an unbounded write incident.
 
 ### Queue backlog, retries, or consumer failure
 

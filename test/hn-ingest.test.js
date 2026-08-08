@@ -265,26 +265,68 @@ describe('Hacker News ingestion', () => {
   });
 });
 
+const INGEST_TOKEN = 'operator-secret-operator-secret-0123456789';
+
 describe('operator-triggered ingestion', () => {
   test('rejects an unauthenticated or misconfigured request', async () => {
     const env = createEnvironment();
     expect((await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}), env)).status).toBe(503);
 
-    env.HN_INGEST_TOKEN = 'operator-secret';
+    env.HN_INGEST_TOKEN = INGEST_TOKEN;
     expect((await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}), env)).status).toBe(401);
     expect((await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, 'wrong'), env)).status).toBe(403);
-    expect((await worker.fetch(apiRequest('/api/admin/ingest/hn', 'GET', null, 'operator-secret'), env)).status).toBe(405);
+    expect((await worker.fetch(apiRequest('/api/admin/ingest/hn', 'GET', null, INGEST_TOKEN), env)).status).toBe(405);
+  });
+
+  test('never degrades to open access when the ingest token is unset or too weak', async () => {
+    const attempts = [undefined, '', '   ', 'short-token', 'x'.repeat(31)];
+    const outcomes = await Promise.all(
+      attempts.map(async (token) => {
+        const env = createEnvironment();
+        env.HN_INGEST_TOKEN = token;
+        const anonymous = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}), env);
+        const guessed = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, token ?? ''), env);
+        return [anonymous.status, guessed.status, await anonymous.json()];
+      })
+    );
+
+    outcomes.forEach(([anonymousStatus, guessedStatus, body]) => {
+      expect(anonymousStatus).toBe(503);
+      expect(guessedStatus).toBe(503);
+      expect(body).toEqual({ error: 'ingest_not_configured' });
+    });
   });
 
   test('reports a transport failure without leaking the upstream error', async () => {
     const env = createEnvironment();
-    env.HN_INGEST_TOKEN = 'operator-secret';
+    env.HN_INGEST_TOKEN = INGEST_TOKEN;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response('upstream exploded', { status: 500 });
     try {
-      const response = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, 'operator-secret'), env);
+      const response = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, INGEST_TOKEN), env);
       expect(response.status).toBe(502);
       expect(await response.json()).toEqual({ error: 'ingest_failed' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('rate limits repeated ingest runs so the endpoint cannot amplify against upstream', async () => {
+    const env = createEnvironment();
+    env.HN_INGEST_TOKEN = INGEST_TOKEN;
+    const originalFetch = globalThis.fetch;
+    let upstreamCalls = 0;
+    globalThis.fetch = async () => {
+      upstreamCalls += 1;
+      return new Response('upstream exploded', { status: 500 });
+    };
+    try {
+      const first = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, INGEST_TOKEN), env);
+      const second = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, INGEST_TOKEN), env);
+      expect(first.status).toBe(502);
+      expect(second.status).toBe(429);
+      expect(await second.json()).toEqual({ error: 'ingest_in_progress' });
+      expect(upstreamCalls).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

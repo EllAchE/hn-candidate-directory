@@ -3,7 +3,7 @@ const PRIVATE_KEY_PATTERN = /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*
 const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const PASSWORD_ASSIGNMENT_PATTERN = /(\b(?:password|passwd|pwd|client[ _-]?secret|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|auth[ _-]?token|bearer[ _-]?token)\b\s*(?::|=|\bis\b)\s*)(?!\[redacted\])(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;]+)/gi;
 const SECRET_ASSIGNMENT_PATTERN = /(\b(?:secret|token)\b\s*(?::|=|\bis\b)\s*)(?!\[redacted\])(?:"[^"\r\n]{8,}"|'[^'\r\n]{8,}'|[A-Za-z0-9_~+/.:@=-]{8,})/gi;
-const CREDENTIAL_ASSIGNMENT_PATTERN = /(\bcredential(?:s)?\b\s*(?::|=|\bis\b)\s*)(?!\[redacted\])(?:"[^"\r\n]*[:@][^"\r\n]+"|'[^'\r\n]*[:@][^'\r\n]+'|[A-Za-z0-9._-]{1,100}:[^\s,;]{4,})/gi;
+const CREDENTIAL_ASSIGNMENT_PATTERN = /(\bcredential(?:s)?\b\s*(?::|=|\bis\b)\s*)(?!\[redacted\])(?:"[^"\r\n]{0,120}[:@][^"\r\n]{1,240}"|'[^'\r\n]{0,120}[:@][^'\r\n]{1,240}'|[A-Za-z0-9._-]{1,100}:[^\s,;]{4,240})/gi;
 const BEARER_TOKEN_PATTERN = /\bBearer[ \t]+([A-Za-z0-9._~+/=-]{8,})/gi;
 const KNOWN_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|sk_live_[A-Za-z0-9]{16,})\b/g;
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
@@ -16,8 +16,12 @@ const PAYMENT_CARD_PATTERN = /\b(?:\d[ -]?){12,18}\d\b/g;
 const SENSITIVE_QUERY_NAME = /^(?:access_?token|api_?key|auth(?:orization)?|client_?secret|credential(?:s)?|password|passwd|pwd|secret|sig(?:nature)?|token|x-amz-signature)$/i;
 const TEXT_FIELDS = ['name', 'role', 'summary', 'location', 'workMode', 'availability'];
 const LIST_FIELDS = ['universities', 'companies', 'skills', 'dateRanges'];
+const MAX_REDACTION_CHARS = 8_000;
 
 function redactSensitiveText(value) {
+  // Beyond this length the scan is unbounded work on attacker-chosen text, so refuse instead of scanning.
+  if (value.length > MAX_REDACTION_CHARS) return { value: REDACTION_MARKER, detected: true };
+
   let detected = false;
   let redacted = value;
   const replace = (pattern, replacement = REDACTION_MARKER) => {
