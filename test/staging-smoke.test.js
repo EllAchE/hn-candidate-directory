@@ -16,6 +16,7 @@ const candidate = {
   skills: ['JavaScript'],
   dateRanges: ['2024 - present'],
   source: 'Candidate submitted',
+  sourceUrl: '',
   enriched: true,
   posted: 0,
   publishedAt: '2026-08-01T00:00:00.000Z'

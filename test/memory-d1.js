@@ -5,16 +5,41 @@ export function createEnvironment() {
       messages: [],
       async send(message) {
         this.messages.push(message);
+      },
+      async sendBatch(entries) {
+        entries.forEach((entry) => this.messages.push(entry.body));
       }
     }
   };
 }
+
+export async function deliverQueuedMessages(env, worker) {
+  let acknowledged = 0;
+  let retried = 0;
+  const messages = env.SUBMISSION_QUEUE.messages.splice(0).map((body) => ({
+    body,
+    ack: () => {
+      acknowledged += 1;
+    },
+    retry: () => {
+      retried += 1;
+    }
+  }));
+  await worker.queue({ messages }, env);
+  return { delivered: messages.length, acknowledged, retried };
+}
+
+const PENDING_STATUSES = new Set(['submitted', 'processing', 'failed']);
+const ABANDONED_STATUSES = new Set(['submitted', 'failed']);
 
 class MemoryD1 {
   constructor() {
     this.submissions = new Map();
     this.jobs = new Map();
     this.revisions = new Map();
+    this.hnIngests = new Map();
+    this.rateLimits = new Map();
+    this.serviceState = new Map();
     this.batchTail = Promise.resolve();
   }
 
@@ -79,16 +104,43 @@ class MemoryStatement {
           }
         : null;
     }
+    if (this.sql.includes('FROM hn_ingests') && this.sql.includes('WHERE hn_item_id = ?')) {
+      const ingest = this.database.hnIngests.get(this.values[0]);
+      return ingest ? select(ingest, ['submission_id', 'comment_hash', 'suppressed_at']) : null;
+    }
     if (this.sql.includes('FROM profile_revisions') && this.sql.includes('WHERE submission_id = ?')) {
       return this.database.revisions.get(this.values[0]) || null;
+    }
+    if (this.sql.startsWith('INSERT INTO rate_limits')) {
+      const [bucket, windowStart, updatedAt] = this.values;
+      const existing = this.database.rateLimits.get(bucket);
+      const hits = existing && existing.window_start === windowStart ? existing.hits + 1 : 1;
+      this.database.rateLimits.set(bucket, { bucket, window_start: windowStart, hits, updated_at: updatedAt });
+      return { hits };
+    }
+    if (this.sql === 'SELECT value FROM service_state WHERE key = ?') {
+      const state = this.database.serviceState.get(this.values[0]);
+      return state ? { value: state.value } : null;
+    }
+    if (this.sql.startsWith('SELECT COUNT(*) AS total FROM submissions')) {
+      return { total: [...this.database.submissions.values()].filter((row) => PENDING_STATUSES.has(row.status)).length };
     }
     throw new Error(`Unsupported first statement: ${this.sql}`);
   }
 
   async all() {
-    if (this.sql.includes("WHERE status = 'published'")) {
+    if (this.sql.includes('FROM hn_ingests') && this.sql.includes('WHERE thread_id = ?')) {
+      const results = [...this.database.hnIngests.values()]
+        .filter((ingest) => ingest.thread_id === this.values[0])
+        .map((ingest) => select(ingest, ['hn_item_id', 'comment_hash', 'suppressed_at']));
+      return { results };
+    }
+    if (this.sql.includes("WHERE r.status = 'published'")) {
+      const ingestsBySubmission = new Map([...this.database.hnIngests.values()].map((ingest) => [ingest.submission_id, ingest]));
       const results = [...this.database.revisions.values()]
         .filter((revision) => revision.status === 'published')
+        .map((revision) => ({ ...revision, ...hnJoinColumns(ingestsBySubmission.get(revision.submission_id)) }))
+        .filter((revision) => revision.suppressed_at === null)
         .sort((left, right) => right.published_at.localeCompare(left.published_at));
       return { results };
     }
@@ -97,6 +149,129 @@ class MemoryStatement {
 
   async run() {
     const [first, ...rest] = this.values;
+    if (this.sql.startsWith("DELETE FROM submissions WHERE status IN ('submitted', 'failed')")) {
+      const stale = [...this.database.submissions.values()].filter(
+        (row) => ABANDONED_STATUSES.has(row.status) && row.updated_at < first
+      );
+      stale.forEach((row) => this.database.submissions.delete(row.id));
+      return success(stale.length);
+    }
+    if (this.sql.startsWith('DELETE FROM rate_limits')) {
+      const stale = [...this.database.rateLimits.values()].filter((row) => row.window_start < first);
+      stale.forEach((row) => this.database.rateLimits.delete(row.bucket));
+      return success(stale.length);
+    }
+    if (this.sql.startsWith('INSERT INTO service_state')) {
+      this.database.serviceState.set('pending_submissions', {
+        key: 'pending_submissions',
+        value: first,
+        updated_at: rest[0]
+      });
+      return success();
+    }
+    if (this.sql.startsWith('INSERT INTO submissions') && this.sql.includes("'hn_comment'")) {
+      const [id, reviewTokenHash, createdAt, updatedAt] = this.values;
+      const existing = this.database.submissions.get(id);
+      if (existing) {
+        Object.assign(existing, { status: 'ingested', updated_at: updatedAt });
+        return success();
+      }
+      this.database.submissions.set(id, {
+        id,
+        source_kind: 'hn_comment',
+        source_text: '',
+        review_token_hash: reviewTokenHash,
+        status: 'ingested',
+        created_at: createdAt,
+        updated_at: updatedAt
+      });
+      return success();
+    }
+    if (this.sql.startsWith('INSERT INTO profile_revisions') && this.sql.includes("'published'")) {
+      const [
+        id,
+        submissionId,
+        name,
+        role,
+        summary,
+        location,
+        workMode,
+        availability,
+        universitiesJson,
+        companiesJson,
+        skillsJson,
+        dateRangesJson,
+        createdAt,
+        updatedAt,
+        publishedAt
+      ] = this.values;
+      const fields = {
+        name,
+        role,
+        summary,
+        location,
+        work_mode: workMode,
+        availability,
+        universities_json: universitiesJson,
+        companies_json: companiesJson,
+        skills_json: skillsJson,
+        date_ranges_json: dateRangesJson,
+        updated_at: updatedAt
+      };
+      const existing = this.database.revisions.get(submissionId);
+      if (existing) {
+        if (existing.status !== 'published') return success(0);
+        Object.assign(existing, fields);
+        return success();
+      }
+      this.database.revisions.set(submissionId, {
+        id,
+        submission_id: submissionId,
+        status: 'published',
+        ...fields,
+        created_at: createdAt,
+        published_at: publishedAt
+      });
+      return success();
+    }
+    if (this.sql.startsWith('INSERT INTO hn_ingests')) {
+      const [
+        hnItemId,
+        submissionId,
+        hnAuthor,
+        hnPermalink,
+        threadId,
+        threadMonth,
+        commentHash,
+        commentCreatedAt,
+        createdAt,
+        updatedAt
+      ] = this.values;
+      const fields = {
+        submission_id: submissionId,
+        hn_author: hnAuthor,
+        hn_permalink: hnPermalink,
+        thread_id: threadId,
+        thread_month: threadMonth,
+        comment_hash: commentHash,
+        updated_at: updatedAt
+      };
+      const existing = this.database.hnIngests.get(hnItemId);
+      if (existing) {
+        if (existing.suppressed_at !== null) return success(0);
+        Object.assign(existing, fields);
+        return success();
+      }
+      this.database.hnIngests.set(hnItemId, {
+        hn_item_id: hnItemId,
+        ...fields,
+        comment_created_at: commentCreatedAt,
+        suppressed_at: null,
+        suppressed_reason: null,
+        created_at: createdAt
+      });
+      return success();
+    }
     if (this.sql.startsWith('INSERT INTO submissions')) {
       const [id, sourceText, reviewTokenHash, createdAt, updatedAt] = this.values;
       if (this.database.submissions.has(id)) throw new Error('constraint_failed');
@@ -311,6 +486,14 @@ class MemoryStatement {
 
 function select(value, keys) {
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+function hnJoinColumns(ingest) {
+  return {
+    hn_permalink: ingest?.hn_permalink ?? null,
+    thread_month: ingest?.thread_month ?? null,
+    suppressed_at: ingest?.suppressed_at ?? null
+  };
 }
 
 function revisionById(database, candidateId) {
