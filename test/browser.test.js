@@ -5,6 +5,46 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const REPO_ROOT = join(import.meta.dir, '..');
+// Shaped like real Hacker News output rather than the fully-populated fixtures above: the template
+// carries location, work mode, and technologies, and nothing else, so the extractor writes its
+// "Not specified" sentinel into the remaining fields.
+const HN_SHAPED_CANDIDATES = [
+  {
+    id: 'hn-49156682-01',
+    name: 'clearbacklog',
+    role: 'Backend engineer, fixed-price backlog work',
+    mode: 'Remote',
+    availability: 'Not specified',
+    location: 'Toronto, Canada',
+    university: 'Not specified',
+    companies: [],
+    skills: ['Rust', 'Go'],
+    summary: 'Ships small well-scoped backend work.',
+    source: 'HN · August 2026',
+    sourceUrl: 'https://news.ycombinator.com/item?id=49156682',
+    enriched: false,
+    posted: 1,
+    publishedAt: '2026-08-03T12:00:00.000Z'
+  },
+  {
+    id: 'hn-49156682-02',
+    name: 'emanuelecz',
+    role: 'AI engineer',
+    mode: 'Remote',
+    availability: 'Not specified',
+    location: 'Gipuzkoa, Spain',
+    university: 'Not specified',
+    companies: [],
+    skills: ['Python', 'FastAPI'],
+    summary: 'Two years building retrieval systems.',
+    source: 'HN · August 2026',
+    sourceUrl: 'https://news.ycombinator.com/item?id=49156683',
+    enriched: false,
+    posted: 2,
+    publishedAt: '2026-08-03T13:00:00.000Z'
+  }
+];
+
 const PUBLIC_CANDIDATES = [
   {
     id: 'ada-rivera',
@@ -455,13 +495,48 @@ test(
   30_000
 );
 
-async function withPage(run) {
+test(
+  'facets a Hacker News cohort cannot populate are withheld, and the sentinel is never an option',
+  async () => {
+    await withPage(
+      async (cdp) => {
+        await expandFilters(cdp);
+
+        const hidden = async (key) => evaluate(cdp, `document.getElementById('facet-${key}').hidden`);
+        expect(await hidden('university')).toBe(true);
+        expect(await hidden('company')).toBe(true);
+        expect(await hidden('availability')).toBe(true);
+        expect(await hidden('location')).toBe(false);
+        expect(await hidden('skill')).toBe(false);
+        expect(await hidden('mode')).toBe(false);
+
+        const labels = async (key) => (await facetOptions(cdp, key)).map((option) => option.label);
+        expect(await labels('location')).toEqual(['Gipuzkoa, Spain', 'Toronto, Canada']);
+        expect(await labels('mode')).toEqual(['Remote']);
+
+        // The sentinel is not merely hidden from the list; it must not match global search either,
+        // or one query would return the entire directory.
+        await setControl(cdp, 'search', 'not specified');
+        expect(await textContent(cdp, '#result-count')).toBe('0');
+        expect(await visible(cdp, '#empty-state')).toBe(true);
+
+        await setControl(cdp, 'search', 'rust');
+        expect(await candidateNames(cdp)).toEqual(['clearbacklog']);
+      },
+      { candidates: HN_SHAPED_CANDIDATES }
+    );
+  },
+  30_000
+);
+
+async function withPage(run, options = {}) {
+  const dataset = options.candidates || PUBLIC_CANDIDATES;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
   let server;
   let browser;
 
   try {
-    server = createFixtureServer();
+    server = createFixtureServer(dataset);
     browser = await launchBrowser(temporaryRoot);
     const cdp = await connectToPage(browser.devToolsUrl);
     const runtimeExceptions = [];
@@ -471,7 +546,7 @@ async function withPage(run) {
     await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*'] });
     await setViewport(cdp, 1280, 900, false);
     await navigate(cdp, `http://127.0.0.1:${server.port}/`);
-    await waitFor(cdp, `document.querySelector('.candidate-name')?.textContent === 'Ada Rivera'`);
+    await waitFor(cdp, `document.querySelector('.candidate-name')?.textContent === ${JSON.stringify(dataset[0].name)}`);
 
     await run(cdp);
     expect(runtimeExceptions).toEqual([]);
@@ -486,7 +561,7 @@ async function withPage(run) {
   }
 }
 
-function createFixtureServer() {
+function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
   const assets = new Map([
     ['/', ['who-is-hiring.html', 'text/html; charset=utf-8']],
     ['/who-is-hiring.html', ['who-is-hiring.html', 'text/html; charset=utf-8']],
@@ -501,7 +576,7 @@ function createFixtureServer() {
     fetch(request) {
       const { pathname } = new URL(request.url);
       if (pathname === '/api/candidates') {
-        return Response.json({ candidates: PUBLIC_CANDIDATES }, { headers: { 'cache-control': 'no-store' } });
+        return Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
       }
       const asset = assets.get(pathname);
       if (!asset) return new Response('Not found', { status: 404 });

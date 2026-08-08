@@ -2,6 +2,7 @@
 let candidates = [];
 let activeReview = null;
 const el = (id) => document.getElementById(id);
+const UNKNOWN_VALUE = 'not specified';
 
 const FACETS = [
   { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
@@ -32,14 +33,17 @@ function render() {
 
 function renderStats() {
   const universityFacet = FACETS.find((facet) => facet.key === 'university');
-  const universities = new Set(candidates.flatMap((candidate) => facetValues(universityFacet, candidate).map((value) => facetKeyFor(universityFacet, value))).filter((key) => key !== 'not specified'));
+  const universities = new Set(candidates.flatMap((candidate) => facetValues(universityFacet, candidate).map((value) => facetKeyFor(universityFacet, value))));
   el('candidate-count').textContent = candidates.length.toLocaleString();
   el('university-count').textContent = universities.size.toLocaleString();
   el('enriched-count').textContent = candidates.filter((candidate) => candidate.enriched).length.toLocaleString();
 }
 
 function searchableText(candidate) {
-  return [candidate.name, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary].filter(Boolean).join(' ').toLowerCase();
+  return [candidate.name, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
+    .filter((value) => value && String(value).trim().toLowerCase() !== UNKNOWN_VALUE)
+    .join(' ')
+    .toLowerCase();
 }
 
 function matchesQuery(candidate, query) {
@@ -54,9 +58,19 @@ function matchesFacets(candidate, exceptKey) {
   });
 }
 
+// The extractor writes UNKNOWN_VALUE wherever a source comment had no such field. It is the
+// absence of an answer, so it must never become a filterable option: on Hacker News data almost
+// nothing carries a university or employer, and treating the sentinel as a value made "Not
+// specified" the largest facet in the directory.
 function facetValues(facet, candidate) {
   const raw = facet.values(candidate);
-  return (Array.isArray(raw) ? raw : [raw]).map((value) => String(value ?? '').trim()).filter(Boolean);
+  return (Array.isArray(raw) ? raw : [raw])
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value && value.toLowerCase() !== UNKNOWN_VALUE);
+}
+
+function facetHasData(facet) {
+  return candidates.some((candidate) => facetValues(facet, candidate).length > 0);
 }
 
 function facetKeyFor(facet, value) {
@@ -93,6 +107,13 @@ function renderFacet(facet, query) {
   const pool = candidates.filter((candidate) => matchesQuery(candidate, query) && matchesFacets(candidate, facet.key));
   const options = facetOptions(facet, pool);
   const selected = selections.get(facet.key);
+
+  // Visibility is decided against the whole directory rather than the filtered pool: a facet that
+  // vanished as the pool narrowed would reflow the panel under the pointer mid-interaction. A facet
+  // holding a selection always stays, so a filter can never become unreachable to clear.
+  const container = el(`facet-${facet.key}`);
+  if (container) container.hidden = !facetHasData(facet) && selected.size === 0;
+
   if (facet.kind === 'toggle') {
     el(`facet-${facet.key}-options`).innerHTML = options.map((option) => togglePill(facet, option, selected.has(option.key))).join('');
     return;
@@ -148,9 +169,9 @@ function buildFacets() {
   el('filters-body').innerHTML = FACETS.map((facet) => {
     const labelId = `facet-${facet.key}-label`;
     if (facet.kind === 'toggle') {
-      return `<div class="facet"><div class="field-label" id="${labelId}">${escapeHtml(facet.label)}</div><div class="pill-row" role="group" aria-labelledby="${labelId}" id="facet-${facet.key}-options"></div></div>`;
+      return `<div class="facet" id="facet-${facet.key}"><div class="field-label" id="${labelId}">${escapeHtml(facet.label)}</div><div class="pill-row" role="group" aria-labelledby="${labelId}" id="facet-${facet.key}-options"></div></div>`;
     }
-    return `<div class="facet"><label class="field-label" id="${labelId}" for="facet-${facet.key}-input">${escapeHtml(facet.label)}</label><div class="combobox"><input class="combo-input" id="facet-${facet.key}-input" data-combo="${facet.key}" type="text" role="combobox" aria-expanded="false" aria-controls="facet-${facet.key}-listbox" aria-haspopup="listbox" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(facet.placeholder)}" /><button class="combo-toggle" type="button" tabindex="-1" data-combo-toggle="${facet.key}" aria-label="Show all ${escapeHtml(facet.label.toLowerCase())} options">▾</button><ul class="combo-list" id="facet-${facet.key}-listbox" role="listbox" aria-multiselectable="true" aria-labelledby="${labelId}" hidden></ul></div><div class="pill-row" id="facet-${facet.key}-selected"></div></div>`;
+    return `<div class="facet" id="facet-${facet.key}"><label class="field-label" id="${labelId}" for="facet-${facet.key}-input">${escapeHtml(facet.label)}</label><div class="combobox"><input class="combo-input" id="facet-${facet.key}-input" data-combo="${facet.key}" type="text" role="combobox" aria-expanded="false" aria-controls="facet-${facet.key}-listbox" aria-haspopup="listbox" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(facet.placeholder)}" /><button class="combo-toggle" type="button" tabindex="-1" data-combo-toggle="${facet.key}" aria-label="Show all ${escapeHtml(facet.label.toLowerCase())} options">▾</button><ul class="combo-list" id="facet-${facet.key}-listbox" role="listbox" aria-multiselectable="true" aria-labelledby="${labelId}" hidden></ul></div><div class="pill-row" id="facet-${facet.key}-selected"></div></div>`;
   }).join('');
 }
 
