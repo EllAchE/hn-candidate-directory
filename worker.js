@@ -10,10 +10,11 @@ const STRING_WEB_ACCESS_LIMITS = Object.freeze({ requests: 1, pages: 1, timeoutM
 const LINKEDIN_PROFILE_HOSTS = new Set(['linkedin.com', 'www.linkedin.com']);
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 const HN_ALGOLIA_ENDPOINT = 'https://hn.algolia.com/api/v1/search';
+const HN_ALGOLIA_RECENT_ENDPOINT = 'https://hn.algolia.com/api/v1/search_by_date';
 const HN_THREAD_QUERY = Object.freeze({ query: 'who wants to be hired', tags: 'story,author_whoishiring' });
 const HN_INGEST_LIMITS = Object.freeze({
   threads: 2,
-  threadCandidates: 20,
+  threadCandidates: 40,
   commentPages: 8,
   pageSize: 100,
   queueBatch: 100,
@@ -1151,8 +1152,14 @@ async function previewHackerNewsIngest(options = {}) {
   );
 }
 
+// Discovery must use the date-sorted index. Algolia's `/search` ranks by relevance, and the
+// relevance window is dominated by older, heavily-engaged threads: at any candidate count short of
+// the full corpus it omits the current month entirely, so the directory would publish a year-old
+// cohort as its live listing.
 async function discoverHnThreads(transport) {
-  const payload = await transport(hnSearchUrl({ ...HN_THREAD_QUERY, hitsPerPage: HN_INGEST_LIMITS.threadCandidates }));
+  const payload = await transport(
+    hnSearchUrl({ ...HN_THREAD_QUERY, hitsPerPage: HN_INGEST_LIMITS.threadCandidates }, HN_ALGOLIA_RECENT_ENDPOINT)
+  );
 
   return (payload?.hits || [])
     .filter((hit) => /who wants to be hired/i.test(String(hit?.title || '')))
@@ -1444,8 +1451,8 @@ function isHnItemId(value) {
   return /^\d{1,20}$/.test(value);
 }
 
-function hnSearchUrl(parameters) {
-  const url = new URL(HN_ALGOLIA_ENDPOINT);
+function hnSearchUrl(parameters, endpoint = HN_ALGOLIA_ENDPOINT) {
+  const url = new URL(endpoint);
   Object.entries(parameters).forEach(([name, value]) => url.searchParams.set(name, String(value)));
   return url.href;
 }

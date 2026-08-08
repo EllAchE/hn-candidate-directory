@@ -333,6 +333,58 @@ describe('operator-triggered ingestion', () => {
   });
 });
 
+describe('Hacker News thread discovery', () => {
+  test('reads the date-sorted index for threads and the relevance index for comments', async () => {
+    const transport = createTransport();
+    await ingestHackerNews(createEnvironment(), { transport: transport.fetch });
+
+    const [discovery, ...comments] = transport.requests;
+    expect(new URL(discovery).pathname).toBe('/api/v1/search_by_date');
+    expect(comments.length).toBeGreaterThan(0);
+    expect(comments.map((url) => new URL(url).pathname)).toEqual(comments.map(() => '/api/v1/search'));
+  });
+
+  test('ingests the newest thread when the index returns an older one first', async () => {
+    const env = createEnvironment();
+    const transport = createArchiveTransport();
+
+    expect(await ingestHackerNews(env, { transport: transport.fetch, threads: 1 })).toEqual({
+      threads: 1,
+      queued: 1,
+      skipped: 0
+    });
+    await deliverQueuedMessages(env, worker);
+    expect((await publicCandidates(env)).map((candidate) => candidate.source)).toEqual(['HN · August 2026']);
+  });
+});
+
+// The upstream order is deliberately stale-first: a discovery step that trusts index order rather
+// than the recorded timestamp would publish the 2025 cohort and never reach the current month.
+function createArchiveTransport() {
+  const threads = [
+    { objectID: '33333333', title: 'Ask HN: Who wants to be hired? (November 2025)', created_at: '2025-11-03T15:00:00.000Z' },
+    { objectID: '44444444', title: 'Ask HN: Who wants to be hired? (August 2026)', created_at: '2026-08-03T15:00:00.000Z' }
+  ];
+  const commentFor = (threadId) => ({
+    objectID: `${threadId}01`,
+    parent_id: Number(threadId),
+    author: `candidate${threadId}`,
+    created_at: '2026-08-03T16:12:00.000Z',
+    comment_text: ['Location: Toronto, Canada', 'Remote: Yes', 'Technologies: Rust, Go'].join('<p>')
+  });
+
+  const transport = { requests: [] };
+  transport.fetch = async (url) => {
+    transport.requests.push(url);
+    const parameters = new URL(url).searchParams;
+    const tags = parameters.get('tags');
+    if (tags === 'story,author_whoishiring') return { hits: threads, nbPages: 1 };
+    const threadId = String(tags).replace('comment,story_', '');
+    return { hits: Number(parameters.get('page') || 0) === 0 ? [commentFor(threadId)] : [], nbPages: 1 };
+  };
+  return transport;
+}
+
 function createTransport() {
   const transport = {
     comments: [LABELED_COMMENT, CONTACT_COMMENT, PROSE_COMMENT, REPLY_COMMENT, NOISE_COMMENT],
