@@ -105,6 +105,8 @@ const PUBLIC_CANDIDATES = [
 ];
 
 const EXPECTED_DEFAULT_NAMES = PUBLIC_CANDIDATES.map(({ name }) => name);
+const EXPECTED_UNIVERSITY_COUNT = new Set(PUBLIC_CANDIDATES.map(({ university }) => university).filter(Boolean)).size;
+const EXPECTED_ENRICHED_COUNT = PUBLIC_CANDIDATES.filter(({ enriched }) => enriched).length;
 
 test(
   'public browse, search, sorting, and filters work in a real browser at desktop and mobile viewports',
@@ -136,6 +138,8 @@ test(
       expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
       expect(await textContent(cdp, '#candidate-count')).toBe('6');
       expect(await textContent(cdp, '#result-count')).toBe('6');
+      expect(await textContent(cdp, '#university-count')).toBe(String(EXPECTED_UNIVERSITY_COUNT));
+      expect(await textContent(cdp, '#enriched-count')).toBe(String(EXPECTED_ENRICHED_COUNT));
 
       const searchCases = [
         ['aDa rIVERA', ['Ada Rivera']],
