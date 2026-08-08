@@ -16,6 +16,7 @@ const REQUIRED_CANDIDATE_FIELDS = Object.freeze({
   skills: 'stringArray',
   dateRanges: 'stringArray',
   source: 'string',
+  sourceUrl: 'string',
   enriched: 'boolean',
   posted: 'number',
   publishedAt: 'string'

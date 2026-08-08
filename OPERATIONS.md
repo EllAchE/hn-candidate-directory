@@ -4,7 +4,7 @@ This runbook is the release boundary for the Cloudflare Worker, D1 database, and
 
 ## Authorization boundary
 
-Do not run a command in a **mutation** block until an operator explicitly authorizes that exact environment and block. Creating a D1 database or Queue; applying a migration; writing a secret; deploying or rolling back a Worker; changing traffic; and running the write canary are all external mutations. Staging approval does not authorize production. A deploy approval does not authorize a canary or rollback.
+Do not run a command in a **mutation** block until an operator explicitly authorizes that exact environment and block. Creating a D1 database or Queue; applying a migration; writing a secret; deploying or rolling back a Worker; changing traffic; running the write canary; and triggering a Hacker News ingest or setting a suppression tombstone are all external mutations. Staging approval does not authorize production. A deploy approval does not authorize a canary or rollback.
 
 The commands below are instructions for a human operator. They were not run while this runbook was authored. Never paste a secret into a command argument, commit a generated environment config, or delete durable resources as part of a code rollback.
 
@@ -30,7 +30,7 @@ Uploaded resume content is held only as `submissions.source_text` in D1 and is c
    git diff --check
    ```
 
-4. Copy `wrangler.toml` to the temporary config named in the table. Do not commit it. Set the environment-specific Worker and resource names. For this local-only check, replace the all-zero D1 ID with the syntactically valid placeholder `11111111-1111-1111-1111-111111111111`. Preserve these bindings exactly: `ASSETS`, `DB`, and `SUBMISSION_QUEUE`.
+4. Copy `wrangler.toml` to the temporary config named in the table. Do not commit it. Set the environment-specific Worker and resource names. For this local-only check, replace the all-zero D1 ID with the syntactically valid placeholder `11111111-1111-1111-1111-111111111111`. Preserve these bindings exactly: `ASSETS`, `DB`, and `SUBMISSION_QUEUE`, plus the `[triggers]` cron schedule that drives Hacker News ingestion.
 5. Inspect the deploy bundle without contacting a live Worker:
 
    ```sh
@@ -93,15 +93,16 @@ Confirm the result matches the pre-creation dry run before proceeding.
 
 ### 2. Apply the staging schema — mutation
 
-This is DDL and must be run by the authorized human operator, never by an agent:
+This is DDL and must be run by the authorized human operator, never by an agent. `migrations/0002_hacker_news_ingest.sql` rebuilds `submissions`, `jobs`, and `profile_revisions` to widen CHECK constraints SQLite cannot alter in place, so export the database first on any environment that already holds rows:
 
 ```sh
+wrangler d1 export hn-candidate-directory-staging --remote --output /tmp/claude/hn-candidate-directory-staging-pre-0002.sql --config wrangler.staging.toml
 wrangler d1 migrations list hn-candidate-directory-staging --remote --config wrangler.staging.toml
 wrangler d1 migrations apply hn-candidate-directory-staging --remote --config wrangler.staging.toml
 wrangler d1 migrations list hn-candidate-directory-staging --remote --config wrangler.staging.toml
 ```
 
-Confirm `migrations/0001_review_drafts.sql` is applied exactly once. Do not deploy against an empty or partially migrated database.
+Confirm `migrations/0001_review_drafts.sql` and `migrations/0002_hacker_news_ingest.sql` are each applied exactly once, and that the pre-migration row counts for `submissions`, `jobs`, and `profile_revisions` survived the rebuild. Do not deploy against an empty or partially migrated database. Migrations are forward-only; a failed rebuild is recovered by restoring the export, never by reversing the migration or hand-editing the schema.
 
 ### 3. Deploy the staging code — mutation
 
@@ -113,18 +114,19 @@ wrangler deploy --config wrangler.staging.toml
 wrangler deployments status --config wrangler.staging.toml
 ```
 
-Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the three bindings in deploy output before continuing.
+Record the pre-deploy version, new version, staging URL, resource names, D1 ID, commit SHA, and UTC time. Confirm the three bindings and the `17 */6 * * *` cron trigger in deploy output before continuing. The deploy arms that schedule, so treat it as authorizing outbound Hacker News requests and ingest writes on this environment.
 
-### 4. Write the staging Web Access secret — mutation and immediate deploy
+### 4. Write the staging secrets — mutation and immediate deploy
 
-`wrangler secret put` creates a new Worker version and deploys it immediately. Treat it as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely:
+`wrangler secret put` creates a new Worker version and deploys it immediately. Treat each one as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely. `HN_INGEST_TOKEN` gates `POST /api/admin/ingest/hn`; generate a fresh random value per environment and never reuse the staging value in production:
 
 ```sh
 wrangler secret put UNBLOCKER_ORG_API_KEY --config wrangler.staging.toml
+wrangler secret put HN_INGEST_TOKEN --config wrangler.staging.toml
 wrangler deployments status --config wrangler.staging.toml
 ```
 
-Do not pass the value on the command line or place it in `.dev.vars`, config files, logs, or the change record. If the operator uses Wrangler's versioned-secret workflow instead, create the secret-bearing version with `wrangler versions secret put` and explicitly authorize the later `wrangler versions deploy`; creating the version does not itself authorize traffic changes.
+Without `HN_INGEST_TOKEN` the on-demand route answers `503 ingest_not_configured` and the scheduled trigger still runs; the secret gates the manual endpoint only. Do not pass either value on the command line or place it in `.dev.vars`, config files, logs, or the change record. If the operator uses Wrangler's versioned-secret workflow instead, create the secret-bearing version with `wrangler versions secret put` and explicitly authorize the later `wrangler versions deploy`; creating the version does not itself authorize traffic changes.
 
 ### 5. Read-only staging smoke — externally visible traffic
 
@@ -168,6 +170,33 @@ Obtain explicit canary authorization. In a private browser window, use the stagi
 
 Delete no durable resource after the canary. Retain only the non-sensitive evidence: timestamps, HTTP status classes, and pass/fail results.
 
+### 8. First Hacker News ingest — mutation and externally visible traffic
+
+The cron trigger fills the directory on its own within six hours. Run this block only to seed it immediately. It contacts the Hacker News Algolia API and publishes real people's public comments, so it needs its own authorization on each environment.
+
+Preview extraction coverage first. This is read-only, touches no Cloudflare resource, and needs no deploy:
+
+```sh
+bun run preview:hn -- 1
+```
+
+Confirm the reported thread month, comment count, and per-field coverage look plausible before writing anything. Then trigger the ingest with the secret from step 4:
+
+```sh
+curl -sS -X POST https://<STAGING_WORKER_HOST>/api/admin/ingest/hn -H "Authorization: Bearer $HN_INGEST_TOKEN"
+```
+
+A `202` returns `{"threads":N,"queued":N,"skipped":N}`; the Queue consumer performs the writes, so published profiles appear over the following minutes. Re-running is safe and idempotent — a second call reports the same comments as skipped. Confirm afterwards that `/api/candidates` returns rows whose `sourceUrl` points at `news.ycombinator.com/item?id=<id>` and that no email address, phone number, or other redacted value appears in the response.
+
+To suppress a specific ingested profile on request, an operator sets its tombstone. This is a data mutation requiring its own authorization, and it is the current manual stand-in until the removal endpoint ships:
+
+```sh
+wrangler d1 execute hn-candidate-directory-staging --remote --config wrangler.staging.toml \
+  --command "UPDATE hn_ingests SET suppressed_at = datetime('now'), suppressed_reason = 'removal request', updated_at = datetime('now') WHERE hn_item_id = '<HN_ITEM_ID>'"
+```
+
+The row is never deleted. Suppression keyed on the Hacker News item id is what stops a later ingest from resurrecting the profile, so deleting the record instead would undo the removal on the next scheduled run.
+
 ## Production promotion
 
 Production is a fresh authorization boundary. Repeat the staging sequence with `wrangler.production.toml` and the production names in the topology table; never point production at staging resources.
@@ -185,9 +214,10 @@ If a resource exists, inspect and reuse it only after its ownership and data-ret
 
 ### Production schema, deploy, and secret — separate mutations
 
-After separate approvals, apply and verify the production migration:
+After separate approvals, export the database and apply and verify the production migrations. The export is not optional: `0002` rebuilds three tables and copies their rows, and the only recovery from a failed rebuild is that file.
 
 ```sh
+wrangler d1 export hn-candidate-directory --remote --output /tmp/claude/hn-candidate-directory-pre-0002.sql --config wrangler.production.toml
 wrangler d1 migrations list hn-candidate-directory --remote --config wrangler.production.toml
 wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
 wrangler d1 migrations list hn-candidate-directory --remote --config wrangler.production.toml
@@ -201,10 +231,11 @@ wrangler deploy --config wrangler.production.toml
 wrangler deployments status --config wrangler.production.toml
 ```
 
-With a separate secret-write/deploy authorization, enter the production value at Wrangler's prompt:
+With a separate secret-write/deploy authorization, enter the production values at Wrangler's prompt. Use a freshly generated `HN_INGEST_TOKEN`, not the staging one:
 
 ```sh
 wrangler secret put UNBLOCKER_ORG_API_KEY --config wrangler.production.toml
+wrangler secret put HN_INGEST_TOKEN --config wrangler.production.toml
 wrangler deployments status --config wrangler.production.toml
 ```
 
@@ -213,6 +244,15 @@ Then obtain approval for read-only production traffic and run the smoke against 
 ```sh
 bun run smoke:staging -- https://<PRODUCTION_WORKER_HOST>
 ```
+
+Seeding the production directory immediately is a separate authorization again, and it publishes real comments. Preview first, then trigger once:
+
+```sh
+bun run preview:hn -- 1
+curl -sS -X POST https://<PRODUCTION_WORKER_HOST>/api/admin/ingest/hn -H "Authorization: Bearer $HN_INGEST_TOKEN"
+```
+
+Skipping this block is safe; the cron trigger performs the same work within six hours.
 
 Promote only after staging smoke, staging canary, production smoke, binding verification, and the observation window all pass. Record operator, approvals, version IDs, resource IDs, commit SHA, UTC times, and rollback target without recording private values.
 
@@ -250,6 +290,13 @@ A rollback changes live traffic immediately and requires explicit authorization 
 - Do not run ad hoc DDL, reverse migrations, delete rows, or recreate the database.
 - If public reads fail, authorize a code rollback only to a version compatible with the current schema. Otherwise ship a reviewed forward-compatible fix.
 - Resume consumers cautiously after verifying writes are idempotent and all expected tables and indexes exist.
+
+### Hacker News ingestion faults
+
+- A wrong or bad-shaped Algolia response ends the run with `502 ingest_failed` and writes nothing. The next scheduled run retries; no manual cleanup is needed.
+- Repeated ingest runs are idempotent, so a partially completed run is safe to repeat. Never clear `hn_ingests` to force a re-ingest: the recorded hashes are the deduplication key, and the suppression tombstones live in the same table.
+- If a profile someone asked to remove reappears, that is an incident, not a retry. Confirm `suppressed_at` is set for its `hn_item_id` before doing anything else, and preserve the row.
+- To stop ingestion entirely, remove the `[triggers]` block and deploy; that is an ordinary reviewed code change, not a console edit.
 
 ### Sensitive-data exposure
 

@@ -10,6 +10,9 @@ run_worker_first = true
 # and the smoke address assets by their real filenames, so serve paths literally.
 html_handling = "none"
 
+[triggers]
+crons = ["17 */6 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "hn-candidate-directory"
