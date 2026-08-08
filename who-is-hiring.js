@@ -1,13 +1,5 @@
-const seedCandidates = [
-  { id: 'maya-chen', name: 'Maya Chen', role: 'Senior product engineer', mode: 'Remote', availability: 'Immediate', location: 'New York, NY', university: 'Carnegie Mellon University', companies: ['Stripe', 'YC startup'], skills: ['TypeScript', 'React', 'PostgreSQL', 'Product'], summary: 'Product-minded engineer who likes owning the thin slice from customer problem to shipped feature. Looking for a small team with high trust.', source: 'HN · June 2026', enriched: true, posted: 6 },
-  { id: 'jordan-wright', name: 'Jordan Wright', role: 'Backend / infrastructure engineer', mode: 'Remote', availability: '1 month', location: 'Toronto, Canada', university: 'University of Waterloo', companies: ['Google', 'Microsoft'], skills: ['Go', 'Kubernetes', 'Rust', 'Distributed systems'], summary: 'Built storage and developer infrastructure at scale. Particularly interested in reliability, data-intensive systems, and tools that make engineers faster.', source: 'HN · July 2026', enriched: true, posted: 1 },
-  { id: 'priya-narayanan', name: 'Priya Narayanan', role: 'Founding engineer / full-stack', mode: 'Hybrid', availability: 'Immediate', location: 'San Francisco, CA', university: 'Georgia Tech', companies: ['YC startup'], skills: ['Python', 'Next.js', 'AI products', 'GCP'], summary: 'Early-stage generalist with a bias toward talking to users and shipping. Open to founding or first engineering roles in climate, health, or education.', source: 'HN · July 2026', enriched: true, posted: 2 },
-  { id: 'alex-kim', name: 'Alex Kim', role: 'Staff frontend engineer', mode: 'Remote', availability: '3 months', location: 'Austin, TX', university: 'University of Texas at Dallas', companies: ['Meta', 'Stripe'], skills: ['React', 'TypeScript', 'Design systems', 'Web performance'], summary: 'Frontend specialist with 10 years of experience building accessible, high-performance products and leading teams through platform migrations.', source: 'HN · May 2026', enriched: true, posted: 28 },
-  { id: 'samira-okafor', name: 'Samira Okafor', role: 'Data / ML engineer', mode: 'On-site', availability: 'Immediate', location: 'Boston, MA', university: 'Carnegie Mellon University', companies: ['Microsoft'], skills: ['Python', 'PyTorch', 'Data pipelines', 'Experimentation'], summary: 'ML engineer focused on evaluation and trustworthy systems. Wants to work with researchers and product teams on real-world model behavior.', source: 'HN · July 2026', enriched: true, posted: 3 },
-  { id: 'diego-ruiz', name: 'Diego Ruiz', role: 'Senior software engineer', mode: 'Remote', availability: '1 month', location: 'Remote · LATAM', university: 'University of Waterloo', companies: [], skills: ['Ruby', 'Rails', 'Postgres', 'SaaS'], summary: 'Pragmatic full-stack engineer who has helped small SaaS teams go from first customers to reliable recurring revenue. Open to async teams.', source: 'HN · July 2026', enriched: false, posted: 5 }
-];
 
-let candidates = seedCandidates;
+let candidates = [];
 let activeReview = null;
 const el = (id) => document.getElementById(id);
 
@@ -498,7 +490,8 @@ async function loadPublishedCandidates() {
     candidates = payload.candidates;
     render();
   } catch {
-    candidates = seedCandidates;
+    // Leave the directory empty rather than inventing rows; the empty state is honest
+    // about a failed load, and every profile shown must be one a real person consented to.
   }
 }
 
