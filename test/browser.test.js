@@ -106,6 +106,69 @@ const PUBLIC_CANDIDATES = [
 
 const EXPECTED_DEFAULT_NAMES = PUBLIC_CANDIDATES.map(({ name }) => name);
 
+const OPTION_FIXTURE_CANDIDATES = [
+  {
+    id: 'nell-vance',
+    name: 'Nell Vance',
+    role: 'Platform engineer',
+    mode: 'Remote',
+    availability: 'Immediate',
+    location: 'Houston, TX',
+    university: 'Rice University',
+    companies: ['Netflix', 'Airbnb'],
+    skills: ['Terraform'],
+    summary: 'Runs deployment tooling for multi-region services.',
+    source: 'HN · August 2026',
+    enriched: true,
+    posted: 1,
+    publishedAt: '2026-08-01T12:00:00.000Z'
+  },
+  {
+    id: 'omar-diallo',
+    name: 'Omar Diallo',
+    role: 'Compiler engineer',
+    mode: 'Hybrid',
+    availability: '1 month',
+    location: 'Helsinki, Finland',
+    university: 'Aalto University',
+    companies: ['Netflix'],
+    skills: ['LLVM'],
+    summary: 'Optimizes code generation for embedded targets.',
+    source: 'HN · August 2026',
+    enriched: true,
+    posted: 2,
+    publishedAt: '2026-08-02T12:00:00.000Z'
+  },
+  {
+    id: 'petra-lang',
+    name: 'Petra Lang',
+    role: 'Accessibility engineer',
+    mode: 'On-site',
+    availability: '3 months',
+    location: 'Houston, TX',
+    university: 'Rice University',
+    companies: [],
+    skills: ['ARIA'],
+    summary: 'Makes complex web applications usable with assistive technology.',
+    source: 'HN · August 2026',
+    enriched: false,
+    posted: 3,
+    publishedAt: '2026-08-03T12:00:00.000Z'
+  }
+];
+
+const PREVIOUSLY_HARDCODED_OPTIONS = [
+  'University of Texas at Dallas',
+  'Carnegie Mellon University',
+  'University of Waterloo',
+  'Georgia Tech',
+  'Google',
+  'Meta',
+  'Microsoft',
+  'Stripe',
+  'YC startup'
+];
+
 test(
   'public browse, search, sorting, and filters work in a real browser at desktop and mobile viewports',
   async () => {
@@ -248,7 +311,69 @@ test(
   30_000
 );
 
-function createFixtureServer() {
+test(
+  'university and company filter options are derived from the loaded candidates',
+  async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-options-'));
+    let server;
+    let browser;
+
+    try {
+      server = createFixtureServer(OPTION_FIXTURE_CANDIDATES);
+      browser = await launchBrowser(temporaryRoot);
+      const cdp = await connectToPage(browser.devToolsUrl);
+      const runtimeExceptions = [];
+      cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => runtimeExceptions.push(exceptionDetails.text));
+
+      await Promise.all([
+        cdp.send('Page.enable'),
+        cdp.send('Runtime.enable'),
+        cdp.send('Network.enable')
+      ]);
+      await cdp.send('Network.setBlockedURLs', {
+        urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*']
+      });
+
+      await setViewport(cdp, 1280, 900, false);
+      await navigate(cdp, `http://127.0.0.1:${server.port}/`);
+      await waitFor(cdp, `document.querySelector('.candidate-name')?.textContent === 'Nell Vance'`);
+
+      expect(await optionValues(cdp, 'university')).toEqual(['', 'Aalto University', 'Rice University']);
+      expect(await optionValues(cdp, 'company')).toEqual(['', 'Airbnb', 'Netflix']);
+
+      const offeredOptions = [...(await optionValues(cdp, 'university')), ...(await optionValues(cdp, 'company'))];
+      expect(offeredOptions.filter((value) => PREVIOUSLY_HARDCODED_OPTIONS.includes(value))).toEqual([]);
+
+      await setControl(cdp, 'university', 'Rice University');
+      expect(await candidateNames(cdp)).toEqual(['Nell Vance', 'Petra Lang']);
+      await setControl(cdp, 'company', 'Netflix');
+      expect(await candidateNames(cdp)).toEqual(['Nell Vance']);
+
+      await evaluate(cdp, 'refreshFilterOptions()');
+      expect(await evaluate(cdp, `document.getElementById('university').value`)).toBe('Rice University');
+      expect(await evaluate(cdp, `document.getElementById('company').value`)).toBe('Netflix');
+      expect(await optionValues(cdp, 'university')).toEqual(['', 'Aalto University', 'Rice University']);
+
+      expect(runtimeExceptions).toEqual([]);
+
+      cdp.close();
+    } finally {
+      server?.stop(true);
+      if (browser) {
+        browser.process.kill();
+        await browser.process.exited;
+      }
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  },
+  30_000
+);
+
+function optionValues(cdp, id) {
+  return evaluate(cdp, `[...document.getElementById(${JSON.stringify(id)}).options].map((option) => option.value)`);
+}
+
+function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
   const assets = new Map([
     ['/', ['who-is-hiring.html', 'text/html; charset=utf-8']],
     ['/who-is-hiring.html', ['who-is-hiring.html', 'text/html; charset=utf-8']],
@@ -263,7 +388,7 @@ function createFixtureServer() {
     fetch(request) {
       const { pathname } = new URL(request.url);
       if (pathname === '/api/candidates') {
-        return Response.json({ candidates: PUBLIC_CANDIDATES }, { headers: { 'cache-control': 'no-store' } });
+        return Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
       }
       const asset = assets.get(pathname);
       if (!asset) return new Response('Not found', { status: 404 });

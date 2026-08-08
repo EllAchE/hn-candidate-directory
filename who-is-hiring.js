@@ -30,6 +30,21 @@ function render() {
   el('empty-state').hidden = filtered.length > 0;
 }
 
+function refreshFilterOptions() {
+  setFilterOptions('university', candidates.map((candidate) => candidate.university));
+  setFilterOptions('company', candidates.flatMap((candidate) => candidate.companies));
+}
+
+function setFilterOptions(id, values) {
+  const select = el(id);
+  if (!select) return;
+  const anyLabel = select.options[0].textContent;
+  const selected = select.value;
+  const options = [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  select.innerHTML = `<option value="">${escapeHtml(anyLabel)}</option>${options.map((value) => `<option>${escapeHtml(value)}</option>`).join('')}`;
+  if (options.includes(selected)) select.value = selected;
+}
+
 function card(candidate) {
   const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
   const enrichment = candidate.enriched ? `<span class="chip enriched">✦ enriched</span>` : '';
@@ -217,6 +232,7 @@ el('request-form').addEventListener('submit', async (event) => {
     setManagementBusy(false);
   }
 });
+refreshFilterOptions();
 render();
 loadPublishedCandidates();
 
@@ -227,6 +243,7 @@ async function loadPublishedCandidates() {
     const payload = await response.json();
     if (!Array.isArray(payload.candidates)) return;
     candidates = payload.candidates;
+    refreshFilterOptions();
     render();
   } catch {
     candidates = seedCandidates;
