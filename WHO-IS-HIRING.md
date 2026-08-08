@@ -57,6 +57,20 @@ Re-running ingestion is safe. Each comment's `hn_ingests` row is keyed on the im
 
 Suppression is designed for the separate removal flow rather than added later. Setting `hn_ingests.suppressed_at` removes the profile from public search at the read boundary, stops the comment from being queued again, rejects a replayed Queue message, and survives deletion of the profile itself, because the tombstone is keyed on the Hacker News item id and its `submission_id` reference is `ON DELETE SET NULL`. Nothing in this repository sets that column yet; the removal endpoint and UI ship separately.
 
+## Abuse resistance
+
+The submission endpoints are unauthenticated and publicly reachable, so the threat model assumes an attacker who can send unlimited requests from many addresses and choose every byte of every field.
+
+Volume and storage are bounded before a request reaches D1 or the Queue. Fixed-window counters in the `rate_limits` table cap submissions per client address and for the service as a whole; the free `RATE_LIMITER` binding is a best-effort per-colo pre-filter in front of them and is never authoritative. The counters **fail closed**: if D1 cannot serve a counter, the write is refused with `503 rate_limit_unavailable` rather than admitted. A 5,000-row pending cap and a 30-day expiry of abandoned `submitted` and `failed` rows keep the database inside its free-tier size limit; the existing 6-hour cron maintains both. `OPERATIONS.md` carries the exact limits and the paid upgrade path.
+
+Token handling gives an attacker nothing to measure. Review and management tokens are compared in constant time against a SHA-256 digest, and an unknown submission ID is answered with the same `403` body as a wrong token — the previous `404` split let anyone probe whether a specific profile had been submitted, which mattered because URL and resume submission IDs are derived deterministically from attacker-known input. Repeated failures are throttled per address without locking out the legitimate token holder.
+
+`HN_INGEST_TOKEN` cannot degrade into open access. A missing, blank, or under-32-character value is treated as *not configured*: `POST /api/admin/ingest/hn` answers `503 ingest_not_configured` to every caller. The endpoint is separately rate limited and holds a service-wide single-flight reservation, so it cannot amplify traffic against the Algolia index.
+
+Hostile payloads are bounded at the edge of the parser. Request bodies are read as a stream and cut off at the byte cap, so a lying or absent `Content-Length` cannot smuggle a large body through; a non-JSON content type is refused; and nesting depth is scanned before `JSON.parse` so a deeply nested document cannot exhaust the parser stack. Every regex reachable from untrusted input in `worker.js` and `sensitive-data.js` uses bounded quantifiers over capped input, and redaction refuses text beyond its scan budget outright rather than working on it. Stored text is NFC-normalized with C0/C1 controls, bidi overrides, and zero-width characters stripped, and every draft field is truncated to a fixed length, so a hostile profile cannot reorder or hide text in a consumer that renders it.
+
+Responses carry a restrictive CSP, `nosniff`, `no-referrer`, `DENY` framing, and a permissions policy on both API and asset paths. The app is same-origin, so there is no permissive CORS: a preflight is refused and a write carrying a foreign `Origin` is rejected `403 cross_origin_request_blocked`. Error bodies remain stable machine-readable codes; no upstream body, thrown message, or stack trace reaches a client.
+
 ## Local verification
 
 The automated tests use dependency-free in-memory D1, Queue, and String Web Access doubles; they make no live cloud requests and do not create or migrate a database.
@@ -87,8 +101,9 @@ The first command applies DDL, so agents must surface it for a human rather than
 - Queue producer `SUBMISSION_QUEUE`
 - Queue consumer `hn-candidate-submissions`
 - Static asset binding `ASSETS`
+- Rate-limiting binding `RATE_LIMITER`
 - Cron trigger `17 */6 * * *`
 
-Before a future deployment, an operator must create the D1 database and Queue; replace the placeholder database ID; apply `migrations/0001_review_drafts.sql` and `migrations/0002_hacker_news_ingest.sql`; set `UNBLOCKER_ORG_API_KEY` and `HN_INGEST_TOKEN` as Worker secrets; and verify the Worker routes on a non-production environment. `OPERATIONS.md` carries the exact commands. No cron trigger, Hacker News fetch, or Queue send costs anything beyond the Cloudflare free tier.
+Before a future deployment, an operator must create the D1 database and Queue; replace the placeholder database ID; apply `migrations/0001_review_drafts.sql`, `migrations/0002_hacker_news_ingest.sql`, and `migrations/0003_abuse_controls.sql`; set `UNBLOCKER_ORG_API_KEY` and `HN_INGEST_TOKEN` as Worker secrets; and verify the Worker routes on a non-production environment. `OPERATIONS.md` carries the exact commands. No cron trigger, Hacker News fetch, or Queue send costs anything beyond the Cloudflare free tier.
 
 Hacker News ingestion does require a migration. `migrations/0002_hacker_news_ingest.sql` widens the `source_kind` and `status` CHECK constraints on `submissions` and adds the `hn_ingests` table. SQLite cannot alter a CHECK constraint, so the migration rebuilds `submissions`, `jobs`, and `profile_revisions` together and copies their rows; the children are repointed before the original parent is dropped so the implicit delete behind `DROP TABLE` cannot cascade rows away. Take a D1 export first. Rolling the Worker back after the migration is safe — the older Worker reads and writes only the `text` rows the widened constraints still accept — but the migration itself is forward-only. No deployment, DDL, secret write, or production/client data write was performed in this increment.
