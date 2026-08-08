@@ -1649,7 +1649,6 @@ function toPublicCandidate(row) {
     dateRanges: sanitized.dateRanges,
     source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
     sourceUrl: fromHackerNews ? row.hn_permalink : '',
-    enriched: fromHackerNews ? sanitized.companies.length > 0 || sanitized.universities.length > 0 : true,
     posted: daysSince(row.published_at),
     publishedAt: row.published_at
   };
