@@ -297,7 +297,7 @@ describe('operator-triggered ingestion', () => {
     });
   });
 
-  test('reports a transport failure without leaking the upstream error', async () => {
+  test('names the failure to its operator without leaking the upstream error', async () => {
     const env = createEnvironment();
     env.HN_INGEST_TOKEN = INGEST_TOKEN;
     const originalFetch = globalThis.fetch;
@@ -305,7 +305,9 @@ describe('operator-triggered ingestion', () => {
     try {
       const response = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, INGEST_TOKEN), env);
       expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: 'ingest_failed' });
+      const body = await response.json();
+      expect(body).toEqual({ error: 'ingest_failed', reason: 'Error: hn_fetch_failed' });
+      expect(JSON.stringify(body)).not.toContain('upstream exploded');
     } finally {
       globalThis.fetch = originalFetch;
     }
