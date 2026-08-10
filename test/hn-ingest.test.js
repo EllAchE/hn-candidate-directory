@@ -412,6 +412,42 @@ describe('untokened removal of an ingested profile', () => {
   });
 });
 
+// workerd throws a TypeError on any other value before the request is sent, but Node and Bun accept
+// `redirect: 'error'` happily -- so no behavioural test can catch a regression here, only the value.
+const WORKERD_REDIRECT_MODES = ['follow', 'manual'];
+
+describe('outbound requests to the HN API', () => {
+  test('asks for a redirect mode the Workers runtime actually implements', async () => {
+    const env = createEnvironment();
+    const inits = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      inits.push(init);
+      return Response.json({ hits: [] });
+    };
+    try {
+      await ingestHackerNews(env);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(inits.length).toBeGreaterThan(0);
+    for (const init of inits) expect(WORKERD_REDIRECT_MODES).toContain(init.redirect);
+  });
+
+  test('fails closed rather than following a redirect off the HN API', async () => {
+    const env = createEnvironment();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response('', { status: 302, headers: { location: 'https://elsewhere.example/' } });
+    try {
+      await expect(ingestHackerNews(env)).rejects.toThrow('hn_fetch_failed');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe('ingest failure reporting', () => {
   test('names the reason a comment could not be ingested instead of retrying in silence', async () => {
     const env = createEnvironment();

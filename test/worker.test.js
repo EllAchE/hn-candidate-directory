@@ -126,6 +126,7 @@ describe('allowlisted URL review drafts', () => {
           apiRequest('/api/submissions/url', 'POST', { url: 'https://linkedin.com/in/web-candidate/' }),
           env
         );
+        expect(WORKERD_REDIRECT_MODES).toContain(requests[0].init.redirect);
         expect(response.status).toBe(202);
         const submission = await response.json();
         expect(submission.status).toBe('submitted');
@@ -1000,6 +1001,10 @@ function webAccessResponse(data, overrides = {}) {
     { headers: { 'content-type': 'application/json' } }
   );
 }
+
+// workerd throws a TypeError on any other value before the request is sent, but Node and Bun accept
+// `redirect: 'error'` happily -- so no behavioural test can catch a regression here, only the value.
+const WORKERD_REDIRECT_MODES = ['follow', 'manual'];
 
 async function withWebAccessStub(handler, callback) {
   const originalFetch = globalThis.fetch;

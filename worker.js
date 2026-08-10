@@ -1,5 +1,10 @@
 import { sanitizeCandidateDraft } from './sensitive-data.js';
 
+// Outbound fetches must never follow a redirect, but `redirect: 'error'` is not implementable at
+// the edge and workerd throws a TypeError on it before the request leaves. Node and Bun both accept
+// it, so the whole suite passes while every deployed fetch dies -- this is what kept the HN ingest
+// silently empty. `manual` surfaces the 3xx as a normal response, and every caller rejects non-2xx.
+const NO_REDIRECT = 'manual';
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
 const MAX_URL_REQUEST_BYTES = 4_096;
@@ -560,7 +565,7 @@ async function fetchCandidateSource(sourceUrl, apiKey) {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ url: sourceUrl, method: 'GET', format: 'json', executeJS: false, solveCaptcha: false }),
-      redirect: 'error',
+      redirect: NO_REDIRECT,
       signal: controller.signal
     });
     if (!response.ok) throw new UrlSubmissionError('url_fetch_failed', 502);
@@ -1532,7 +1537,7 @@ async function fetchHnJson(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HN_INGEST_LIMITS.timeoutMs);
   try {
-    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' }, redirect: 'error', signal: controller.signal });
+    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' }, redirect: NO_REDIRECT, signal: controller.signal });
     if (!response.ok) throw new Error('hn_fetch_failed');
     return JSON.parse(await readLimitedText(response, HN_INGEST_LIMITS.responseBytes));
   } finally {
