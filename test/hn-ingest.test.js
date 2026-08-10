@@ -410,6 +410,49 @@ describe('untokened removal of an ingested profile', () => {
   });
 });
 
+describe('ingest failure reporting', () => {
+  test('names the reason a comment could not be ingested instead of retrying in silence', async () => {
+    const env = createEnvironment();
+    await ingestHackerNews(env, { transport: createTransport().fetch });
+    const prepare = env.DB.prepare.bind(env.DB);
+    env.DB.prepare = (sql) => {
+      if (sql.includes('FROM hn_ingests WHERE hn_item_id = ?')) throw new Error('D1_ERROR: storage unavailable');
+      return prepare(sql);
+    };
+
+    const logged = [];
+    const original = console.error;
+    console.error = (message) => logged.push(message);
+    let delivery;
+    try {
+      delivery = await deliverQueuedMessages(env, worker);
+    } finally {
+      console.error = original;
+    }
+
+    expect(delivery.acknowledged).toBe(0);
+    expect(delivery.retried).toBeGreaterThan(0);
+    expect(logged.length).toBe(delivery.retried);
+    expect(logged[0]).toBe('hn ingest failed during queue: Error: D1_ERROR: storage unavailable');
+  });
+
+  test('stays silent when nothing fails', async () => {
+    const env = createEnvironment();
+    await ingestHackerNews(env, { transport: createTransport().fetch });
+
+    const logged = [];
+    const original = console.error;
+    console.error = (message) => logged.push(message);
+    try {
+      await deliverQueuedMessages(env, worker);
+    } finally {
+      console.error = original;
+    }
+
+    expect(logged).toEqual([]);
+  });
+});
+
 // The upstream order is deliberately stale-first: a discovery step that trusts index order rather
 // than the recorded timestamp would publish the 2025 cohort and never reach the current month.
 function createArchiveTransport() {
