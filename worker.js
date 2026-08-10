@@ -77,7 +77,8 @@ const RATE_LIMITS = Object.freeze({
   submissionGlobal: { limit: 3_000, windowSeconds: 21_600 },
   authFailure: { limit: 20, windowSeconds: 600 },
   ingestRequest: { limit: 10, windowSeconds: 600 },
-  ingestRun: { limit: 1, windowSeconds: 900 }
+  ingestRun: { limit: 1, windowSeconds: 900 },
+  removalRequest: { limit: 20, windowSeconds: 3_600 }
 });
 const STORAGE_LIMITS = Object.freeze({
   pendingSubmissions: 5_000,
@@ -167,6 +168,12 @@ async function routeRequest(request, env) {
     if (request.method === 'GET') return getReview(request, env, reviewMatch[1]);
     if (request.method === 'PATCH') return updateReview(request, env, reviewMatch[1]);
     return json({ error: 'method_not_allowed' }, 405);
+  }
+
+  const removalMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/removal$/);
+  if (removalMatch) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return requestCandidateRemoval(request, env, removalMatch[1]);
   }
 
   const managementMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/manage$/);
@@ -952,6 +959,52 @@ async function listPublishedCandidates(request, env) {
   }
 
   return json({ candidates: result.results.map(toPublicCandidate) });
+}
+
+// Deliberately unauthenticated. A profile built from a Hacker News comment is published without
+// the subject ever asking, so they never receive the management token every other write path
+// requires -- gating removal behind it would leave them with no way out at all. The asymmetry is
+// intentional: a wrongful removal hides one public post from one directory and an operator can
+// restore it, while a wrongful retention keeps someone listed against their wishes.
+async function requestCandidateRemoval(request, env, candidateId) {
+  const limited = await enforceQuota(env, 'removalRequest', await clientKey(env, request));
+  if (limited) return limited;
+
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT r.id, r.submission_id, r.status, i.hn_item_id, i.suppressed_at
+         FROM profile_revisions r
+         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+        WHERE r.id = ?`
+    )
+      .bind(candidateId)
+      .first();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
+  if (!row) return json({ error: 'candidate_not_found' }, 404);
+  if (!row.hn_item_id) return json({ error: 'token_managed_candidate' }, 409);
+  if (row.suppressed_at || row.status === 'archived') return json({ removed: true });
+
+  const removedAt = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare('UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?').bind(
+        removedAt,
+        removedAt,
+        row.submission_id
+      ),
+      env.DB.prepare(
+        "UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ? WHERE id = ?"
+      ).bind(removedAt, row.id)
+    ]);
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
+  return json({ removed: true });
 }
 
 async function manageCandidate(request, env, candidateId) {

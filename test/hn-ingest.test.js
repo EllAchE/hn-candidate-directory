@@ -358,6 +358,58 @@ describe('Hacker News thread discovery', () => {
   });
 });
 
+describe('untokened removal of an ingested profile', () => {
+  test('removes the listing without a management token', async () => {
+    const env = createEnvironment();
+    await ingestThread(env);
+    const target = (await publicCandidates(env)).find((candidate) => candidate.name === 'adacandidate');
+
+    const response = await worker.fetch(apiRequest(`/api/candidates/${target.id}/removal`, 'POST'), env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removed: true });
+    expect((await publicCandidates(env)).some((candidate) => candidate.id === target.id)).toBe(false);
+  });
+
+  // Editing the comment is what separates suppression from the archived status: an unchanged
+  // comment is skipped on its hash alone, so only an edit proves the removal itself is what keeps
+  // the profile from being collected again.
+  test('keeps an edited comment from being collected again', async () => {
+    const env = createEnvironment();
+    const transport = createTransport();
+    await ingestThread(env, transport);
+    const target = (await publicCandidates(env)).find((candidate) => candidate.name === 'adacandidate');
+    await worker.fetch(apiRequest(`/api/candidates/${target.id}/removal`, 'POST'), env);
+
+    transport.comments[0] = { ...LABELED_COMMENT, comment_text: LABELED_COMMENT.comment_text.replace('Remote: Yes', 'Remote: No') };
+    expect(await ingestHackerNews(env, { transport: transport.fetch })).toEqual({ threads: 1, queued: 0, skipped: 4 });
+    await deliverQueuedMessages(env, worker);
+
+    expect((await publicCandidates(env)).some((candidate) => candidate.name === 'adacandidate')).toBe(false);
+  });
+
+  test('is idempotent', async () => {
+    const env = createEnvironment();
+    await ingestThread(env);
+    const target = (await publicCandidates(env)).find((candidate) => candidate.name === 'adacandidate');
+    const path = `/api/candidates/${target.id}/removal`;
+
+    await worker.fetch(apiRequest(path, 'POST'), env);
+    const second = await worker.fetch(apiRequest(path, 'POST'), env);
+
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ removed: true });
+  });
+
+  test('refuses an unknown candidate and rejects GET', async () => {
+    const env = createEnvironment();
+    await ingestThread(env);
+
+    expect((await worker.fetch(apiRequest('/api/candidates/does-not-exist/removal', 'POST'), env)).status).toBe(404);
+    expect((await worker.fetch(apiRequest('/api/candidates/does-not-exist/removal'), env)).status).toBe(405);
+  });
+});
+
 // The upstream order is deliberately stale-first: a discovery step that trusts index order rather
 // than the recorded timestamp would publish the 2025 cohort and never reach the current month.
 function createArchiveTransport() {
