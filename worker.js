@@ -137,8 +137,13 @@ export default {
 // is how this ran empty for days. Only the failure reason is logged -- ingest inputs are public
 // Hacker News URLs, and no candidate content or token reaches this path.
 function logIngestFailure(stage, error) {
-  const reason = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
+  const reason = ingestFailureReason(error);
   console.error(`hn ingest failed during ${stage}: ${reason}`);
+  return reason;
+}
+
+function ingestFailureReason(error) {
+  return error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
 }
 
 async function routeRequest(request, env) {
@@ -1175,8 +1180,10 @@ async function runHackerNewsIngest(request, env) {
   try {
     return json(await ingestHackerNews(env), 202);
   } catch (error) {
-    logIngestFailure('request', error);
-    return json({ error: 'ingest_failed' }, 502);
+    // This endpoint is reachable only with the ingest secret, so its caller is an operator who is
+    // already entitled to the reason. Reading it requires a live tail, which needs credentials the
+    // operator triggering an ingest may not have, so the answer travels back in the response too.
+    return json({ error: 'ingest_failed', reason: logIngestFailure('request', error) }, 502);
   }
 }
 
