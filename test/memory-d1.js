@@ -104,6 +104,18 @@ class MemoryStatement {
           }
         : null;
     }
+    if (this.sql.includes('LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id') && this.sql.includes('WHERE r.id = ?')) {
+      const revision = revisionById(this.database, this.values[0]);
+      if (!revision) return null;
+      const ingest = [...this.database.hnIngests.values()].find((row) => row.submission_id === revision.submission_id);
+      return {
+        id: revision.id,
+        submission_id: revision.submission_id,
+        status: revision.status,
+        hn_item_id: ingest?.hn_item_id ?? null,
+        suppressed_at: ingest?.suppressed_at ?? null
+      };
+    }
     if (this.sql.includes('FROM hn_ingests') && this.sql.includes('WHERE hn_item_id = ?')) {
       const ingest = this.database.hnIngests.get(this.values[0]);
       return ingest ? select(ingest, ['submission_id', 'comment_hash', 'suppressed_at']) : null;
@@ -412,6 +424,20 @@ class MemoryStatement {
       const revision = revisionById(this.database, candidateId);
       if (revision?.submission_id !== submissionId || revision.status !== 'published') return success(0);
       Object.assign(revision, { status: 'review_ready', published_at: null, updated_at: updatedAt });
+      return success();
+    }
+    if (this.sql === "UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ? WHERE id = ?") {
+      const [updatedAt, candidateId] = this.values;
+      const revision = revisionById(this.database, candidateId);
+      if (!revision) return success(0);
+      Object.assign(revision, { status: 'archived', published_at: null, updated_at: updatedAt });
+      return success();
+    }
+    if (this.sql === 'UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?') {
+      const [suppressedAt, updatedAt, submissionId] = this.values;
+      const ingest = [...this.database.hnIngests.values()].find((row) => row.submission_id === submissionId);
+      if (!ingest) return success(0);
+      Object.assign(ingest, { suppressed_at: suppressedAt, updated_at: updatedAt });
       return success();
     }
     if (this.sql.startsWith("UPDATE profile_revisions SET status = 'archived'") && this.sql.includes('WHERE id = ?')) {

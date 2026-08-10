@@ -142,6 +142,7 @@ const PUBLIC_CANDIDATES = [
 ];
 
 const EXPECTED_DEFAULT_NAMES = PUBLIC_CANDIDATES.map(({ name }) => name);
+const removalRequests = [];
 const RETIRED_HARDCODED_OPTIONS = ['University of Texas at Dallas', 'YC startup'];
 const KEY_CODES = { ArrowDown: 40, ArrowUp: 38, Enter: 13, Escape: 27, Home: 36, End: 35, Backspace: 8 };
 
@@ -546,9 +547,68 @@ test(
           'Remote',
           'from HN · August 2026'
         ]);
+
+        await click(cdp, '[data-view="hn-49156682-01"]');
+        expect(await evaluate(cdp, `document.getElementById('dialog-content').textContent.includes('Not specified')`)).toBe(false);
+        expect(await evaluate(cdp, `document.querySelector('#dialog-content .dialog-copy[style]')`)).toBe(null);
       },
       { candidates: HN_SHAPED_CANDIDATES }
     );
+  },
+  30_000
+);
+
+test(
+  'the profile dialog lists background only where the source supplied it',
+  async () => {
+    await withPage(async (cdp) => {
+      await click(cdp, '[data-view="chen-ito"]');
+      expect(await textContent(cdp, '#dialog-content .dialog-copy[style]')).toBe('Studied at Carnegie Mellon University · Previously at Meta');
+      await click(cdp, '#candidate-dialog [data-close-dialog]');
+
+      await click(cdp, '[data-view="fatima-noor"]');
+      expect(await textContent(cdp, '#dialog-content .dialog-copy[style]')).toBe('Studied at Carnegie Mellon University');
+    });
+  },
+  30_000
+);
+
+test(
+  'a profile compiled from a comment offers untokened removal, and one built by its owner does not',
+  async () => {
+    await withPage(async (cdp) => {
+      await click(cdp, '[data-view="chen-ito"]');
+      expect(await evaluate(cdp, `document.querySelector('#dialog-content [data-remove-for]')`)).toBe(null);
+      expect(await textContent(cdp, '#dialog-content [data-request-for]')).toBe('Manage this profile');
+      expect(await evaluate(cdp, `document.querySelector('#dialog-content .privacy-note')`)).toBe(null);
+      await click(cdp, '#candidate-dialog [data-close-dialog]');
+
+      // Evelyn's source URL is a javascript: scheme, so the disclosure must still name the source
+      // without ever becoming a link -- the removal offer and the hostile href are independent.
+      await click(cdp, '[data-view="evelyn-stone"]');
+      expect(await textContent(cdp, '#dialog-content [data-remove-for]')).toBe('This is me — remove my listing');
+      expect(await textContent(cdp, '#dialog-content .privacy-note')).toBe(
+        'This profile was compiled from a public HN · July 2026. Removal takes effect immediately and the comment will not be collected again.'
+      );
+      expect(await evaluate(cdp, `document.querySelector('#dialog-content .privacy-note a')`)).toBe(null);
+      expect(await evaluate(cdp, `[...document.querySelectorAll('a')].some((link) => link.protocol === 'javascript:')`)).toBe(false);
+      await click(cdp, '#candidate-dialog [data-close-dialog]');
+
+      await click(cdp, '[data-view="ada-rivera"]');
+      expect(await attribute(cdp, '#dialog-content .privacy-note a', 'href')).toBe('https://news.ycombinator.com/item?id=44601001');
+
+      await click(cdp, '#dialog-content [data-remove-for]');
+      expect(await textContent(cdp, '#dialog-content [data-remove-for]')).toBe('Confirm removal');
+      expect(removalRequests).toEqual([]);
+      expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
+
+      await click(cdp, '#dialog-content [data-remove-for]');
+      await waitFor(cdp, `document.getElementById('candidate-dialog').open === false`);
+      expect(removalRequests).toEqual(['ada-rivera']);
+      expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES.filter((name) => name !== 'Ada Rivera'));
+      expect(await textContent(cdp, '#candidate-count')).toBe('5');
+      expect(await textContent(cdp, '#result-count')).toBe('5');
+    });
   },
   30_000
 );
@@ -586,6 +646,7 @@ async function withPage(run, options = {}) {
 }
 
 function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
+  removalRequests.length = 0;
   const assets = new Map([
     ['/', ['who-is-hiring.html', 'text/html; charset=utf-8']],
     ['/who-is-hiring.html', ['who-is-hiring.html', 'text/html; charset=utf-8']],
@@ -601,6 +662,11 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
       const { pathname } = new URL(request.url);
       if (pathname === '/api/candidates') {
         return Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
+      }
+      const removal = pathname.match(/^\/api\/candidates\/([^/]+)\/removal$/);
+      if (removal && request.method === 'POST') {
+        removalRequests.push(decodeURIComponent(removal[1]));
+        return Response.json({ removed: true }, { headers: { 'cache-control': 'no-store' } });
       }
       const asset = assets.get(pathname);
       if (!asset) return new Response('Not found', { status: 404 });
