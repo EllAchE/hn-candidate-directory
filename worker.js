@@ -126,11 +126,20 @@ export default {
     if (!(await reserveIngestRun(env))) return;
     try {
       await ingestHackerNews(env);
-    } catch {
-      return;
+    } catch (error) {
+      logIngestFailure('scheduled', error);
     }
   }
 };
+
+// The ingest runs unattended on a cron, so discarding the reason it failed leaves no trace anywhere:
+// a broken ingest and an ingest with nothing new to collect are indistinguishable from outside, which
+// is how this ran empty for days. Only the failure reason is logged -- ingest inputs are public
+// Hacker News URLs, and no candidate content or token reaches this path.
+function logIngestFailure(stage, error) {
+  const reason = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
+  console.error(`hn ingest failed during ${stage}: ${reason}`);
+}
 
 async function routeRequest(request, env) {
   const url = new URL(request.url);
@@ -1165,7 +1174,8 @@ async function runHackerNewsIngest(request, env) {
 
   try {
     return json(await ingestHackerNews(env), 202);
-  } catch {
+  } catch (error) {
+    logIngestFailure('request', error);
     return json({ error: 'ingest_failed' }, 502);
   }
 }
@@ -1274,7 +1284,8 @@ async function processHnCommentMessage(message, env) {
   try {
     await ingestHnComment(env, message.body.hnComment);
     message.ack?.();
-  } catch {
+  } catch (error) {
+    logIngestFailure('queue', error);
     message.retry?.();
   }
 }
