@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import worker, { DETERMINISTIC_HN_EXTRACTOR, decodeHnCommentText, ingestHackerNews, ingestHnComment, toHnRecord } from '../worker.js';
+import worker, {
+  DETERMINISTIC_HN_EXTRACTOR,
+  HN_EXTRACTION_VERSION,
+  decodeHnCommentText,
+  hnCommentHash,
+  ingestHackerNews,
+  ingestHnComment,
+  toHnRecord
+} from '../worker.js';
 import { REDACTION_MARKER } from '../sensitive-data.js';
 import { createEnvironment, deliverQueuedMessages } from './memory-d1.js';
 
@@ -361,6 +369,88 @@ describe('Hacker News ingestion', () => {
   });
 });
 
+describe('extractor version invalidation', () => {
+  test('folds the extraction version into the recorded comment hash', async () => {
+    const text = decodeHnCommentText(LABELED_COMMENT.comment_text);
+    const built = await record(LABELED_COMMENT);
+
+    expect(built.commentHash).toBe(await hnCommentHash(text, HN_EXTRACTION_VERSION));
+    expect(built.commentHash).not.toBe(await hnCommentHash(text, HN_EXTRACTION_VERSION - 1));
+  });
+
+  test('re-derives an unchanged comment after a version bump and updates the profile in place', async () => {
+    const env = createEnvironment();
+    const transport = createTransport();
+    await ingestThread(env, transport);
+    const before = await publicCandidates(env);
+    const stale = env.DB.revisions.get(`hn-${LABELED_COMMENT.objectID}`);
+    stale.location = 'Wrong City';
+    stale.companies_json = JSON.stringify(['12+ years building distributed systems']);
+    await ageToPreviousExtractorVersion(env);
+
+    expect(await ingestHackerNews(env, { transport: transport.fetch })).toEqual({ threads: 1, queued: 4, skipped: 0 });
+    await deliverQueuedMessages(env, worker);
+
+    const after = await publicCandidates(env);
+    expect(after.map((candidate) => candidate.id)).toEqual(before.map((candidate) => candidate.id));
+    expect(after.map((candidate) => candidate.publishedAt)).toEqual(before.map((candidate) => candidate.publishedAt));
+    expect(env.DB.submissions.size).toBe(3);
+    const updated = after.find((candidate) => candidate.name === 'adacandidate');
+    expect(updated.location).toBe('Toronto, Canada');
+    expect(updated.companies).toEqual(['Stripe', 'Example Systems']);
+  });
+
+  test('goes back to skipping unchanged comments once the bumped run has completed', async () => {
+    const env = createEnvironment();
+    const transport = createTransport();
+    await ingestThread(env, transport);
+    await ageToPreviousExtractorVersion(env);
+
+    expect(await ingestHackerNews(env, { transport: transport.fetch })).toEqual({ threads: 1, queued: 4, skipped: 0 });
+    await deliverQueuedMessages(env, worker);
+
+    expect(await ingestHackerNews(env, { transport: transport.fetch })).toEqual({ threads: 1, queued: 0, skipped: 4 });
+    expect(env.SUBMISSION_QUEUE.messages).toEqual([]);
+    expect(env.DB.hnIngests.get(String(LABELED_COMMENT.objectID)).comment_hash).toBe(
+      await hnCommentHash(decodeHnCommentText(LABELED_COMMENT.comment_text), HN_EXTRACTION_VERSION)
+    );
+  });
+
+  test('never re-collects a suppressed comment at a new extraction version', async () => {
+    const env = createEnvironment();
+    const transport = createTransport();
+    await ingestThread(env, transport);
+    suppress(env, LABELED_COMMENT.objectID);
+    await ageToPreviousExtractorVersion(env);
+    const tombstoned = env.DB.hnIngests.get(String(LABELED_COMMENT.objectID));
+    const suppressedHash = tombstoned.comment_hash;
+
+    expect(await ingestHackerNews(env, { transport: transport.fetch })).toEqual({ threads: 1, queued: 3, skipped: 1 });
+    await deliverQueuedMessages(env, worker);
+    expect(await ingestHnComment(env, queueBody(LABELED_COMMENT))).toBe('skipped_suppressed');
+
+    expect((await publicCandidates(env)).some((candidate) => candidate.name === 'adacandidate')).toBe(false);
+    expect(env.DB.revisions.get(`hn-${LABELED_COMMENT.objectID}`).status).toBe('archived');
+    expect(tombstoned.comment_hash).toBe(suppressedHash);
+    expect(tombstoned.suppressed_at).toBe('2026-08-05T00:00:00.000Z');
+  });
+
+  test('keeps published revisions published and archived revisions archived across a version bump', async () => {
+    const env = createEnvironment();
+    const transport = createTransport();
+    await ingestThread(env, transport);
+    env.DB.revisions.get(`hn-${PROSE_COMMENT.objectID}`).status = 'archived';
+    await ageToPreviousExtractorVersion(env);
+
+    await ingestHackerNews(env, { transport: transport.fetch });
+    await deliverQueuedMessages(env, worker);
+
+    const statuses = [...env.DB.revisions.values()].map((revision) => revision.status).sort();
+    expect(statuses).toEqual(['archived', 'published', 'published']);
+    expect((await publicCandidates(env)).map((candidate) => candidate.name).sort()).toEqual(['adacandidate', 'contactposter']);
+  });
+});
+
 const INGEST_TOKEN = 'operator-secret-operator-secret-0123456789';
 
 describe('operator-triggered ingestion', () => {
@@ -644,6 +734,19 @@ function queueBody(comment) {
     threadId: THREAD.objectID,
     threadMonth: '2026-08'
   };
+}
+
+// Rewriting the stored hashes to the ones the previous extraction version would have written is
+// what a version bump looks like from the database's side, and it is the only way to exercise the
+// bump without editing the constant the production code reads.
+async function ageToPreviousExtractorVersion(env) {
+  const commentsById = new Map(createTransport().comments.map((comment) => [String(comment.objectID), comment]));
+  await Promise.all(
+    [...env.DB.hnIngests.values()].map(async (row) => {
+      const text = decodeHnCommentText(commentsById.get(row.hn_item_id).comment_text);
+      row.comment_hash = await hnCommentHash(text, HN_EXTRACTION_VERSION - 1);
+    })
+  );
 }
 
 function record(comment) {
