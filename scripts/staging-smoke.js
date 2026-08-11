@@ -173,9 +173,16 @@ function requireNoStore(response) {
   if (!directives.includes('no-store')) throw new Error('candidate API is missing Cache-Control: no-store');
 }
 
+const CANDIDATE_PAYLOAD_KEYS = new Set(['candidates', 'nextOffset']);
+
 function validateCandidatePayload(payload) {
-  if (!isPlainObject(payload) || Object.keys(payload).length !== 1 || !Array.isArray(payload.candidates)) {
-    throw new Error('candidate API payload must contain only a candidates array');
+  const keys = isPlainObject(payload) ? Object.keys(payload) : [];
+  const shapeError = new Error('candidate API payload must contain only a candidates array and an optional nextOffset');
+  if (!isPlainObject(payload) || !Array.isArray(payload.candidates) || keys.some((key) => !CANDIDATE_PAYLOAD_KEYS.has(key))) {
+    throw shapeError;
+  }
+  if ('nextOffset' in payload && payload.nextOffset !== null && !Number.isInteger(payload.nextOffset)) {
+    throw new Error('candidate API payload has an invalid nextOffset');
   }
   rejectPrivateKeys(payload, 'payload');
   payload.candidates.forEach((candidate, index) => validateCandidate(candidate, index));
