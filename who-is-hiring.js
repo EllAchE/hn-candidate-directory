@@ -529,16 +529,22 @@ async function handleRemovalClick(button) {
 }
 
 async function loadPublishedCandidates() {
+  const loaded = [];
+  let offset = 0;
   try {
-    const response = await fetch(apiPath('/api/candidates'));
-    if (!response.ok) return;
-    const payload = await response.json();
-    if (!Array.isArray(payload.candidates)) return;
-    candidates = payload.candidates;
-    render();
+    while (offset !== null) {
+      const response = await fetch(apiPath(`/api/candidates?offset=${offset}`));
+      if (!response.ok) break;
+      const payload = await response.json();
+      if (!Array.isArray(payload.candidates)) break;
+      loaded.push(...payload.candidates);
+      candidates = loaded;
+      render();
+      offset = Number.isInteger(payload.nextOffset) ? payload.nextOffset : null;
+    }
   } catch {
-    // Leave the directory empty rather than inventing rows; the empty state is honest
-    // about a failed load, and every profile shown must be one a real person consented to.
+    // Whatever pages already loaded stay visible rather than inventing rows; every
+    // profile shown must be one the server actually confirmed as published.
   }
 }
 
