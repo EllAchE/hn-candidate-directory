@@ -1,5 +1,6 @@
 
 let candidates = [];
+let listingTruncated = false;
 let activeReview = null;
 const el = (id) => document.getElementById(id);
 const UNKNOWN_VALUE = 'not specified';
@@ -30,6 +31,7 @@ function render() {
   renderStats();
   el('candidate-list').innerHTML = filtered.map(card).join('');
   el('empty-state').hidden = filtered.length > 0;
+  el('truncation-notice').hidden = !listingTruncated;
   FACETS.forEach((facet) => renderFacet(facet, query));
   renderActiveFilters(query);
   syncFilterDrawer();
@@ -567,6 +569,7 @@ async function loadPublishedCandidates() {
       if (!Array.isArray(payload.candidates)) break;
       loaded.push(...payload.candidates);
       candidates = loaded;
+      listingTruncated = payload.truncated === true;
       render();
       offset = Number.isInteger(payload.nextOffset) ? payload.nextOffset : null;
     }

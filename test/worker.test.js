@@ -905,6 +905,37 @@ describe('candidate listing pagination', () => {
 
     const allIds = new Set([...firstBody.candidates, ...secondBody.candidates].map((candidate) => candidate.id));
     expect(allIds.size).toBe(total);
+    expect(firstBody.truncated).toBe(false);
+    expect(secondBody.truncated).toBe(false);
+  });
+
+  test('reports truncation when the ceiling rather than the data ends the listing', async () => {
+    const env = createEnvironment();
+    seedPublishedCandidate(env, 0);
+
+    const beyondCeiling = await worker.fetch(apiRequest('/api/candidates?offset=1000000'), env);
+    expect(beyondCeiling.status).toBe(200);
+    expect(await beyondCeiling.json()).toEqual({ candidates: [], nextOffset: null, truncated: true });
+  });
+
+  test('serves published candidates past the previous thousand-row ceiling', async () => {
+    const env = createEnvironment();
+    const total = 1_041;
+    for (let index = 0; index < total; index += 1) seedPublishedCandidate(env, index);
+
+    const seen = new Set();
+    let offset = 0;
+    let body;
+    do {
+      const page = await worker.fetch(apiRequest(`/api/candidates?offset=${offset}`), env);
+      expect(page.status).toBe(200);
+      body = await page.json();
+      body.candidates.forEach((candidate) => seen.add(candidate.id));
+      offset = body.nextOffset;
+    } while (offset !== null);
+
+    expect(seen.size).toBe(total);
+    expect(body.truncated).toBe(false);
   });
 });
 
