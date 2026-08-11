@@ -51,6 +51,8 @@ const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universi
 // 4+ years"), and mapping it here fed that phrase into the companies field instead of a name.
 const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'employers', 'worked at']);
 const HN_AVAILABILITY_LABELS = Object.freeze(['availability', 'available', 'start date', 'notice period']);
+const HN_IMMEDIATE_AVAILABILITY_PATTERN =
+  /\b(?:available\s+(?:to\s+start\s+)?(?:immediately|now)|immediately\s+available|can\s+start\s+immediately)\b/i;
 const HN_NAME_LABELS = Object.freeze(['name']);
 const HN_MAPPED_LABELS = new Set([
   ...HN_LOCATION_LABELS,
@@ -1469,7 +1471,7 @@ function extractHnProfile(record) {
     summary: prose.join(separator).slice(0, 1_500) || HN_UNKNOWN,
     location: (location || HN_UNKNOWN).slice(0, 300),
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
-    availability: valueFor(HN_AVAILABILITY_LABELS).slice(0, 100) || HN_UNKNOWN,
+    availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     universities: listFor(HN_UNIVERSITY_LABELS),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
@@ -1482,6 +1484,16 @@ function hnWorkMode(remoteValue, sourceText) {
   if (/^(no|no\b.*|onsite|on-site|office|not preferred)$/i.test(remoteValue)) return 'On-site';
   if (remoteValue) return remoteValue.slice(0, 100);
   if (/\bremote\b/i.test(sourceText)) return 'Remote';
+  return HN_UNKNOWN;
+}
+
+// Most candidates never state a start date at all, and the few who do rarely use a labelled
+// line — they fold it into the closing sentence of their prose. This only catches the small,
+// unambiguous "available now/immediately" idiom; open-ended phrasing ("available for contract",
+// a specific date) is left alone rather than guessed at.
+function hnAvailability(labelValue, sourceText) {
+  if (labelValue) return labelValue.slice(0, 100);
+  if (HN_IMMEDIATE_AVAILABILITY_PATTERN.test(sourceText)) return 'Immediately';
   return HN_UNKNOWN;
 }
 
