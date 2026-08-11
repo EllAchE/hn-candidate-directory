@@ -53,6 +53,27 @@ const PROSE_COMMENT = {
     'legible systems and mentoring. Happy to work fully remote from anywhere in Europe, and I can start in September.'
 };
 
+const RUN_ON_BIO_COMMENT = {
+  objectID: '44444508',
+  parent_id: 44444444,
+  author: 'runonposter',
+  created_at: '2026-08-03T18:45:00.000Z',
+  comment_text: [
+    'Location: Austin, USA',
+    'Software engineer with professional experience building scalable backends and highly available cloud ' +
+      'infrastructure and orchestrating zero downtime deployments across dozens of regions for high traffic ' +
+      'services handling millions of requests every single day without an early stop'
+  ].join('<p>')
+};
+
+const HEADLINE_COMMENT = {
+  objectID: '44444509',
+  parent_id: 44444444,
+  author: 'headlineposter',
+  created_at: '2026-08-03T19:15:00.000Z',
+  comment_text: ['Location: Remote', 'SEEKING WORK | Remote worldwide | Senior Backend Engineer'].join('<p>')
+};
+
 const REPLY_COMMENT = {
   objectID: '44444504',
   parent_id: 44444501,
@@ -128,6 +149,20 @@ describe('deterministic Hacker News extraction', () => {
       skills: []
     });
     expect(draft.role).toStartWith('Senior infrastructure engineer');
+  });
+
+  test('leaves role empty rather than truncating a run-on opening line mid-word', async () => {
+    const draft = DETERMINISTIC_HN_EXTRACTOR.extract(await record(RUN_ON_BIO_COMMENT));
+
+    expect(draft.role).toBe('');
+    expect(draft.summary).toContain('Software engineer with professional experience');
+    expect(draft.summary).toContain('without an early stop');
+  });
+
+  test('keeps a short unlabeled headline as the role verbatim', async () => {
+    const draft = DETERMINISTIC_HN_EXTRACTOR.extract(await record(HEADLINE_COMMENT));
+
+    expect(draft.role).toBe('SEEKING WORK | Remote worldwide | Senior Backend Engineer');
   });
 
   test('skips a comment with neither labels nor enough prose', async () => {

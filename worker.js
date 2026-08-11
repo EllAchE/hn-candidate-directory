@@ -63,6 +63,10 @@ const HN_MAPPED_LABELS = new Set([
   ...HN_NAME_LABELS
 ]);
 const HN_UNKNOWN = 'Not specified';
+// A card headline: long enough for a real title or a short opening sentence, short enough that a
+// candidate's whole self-introduction can never pass as one.
+const HN_TITLE_MAX_CHARS = 140;
+const HN_TITLE_SENTENCE_PATTERN = new RegExp(`^(.{1,${HN_TITLE_MAX_CHARS}}?[.!?])(?=\\s|$)`);
 const HN_INGEST_TOKEN_MIN_LENGTH = 32;
 const MAX_BEARER_TOKEN_CHARS = 256;
 const MAX_JSON_DEPTH = 32;
@@ -1474,10 +1478,12 @@ function extractHnProfile(record) {
   const dateRanges = [...record.text.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map(
     (match) => match[0]
   );
+  const openingLine = prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || '';
+  const title = role || hnTitleFromOpeningLine(openingLine);
 
   return boundedDraft(sanitizeCandidateDraft({
     name: (valueFor(HN_NAME_LABELS) || record.author || HN_UNKNOWN).slice(0, 200),
-    role: (role || prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || HN_UNKNOWN).slice(0, 300),
+    role: title.slice(0, 300),
     summary: prose.join(separator).slice(0, 1_500) || HN_UNKNOWN,
     location: (location || HN_UNKNOWN).slice(0, 300),
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
@@ -1487,6 +1493,12 @@ function extractHnProfile(record) {
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
+}
+
+function hnTitleFromOpeningLine(line) {
+  const sentence = HN_TITLE_SENTENCE_PATTERN.exec(line);
+  if (sentence) return sentence[1].trim();
+  return line.length <= HN_TITLE_MAX_CHARS ? line : '';
 }
 
 function hnWorkMode(remoteValue, sourceText) {
