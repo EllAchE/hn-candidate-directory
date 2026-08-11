@@ -134,6 +134,12 @@ class MemoryStatement {
       const state = this.database.serviceState.get(this.values[0]);
       return state ? { value: state.value } : null;
     }
+    if (this.sql.startsWith('SELECT COUNT(*) AS pending FROM hn_ingests')) {
+      const pending = [...this.database.hnIngests.values()].filter(
+        (ingest) => ingest.suppressed_at === null && (ingest.extractor_rank ?? 0) < this.values[0]
+      ).length;
+      return { pending };
+    }
     if (this.sql.startsWith('SELECT COUNT(*) AS total FROM submissions')) {
       return { total: [...this.database.submissions.values()].filter((row) => PENDING_STATUSES.has(row.status)).length };
     }
@@ -141,6 +147,32 @@ class MemoryStatement {
   }
 
   async all() {
+    if (this.sql.includes('FROM hn_ingests i')) {
+      return {
+        results: this.values
+          .map((itemId) => this.database.hnIngests.get(itemId))
+          .filter(Boolean)
+          .map((ingest) => {
+            const revision = ingest.submission_id ? this.database.revisions.get(ingest.submission_id) : null;
+            return {
+              hn_item_id: ingest.hn_item_id,
+              submission_id: ingest.submission_id,
+              suppressed_at: ingest.suppressed_at,
+              comment_hash: ingest.comment_hash,
+              revision_status: revision?.status ?? null,
+              revision_rank: revision?.extractor_rank ?? null
+            };
+          })
+      };
+    }
+    if (this.sql.includes('FROM hn_ingests') && this.sql.includes('AND extractor_rank < ?')) {
+      const [rank, limit] = this.values;
+      const results = [...this.database.hnIngests.values()]
+        .filter((ingest) => ingest.suppressed_at === null && (ingest.extractor_rank ?? 0) < rank)
+        .sort((a, b) => b.comment_created_at.localeCompare(a.comment_created_at) || a.hn_item_id.localeCompare(b.hn_item_id))
+        .slice(0, limit);
+      return { results };
+    }
     if (this.sql.includes('FROM hn_ingests') && this.sql.includes('WHERE thread_id = ?')) {
       const results = [...this.database.hnIngests.values()]
         .filter((ingest) => ingest.thread_id === this.values[0])
@@ -217,7 +249,9 @@ class MemoryStatement {
         dateRangesJson,
         createdAt,
         updatedAt,
-        publishedAt
+        publishedAt,
+        extractor,
+        extractorRank
       ] = this.values;
       const fields = {
         name,
@@ -230,11 +264,14 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
-        updated_at: updatedAt
+        updated_at: updatedAt,
+        extractor,
+        extractor_rank: extractorRank
       };
       const existing = this.database.revisions.get(submissionId);
       if (existing) {
         if (existing.status !== 'published') return success(0);
+        if ((existing.extractor_rank ?? 0) > extractorRank) return success(0);
         Object.assign(existing, fields);
         return success();
       }
@@ -259,7 +296,10 @@ class MemoryStatement {
         commentHash,
         commentCreatedAt,
         createdAt,
-        updatedAt
+        updatedAt,
+        extractorRank,
+        resumeUrl,
+        resumeFetchedAt
       ] = this.values;
       const fields = {
         submission_id: submissionId,
@@ -273,7 +313,12 @@ class MemoryStatement {
       const existing = this.database.hnIngests.get(hnItemId);
       if (existing) {
         if (existing.suppressed_at !== null) return success(0);
-        Object.assign(existing, fields);
+        const unchangedText = existing.comment_hash === commentHash;
+        Object.assign(existing, fields, {
+          resume_url: resumeUrl ?? existing.resume_url ?? null,
+          resume_fetched_at: resumeFetchedAt ?? existing.resume_fetched_at ?? null,
+          extractor_rank: unchangedText ? Math.max(existing.extractor_rank ?? 0, extractorRank) : extractorRank
+        });
         return success();
       }
       this.database.hnIngests.set(hnItemId, {
@@ -282,7 +327,10 @@ class MemoryStatement {
         comment_created_at: commentCreatedAt,
         suppressed_at: null,
         suppressed_reason: null,
-        created_at: createdAt
+        created_at: createdAt,
+        extractor_rank: extractorRank,
+        resume_url: resumeUrl ?? null,
+        resume_fetched_at: resumeFetchedAt ?? null
       });
       return success();
     }
