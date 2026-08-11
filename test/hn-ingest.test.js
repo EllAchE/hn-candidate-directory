@@ -104,6 +104,34 @@ const YEARS_OF_EXPERIENCE_COMMENT = {
   ].join('<p>')
 };
 
+const IMMEDIATE_PROSE_COMMENT = {
+  objectID: '44444507',
+  parent_id: 44444444,
+  author: 'readyposter',
+  created_at: '2026-08-03T20:00:00.000Z',
+  comment_text: [
+    'Location: Lisbon, Portugal',
+    'Remote: Yes',
+    'Technologies: Go, PostgreSQL',
+    'Résumé/CV: available upon request',
+    'I ship reliable backend systems end to end and am available immediately.'
+  ].join('<p>')
+};
+
+const RESUME_AVAILABLE_ONLY_COMMENT = {
+  objectID: '44444508',
+  parent_id: 44444444,
+  author: 'quietposter',
+  created_at: '2026-08-03T20:30:00.000Z',
+  comment_text: [
+    'Location: Prague, Czechia',
+    'Remote: Yes',
+    'Technologies: Kotlin, Android',
+    'Résumé/CV: Available on request',
+    'I build mobile apps and enjoy shipping polished UI.'
+  ].join('<p>')
+};
+
 describe('deterministic Hacker News extraction', () => {
   test('decodes comment HTML into labelled plain text', () => {
     expect(decodeHnCommentText(LABELED_COMMENT.comment_text).split('\n')).toEqual([
@@ -174,6 +202,18 @@ describe('deterministic Hacker News extraction', () => {
 
     expect(draft.companies).toEqual([]);
     expect(draft.summary).toContain('Experience: 12+ years building distributed systems');
+  });
+
+  test('reads "available immediately" prose when there is no labelled availability line', async () => {
+    const draft = DETERMINISTIC_HN_EXTRACTOR.extract(await record(IMMEDIATE_PROSE_COMMENT));
+
+    expect(draft.availability).toBe('Immediately');
+  });
+
+  test('does not treat résumé availability as candidate availability', async () => {
+    const draft = DETERMINISTIC_HN_EXTRACTOR.extract(await record(RESUME_AVAILABLE_ONLY_COMMENT));
+
+    expect(draft.availability).toBe('Not specified');
   });
 
   test('runs extracted text through the shared sensitive-data policy', async () => {
