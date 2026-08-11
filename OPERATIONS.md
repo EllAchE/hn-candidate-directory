@@ -332,6 +332,7 @@ Paid upgrade path, if the free-tier controls stop being enough: a WAF rate-limit
 
 - A wrong or bad-shaped Algolia response ends the run with `502 ingest_failed` and writes nothing. The next scheduled run retries; no manual cleanup is needed.
 - Repeated ingest runs are idempotent, so a partially completed run is safe to repeat. Never clear `hn_ingests` to force a re-ingest: the recorded hashes are the deduplication key, and the suppression tombstones live in the same table.
+- An extraction fix does not reach already-ingested profiles on its own, because their comment text is unchanged. Bump `HN_EXTRACTION_VERSION` in `worker.js` in the same PR as the fix; the next run re-derives every non-suppressed comment it discovers, updates the published rows in place, and the run after that skips them again. Suppressed rows stay suppressed at any version. A bumped run queues one message and roughly three D1 writes per comment in the two threads discovery returns, so treat it as a first ingest of those threads rather than a routine run.
 - If a profile someone asked to remove reappears, that is an incident, not a retry. Confirm `suppressed_at` is set for its `hn_item_id` before doing anything else, and preserve the row.
 - To stop ingestion entirely, remove the `[triggers]` block and deploy; that is an ordinary reviewed code change, not a console edit.
 

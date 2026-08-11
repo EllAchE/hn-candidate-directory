@@ -28,6 +28,12 @@ const HN_INGEST_LIMITS = Object.freeze({
   timeoutMs: 10_000,
   responseBytes: 4_000_000
 });
+// The recorded hash is the entire cache key for an ingested comment, so it covers the extraction
+// contract as well as the source text. Without that, a fix to `extractHnProfile` reaches only
+// comments first seen after it ships and every already-ingested profile keeps its old values
+// forever. Bump this in the same commit as any change to what extraction produces; leaving it alone
+// is what keeps an ordinary run skipping unchanged comments.
+const HN_EXTRACTION_VERSION = 1;
 const HN_MONTHS = Object.freeze([
   'January',
   'February',
@@ -1443,8 +1449,16 @@ async function toHnRecord(thread, hit) {
     comment,
     text,
     permalink: `https://news.ycombinator.com/item?id=${itemId}`,
-    commentHash: await hashToken(text)
+    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION)
   };
+}
+
+// The version travels inside the hashed input rather than beside it, so both cache checks -- the
+// thread-level queue filter and the per-comment write guard -- pick up a bump without a schema
+// change. Rows written before the envelope existed hold a bare hash of the text, so version 1 is
+// itself the first invalidation.
+function hnCommentHash(text, version) {
+  return hashToken(`hn-extraction-v${version}\n${text}`);
 }
 
 const DETERMINISTIC_HN_EXTRACTOR = Object.freeze({
@@ -1900,12 +1914,14 @@ function json(value, status = 200, extraHeaders = {}) {
 export {
   CANDIDATES_PAGE_SIZE,
   DETERMINISTIC_HN_EXTRACTOR,
+  HN_EXTRACTION_VERSION,
   HN_INGEST_LIMITS,
   MAX_RESUME_BYTES,
   MAX_SOURCE_BYTES,
   STRING_WEB_ACCESS_LIMITS,
   decodeHnCommentText,
   extractProfile,
+  hnCommentHash,
   ingestHackerNews,
   ingestHnComment,
   previewHackerNewsIngest,
