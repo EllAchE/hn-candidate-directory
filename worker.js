@@ -88,7 +88,10 @@ const MAX_BEARER_TOKEN_CHARS = 256;
 const MAX_JSON_DEPTH = 32;
 const INVISIBLE_TEXT_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 const MAX_HTML_SOURCE_CHARS = 400_000;
-const MAX_PUBLIC_CANDIDATES = 1_000;
+// An abuse ceiling on how deep one client may page, not a size the directory is expected to reach.
+// It must stay well ahead of the published row count: at 1_000 it silently hid every profile past
+// the first thousand, so a reader had no way to tell a truncated listing from a complete one.
+const MAX_PUBLIC_CANDIDATES = 25_000;
 const CANDIDATES_PAGE_SIZE = 200;
 const DRAFT_FIELD_LIMITS = Object.freeze({
   name: 200,
@@ -1000,7 +1003,7 @@ async function listPublishedCandidates(request, env) {
 
   const offset = clampCandidateOffset(new URL(request.url).searchParams.get('offset'));
   const limit = Math.min(CANDIDATES_PAGE_SIZE, MAX_PUBLIC_CANDIDATES - offset);
-  if (limit <= 0) return json({ candidates: [], nextOffset: null });
+  if (limit <= 0) return json({ candidates: [], nextOffset: null, truncated: true });
 
   let result;
   try {
@@ -1018,8 +1021,12 @@ async function listPublishedCandidates(request, env) {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
 
-  const nextOffset = result.results.length === limit && offset + limit < MAX_PUBLIC_CANDIDATES ? offset + limit : null;
-  return json({ candidates: result.results.map(toPublicCandidate), nextOffset });
+  const pageWasFull = result.results.length === limit;
+  const nextOffset = pageWasFull && offset + limit < MAX_PUBLIC_CANDIDATES ? offset + limit : null;
+  // A full final page means the ceiling, not the data, ended the listing, so say so rather than
+  // letting the reader mistake a capped list for the whole directory.
+  const truncated = pageWasFull && nextOffset === null;
+  return json({ candidates: result.results.map(toPublicCandidate), nextOffset, truncated });
 }
 
 function clampCandidateOffset(raw) {
