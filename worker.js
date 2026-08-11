@@ -1,5 +1,10 @@
 import { sanitizeCandidateDraft } from './sensitive-data.js';
 
+// Outbound fetches must never follow a redirect, but `redirect: 'error'` is not implementable at
+// the edge and workerd throws a TypeError on it before the request leaves. Node and Bun both accept
+// it, so the whole suite passes while every deployed fetch dies -- this is what kept the HN ingest
+// silently empty. `manual` surfaces the 3xx as a normal response, and every caller rejects non-2xx.
+const NO_REDIRECT = 'manual';
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
 const MAX_URL_REQUEST_BYTES = 4_096;
@@ -126,11 +131,25 @@ export default {
     if (!(await reserveIngestRun(env))) return;
     try {
       await ingestHackerNews(env);
-    } catch {
-      return;
+    } catch (error) {
+      logIngestFailure('scheduled', error);
     }
   }
 };
+
+// The ingest runs unattended on a cron, so discarding the reason it failed leaves no trace anywhere:
+// a broken ingest and an ingest with nothing new to collect are indistinguishable from outside, which
+// is how this ran empty for days. Only the failure reason is logged -- ingest inputs are public
+// Hacker News URLs, and no candidate content or token reaches this path.
+function logIngestFailure(stage, error) {
+  const reason = ingestFailureReason(error);
+  console.error(`hn ingest failed during ${stage}: ${reason}`);
+  return reason;
+}
+
+function ingestFailureReason(error) {
+  return error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
+}
 
 async function routeRequest(request, env) {
   const url = new URL(request.url);
@@ -546,7 +565,7 @@ async function fetchCandidateSource(sourceUrl, apiKey) {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ url: sourceUrl, method: 'GET', format: 'json', executeJS: false, solveCaptcha: false }),
-      redirect: 'error',
+      redirect: NO_REDIRECT,
       signal: controller.signal
     });
     if (!response.ok) throw new UrlSubmissionError('url_fetch_failed', 502);
@@ -1165,8 +1184,11 @@ async function runHackerNewsIngest(request, env) {
 
   try {
     return json(await ingestHackerNews(env), 202);
-  } catch {
-    return json({ error: 'ingest_failed' }, 502);
+  } catch (error) {
+    // This endpoint is reachable only with the ingest secret, so its caller is an operator who is
+    // already entitled to the reason. Reading it requires a live tail, which needs credentials the
+    // operator triggering an ingest may not have, so the answer travels back in the response too.
+    return json({ error: 'ingest_failed', reason: logIngestFailure('request', error) }, 502);
   }
 }
 
@@ -1274,7 +1296,8 @@ async function processHnCommentMessage(message, env) {
   try {
     await ingestHnComment(env, message.body.hnComment);
     message.ack?.();
-  } catch {
+  } catch (error) {
+    logIngestFailure('queue', error);
     message.retry?.();
   }
 }
@@ -1514,7 +1537,7 @@ async function fetchHnJson(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HN_INGEST_LIMITS.timeoutMs);
   try {
-    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' }, redirect: 'error', signal: controller.signal });
+    const response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' }, redirect: NO_REDIRECT, signal: controller.signal });
     if (!response.ok) throw new Error('hn_fetch_failed');
     return JSON.parse(await readLimitedText(response, HN_INGEST_LIMITS.responseBytes));
   } finally {

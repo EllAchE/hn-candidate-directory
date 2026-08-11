@@ -297,7 +297,7 @@ describe('operator-triggered ingestion', () => {
     });
   });
 
-  test('reports a transport failure without leaking the upstream error', async () => {
+  test('names the failure to its operator without leaking the upstream error', async () => {
     const env = createEnvironment();
     env.HN_INGEST_TOKEN = INGEST_TOKEN;
     const originalFetch = globalThis.fetch;
@@ -305,7 +305,9 @@ describe('operator-triggered ingestion', () => {
     try {
       const response = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', {}, INGEST_TOKEN), env);
       expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: 'ingest_failed' });
+      const body = await response.json();
+      expect(body).toEqual({ error: 'ingest_failed', reason: 'Error: hn_fetch_failed' });
+      expect(JSON.stringify(body)).not.toContain('upstream exploded');
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -407,6 +409,85 @@ describe('untokened removal of an ingested profile', () => {
 
     expect((await worker.fetch(apiRequest('/api/candidates/does-not-exist/removal', 'POST'), env)).status).toBe(404);
     expect((await worker.fetch(apiRequest('/api/candidates/does-not-exist/removal'), env)).status).toBe(405);
+  });
+});
+
+// workerd throws a TypeError on any other value before the request is sent, but Node and Bun accept
+// `redirect: 'error'` happily -- so no behavioural test can catch a regression here, only the value.
+const WORKERD_REDIRECT_MODES = ['follow', 'manual'];
+
+describe('outbound requests to the HN API', () => {
+  test('asks for a redirect mode the Workers runtime actually implements', async () => {
+    const env = createEnvironment();
+    const inits = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      inits.push(init);
+      return Response.json({ hits: [] });
+    };
+    try {
+      await ingestHackerNews(env);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(inits.length).toBeGreaterThan(0);
+    for (const init of inits) expect(WORKERD_REDIRECT_MODES).toContain(init.redirect);
+  });
+
+  test('fails closed rather than following a redirect off the HN API', async () => {
+    const env = createEnvironment();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response('', { status: 302, headers: { location: 'https://elsewhere.example/' } });
+    try {
+      await expect(ingestHackerNews(env)).rejects.toThrow('hn_fetch_failed');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('ingest failure reporting', () => {
+  test('names the reason a comment could not be ingested instead of retrying in silence', async () => {
+    const env = createEnvironment();
+    await ingestHackerNews(env, { transport: createTransport().fetch });
+    const prepare = env.DB.prepare.bind(env.DB);
+    env.DB.prepare = (sql) => {
+      if (sql.includes('FROM hn_ingests WHERE hn_item_id = ?')) throw new Error('D1_ERROR: storage unavailable');
+      return prepare(sql);
+    };
+
+    const logged = [];
+    const original = console.error;
+    console.error = (message) => logged.push(message);
+    let delivery;
+    try {
+      delivery = await deliverQueuedMessages(env, worker);
+    } finally {
+      console.error = original;
+    }
+
+    expect(delivery.acknowledged).toBe(0);
+    expect(delivery.retried).toBeGreaterThan(0);
+    expect(logged.length).toBe(delivery.retried);
+    expect(logged[0]).toBe('hn ingest failed during queue: Error: D1_ERROR: storage unavailable');
+  });
+
+  test('stays silent when nothing fails', async () => {
+    const env = createEnvironment();
+    await ingestHackerNews(env, { transport: createTransport().fetch });
+
+    const logged = [];
+    const original = console.error;
+    console.error = (message) => logged.push(message);
+    try {
+      await deliverQueuedMessages(env, worker);
+    } finally {
+      console.error = original;
+    }
+
+    expect(logged).toEqual([]);
   });
 });
 
