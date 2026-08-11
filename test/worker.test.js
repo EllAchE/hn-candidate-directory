@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import worker, { MAX_RESUME_BYTES, MAX_SOURCE_BYTES, STRING_WEB_ACCESS_LIMITS, extractProfile, validateCandidateSourceUrl } from '../worker.js';
+import worker, {
+  CANDIDATES_PAGE_SIZE,
+  MAX_RESUME_BYTES,
+  MAX_SOURCE_BYTES,
+  STRING_WEB_ACCESS_LIMITS,
+  extractProfile,
+  validateCandidateSourceUrl
+} from '../worker.js';
 import { REDACTION_MARKER } from '../sensitive-data.js';
 import { createEnvironment } from './memory-d1.js';
 
@@ -877,6 +884,51 @@ describe('published candidate management', () => {
     expect(await publicCandidates(env)).toEqual([]);
   });
 });
+
+describe('candidate listing pagination', () => {
+  test('pages the public listing instead of returning every candidate at once', async () => {
+    const env = createEnvironment();
+    const total = CANDIDATES_PAGE_SIZE + 2;
+    for (let index = 0; index < total; index += 1) seedPublishedCandidate(env, index);
+
+    const firstPage = await worker.fetch(apiRequest('/api/candidates'), env);
+    expect(firstPage.status).toBe(200);
+    const firstBody = await firstPage.json();
+    expect(firstBody.candidates).toHaveLength(CANDIDATES_PAGE_SIZE);
+    expect(firstBody.nextOffset).toBe(CANDIDATES_PAGE_SIZE);
+
+    const secondPage = await worker.fetch(apiRequest(`/api/candidates?offset=${firstBody.nextOffset}`), env);
+    expect(secondPage.status).toBe(200);
+    const secondBody = await secondPage.json();
+    expect(secondBody.candidates).toHaveLength(2);
+    expect(secondBody.nextOffset).toBeNull();
+
+    const allIds = new Set([...firstBody.candidates, ...secondBody.candidates].map((candidate) => candidate.id));
+    expect(allIds.size).toBe(total);
+  });
+});
+
+function seedPublishedCandidate(env, index) {
+  const submissionId = `seed-submission-${index}`;
+  env.DB.revisions.set(submissionId, {
+    id: `seed-candidate-${index}`,
+    submission_id: submissionId,
+    status: 'published',
+    name: `Candidate ${index}`,
+    role: `Engineer ${index}`,
+    summary: `Summary for candidate ${index}.`,
+    location: 'Remote',
+    work_mode: 'Remote',
+    availability: 'Immediate',
+    universities_json: '[]',
+    companies_json: '[]',
+    skills_json: '[]',
+    date_ranges_json: '[]',
+    created_at: '2026-08-01T00:00:00.000Z',
+    updated_at: '2026-08-01T00:00:00.000Z',
+    published_at: '2026-08-01T00:00:00.000Z'
+  });
+}
 
 test('extractProfile returns normalized collection fields', () => {
   expect(

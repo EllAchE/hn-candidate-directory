@@ -65,12 +65,17 @@ const HN_MAPPED_LABELS = new Set([
   ...HN_NAME_LABELS
 ]);
 const HN_UNKNOWN = 'Not specified';
+// A card headline: long enough for a real title or a short opening sentence, short enough that a
+// candidate's whole self-introduction can never pass as one.
+const HN_TITLE_MAX_CHARS = 140;
+const HN_TITLE_SENTENCE_PATTERN = new RegExp(`^(.{1,${HN_TITLE_MAX_CHARS}}?[.!?])(?=\\s|$)`);
 const HN_INGEST_TOKEN_MIN_LENGTH = 32;
 const MAX_BEARER_TOKEN_CHARS = 256;
 const MAX_JSON_DEPTH = 32;
 const INVISIBLE_TEXT_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 const MAX_HTML_SOURCE_CHARS = 400_000;
 const MAX_PUBLIC_CANDIDATES = 1_000;
+const CANDIDATES_PAGE_SIZE = 200;
 const DRAFT_FIELD_LIMITS = Object.freeze({
   name: 200,
   role: 300,
@@ -965,6 +970,10 @@ async function listPublishedCandidates(request, env) {
   const edge = await consumeEdgeQuota(env, `candidates:${await clientKey(env, request)}`);
   if (edge) return edge;
 
+  const offset = clampCandidateOffset(new URL(request.url).searchParams.get('offset'));
+  const limit = Math.min(CANDIDATES_PAGE_SIZE, MAX_PUBLIC_CANDIDATES - offset);
+  if (limit <= 0) return json({ candidates: [], nextOffset: null });
+
   let result;
   try {
     result = await env.DB.prepare(
@@ -974,14 +983,21 @@ async function listPublishedCandidates(request, env) {
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.status = 'published' AND i.suppressed_at IS NULL
-        ORDER BY r.published_at DESC
-        LIMIT ${MAX_PUBLIC_CANDIDATES}`
-    ).all();
+        ORDER BY r.published_at DESC, r.id
+        LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all();
   } catch {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
 
-  return json({ candidates: result.results.map(toPublicCandidate) });
+  const nextOffset = result.results.length === limit && offset + limit < MAX_PUBLIC_CANDIDATES ? offset + limit : null;
+  return json({ candidates: result.results.map(toPublicCandidate), nextOffset });
+}
+
+function clampCandidateOffset(raw) {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  if (!Number.isInteger(parsed) || parsed < 0) return 0;
+  return Math.min(parsed, MAX_PUBLIC_CANDIDATES);
 }
 
 // Deliberately unauthenticated. A profile built from a Hacker News comment is published without
@@ -1464,10 +1480,12 @@ function extractHnProfile(record) {
   const dateRanges = [...record.text.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map(
     (match) => match[0]
   );
+  const openingLine = prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || '';
+  const title = role || hnTitleFromOpeningLine(openingLine);
 
   return boundedDraft(sanitizeCandidateDraft({
     name: (valueFor(HN_NAME_LABELS) || record.author || HN_UNKNOWN).slice(0, 200),
-    role: (role || prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || HN_UNKNOWN).slice(0, 300),
+    role: title.slice(0, 300),
     summary: prose.join(separator).slice(0, 1_500) || HN_UNKNOWN,
     location: (location || HN_UNKNOWN).slice(0, 300),
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
@@ -1477,6 +1495,12 @@ function extractHnProfile(record) {
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
+}
+
+function hnTitleFromOpeningLine(line) {
+  const sentence = HN_TITLE_SENTENCE_PATTERN.exec(line);
+  if (sentence) return sentence[1].trim();
+  return line.length <= HN_TITLE_MAX_CHARS ? line : '';
 }
 
 function hnWorkMode(remoteValue, sourceText) {
@@ -1874,6 +1898,7 @@ function json(value, status = 200, extraHeaders = {}) {
 }
 
 export {
+  CANDIDATES_PAGE_SIZE,
   DETERMINISTIC_HN_EXTRACTOR,
   HN_INGEST_LIMITS,
   MAX_RESUME_BYTES,

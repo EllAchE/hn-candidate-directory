@@ -149,11 +149,13 @@ class MemoryStatement {
     }
     if (this.sql.includes("WHERE r.status = 'published'")) {
       const ingestsBySubmission = new Map([...this.database.hnIngests.values()].map((ingest) => [ingest.submission_id, ingest]));
-      const results = [...this.database.revisions.values()]
+      const rows = [...this.database.revisions.values()]
         .filter((revision) => revision.status === 'published')
         .map((revision) => ({ ...revision, ...hnJoinColumns(ingestsBySubmission.get(revision.submission_id)) }))
         .filter((revision) => revision.suppressed_at === null)
-        .sort((left, right) => right.published_at.localeCompare(left.published_at));
+        .sort((left, right) => right.published_at.localeCompare(left.published_at) || left.id.localeCompare(right.id));
+      const [limit, offset] = this.values;
+      const results = this.sql.includes('LIMIT ? OFFSET ?') ? rows.slice(offset, offset + limit) : rows;
       return { results };
     }
     throw new Error(`Unsupported all statement: ${this.sql}`);
