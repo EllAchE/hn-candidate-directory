@@ -47,7 +47,9 @@ const HN_REMOTE_LABELS = Object.freeze(['remote', 'remote work', 'remote?']);
 const HN_ROLE_LABELS = Object.freeze(['role', 'title', 'position', 'seeking', 'looking for', 'interested in']);
 const HN_SKILL_LABELS = Object.freeze(['technologies', 'technology', 'tech', 'tech stack', 'stack', 'skills', 'tools']);
 const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'school', 'schools', 'degree']);
-const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'experience', 'employers', 'worked at']);
+// 'experience' is deliberately excluded: candidates use it for years-of-experience ("Experience:
+// 4+ years"), and mapping it here fed that phrase into the companies field instead of a name.
+const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'employers', 'worked at']);
 const HN_AVAILABILITY_LABELS = Object.freeze(['availability', 'available', 'start date', 'notice period']);
 const HN_NAME_LABELS = Object.freeze(['name']);
 const HN_MAPPED_LABELS = new Set([

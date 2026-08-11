@@ -69,6 +69,20 @@ const NOISE_COMMENT = {
   comment_text: 'dupe'
 };
 
+const YEARS_OF_EXPERIENCE_COMMENT = {
+  objectID: '44444506',
+  parent_id: 44444444,
+  author: 'seniorposter',
+  created_at: '2026-08-03T19:30:00.000Z',
+  comment_text: [
+    'Location: Salt Lake City, Utah',
+    'Remote: Yes',
+    'Technologies: Python, TypeScript, Kubernetes',
+    'Experience: 12+ years building distributed systems',
+    'Résumé/CV: on request'
+  ].join('<p>')
+};
+
 describe('deterministic Hacker News extraction', () => {
   test('decodes comment HTML into labelled plain text', () => {
     expect(decodeHnCommentText(LABELED_COMMENT.comment_text).split('\n')).toEqual([
@@ -118,6 +132,13 @@ describe('deterministic Hacker News extraction', () => {
 
   test('skips a comment with neither labels nor enough prose', async () => {
     expect(DETERMINISTIC_HN_EXTRACTOR.extract(await record(NOISE_COMMENT))).toBeNull();
+  });
+
+  test('does not mistake a years-of-experience line for a company name', async () => {
+    const draft = DETERMINISTIC_HN_EXTRACTOR.extract(await record(YEARS_OF_EXPERIENCE_COMMENT));
+
+    expect(draft.companies).toEqual([]);
+    expect(draft.summary).toContain('Experience: 12+ years building distributed systems');
   });
 
   test('runs extracted text through the shared sensitive-data policy', async () => {
