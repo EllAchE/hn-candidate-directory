@@ -30,8 +30,8 @@
 
       <section class="stats" aria-label="Directory summary">
         <div><strong id="candidate-count">—</strong><span>candidate profiles</span></div>
+        <div><strong id="location-count">—</strong><span>locations represented</span></div>
         <div><strong id="university-count">—</strong><span>universities represented</span></div>
-        <div><strong id="enriched-count">—</strong><span>profiles enriched</span></div>
       </section>
 
       <section class="workspace" id="directory">
@@ -44,12 +44,11 @@
           <button class="filters-toggle" type="button" id="filters-toggle" aria-expanded="false" aria-controls="filters-body"><span>Filters</span><span class="filters-badge" id="filters-badge">none selected</span></button>
           <div class="filters-body" id="filters-body"></div>
 
-          <div class="filter-note"><span class="spark">✦</span><p>Enriched profiles include education and employment history extracted from public resumes and LinkedIn links.</p></div>
         </aside>
 
         <section class="results-panel" aria-live="polite">
           <div class="active-filters" id="active-filters" hidden></div>
-          <div class="results-toolbar"><div><span class="result-count" id="result-count">6</span> candidates <span class="muted">matching your filters</span></div><select id="sort" aria-label="Sort candidates"><option value="relevant">Most relevant</option><option value="recent">Recently posted</option><option value="enriched">Most enriched</option></select></div>
+          <div class="results-toolbar"><div><span class="result-count" id="result-count">6</span> candidates <span class="muted">matching your filters</span></div><select id="sort" aria-label="Sort candidates"><option value="relevant">Most relevant</option><option value="recent">Recently posted</option></select></div>
           <div id="candidate-list" class="candidate-list"></div>
           <div class="empty-state" id="empty-state" hidden><div class="empty-icon">⌕</div><h3>No candidates found</h3><p>Try removing a filter or searching a broader skill.</p></div>
         </section>

@@ -12,6 +12,11 @@ const FACETS = [
   { key: 'company', label: 'Previously at', kind: 'combobox', placeholder: 'Type a company', values: (candidate) => candidate.companies },
   { key: 'skill', label: 'Skill or stack', kind: 'combobox', placeholder: 'Type a skill or stack', values: (candidate) => candidate.skills }
 ];
+const STAT_TILES = [
+  { id: 'candidate-count', count: () => candidates.length },
+  { id: 'location-count', count: () => distinctFacetValues('location') },
+  { id: 'university-count', count: () => distinctFacetValues('university') }
+];
 const selections = new Map(FACETS.map((facet) => [facet.key, new Set()]));
 const selectionLabels = new Map();
 const comboState = new Map(FACETS.filter((facet) => facet.kind === 'combobox').map((facet) => [facet.key, { query: '', open: false, active: '' }]));
@@ -21,7 +26,6 @@ function render() {
   const query = el('search').value.toLowerCase().trim();
   const filtered = candidates.filter((candidate) => matchesQuery(candidate, query) && matchesFacets(candidate, null));
   if (el('sort').value === 'recent') filtered.sort((a, b) => a.posted - b.posted);
-  if (el('sort').value === 'enriched') filtered.sort((a, b) => Number(b.enriched) - Number(a.enriched));
   el('result-count').textContent = filtered.length;
   renderStats();
   el('candidate-list').innerHTML = filtered.map(card).join('');
@@ -31,17 +35,27 @@ function render() {
   syncFilterDrawer();
 }
 
+// A tile reading zero states nothing about the directory; it reports a field the cohort was never
+// asked for. Hidden at zero for the same reason the matching facet is withheld.
 function renderStats() {
-  const universityFacet = FACETS.find((facet) => facet.key === 'university');
-  const universities = new Set(candidates.flatMap((candidate) => facetValues(universityFacet, candidate).map((value) => facetKeyFor(universityFacet, value))));
-  el('candidate-count').textContent = candidates.length.toLocaleString();
-  el('university-count').textContent = universities.size.toLocaleString();
-  el('enriched-count').textContent = candidates.filter((candidate) => candidate.enriched).length.toLocaleString();
+  STAT_TILES.forEach((tile) => {
+    const node = el(tile.id);
+    if (!node) return;
+    const count = tile.count();
+    node.textContent = count.toLocaleString();
+    if (node.parentElement) node.parentElement.hidden = count === 0;
+  });
+}
+
+function distinctFacetValues(key) {
+  const facet = FACETS.find((entry) => entry.key === key);
+  if (!facet) return 0;
+  return new Set(candidates.flatMap((candidate) => facetValues(facet, candidate).map((value) => facetKeyFor(facet, value)))).size;
 }
 
 function searchableText(candidate) {
   return [candidate.name, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
-    .filter((value) => value && String(value).trim().toLowerCase() !== UNKNOWN_VALUE)
+    .filter(isProvided)
     .join(' ')
     .toLowerCase();
 }
@@ -59,14 +73,16 @@ function matchesFacets(candidate, exceptKey) {
 }
 
 // The extractor writes UNKNOWN_VALUE wherever a source comment had no such field. It is the
-// absence of an answer, so it must never become a filterable option: on Hacker News data almost
-// nothing carries a university or employer, and treating the sentinel as a value made "Not
-// specified" the largest facet in the directory.
+// absence of an answer, so it must never be rendered, counted, matched, or offered as a filter: on
+// Hacker News data almost nothing carries a university or employer, and treating the sentinel as a
+// value made "Not specified" the largest facet in the directory.
+function isProvided(value) {
+  return Boolean(value) && String(value).trim().toLowerCase() !== UNKNOWN_VALUE;
+}
+
 function facetValues(facet, candidate) {
   const raw = facet.values(candidate);
-  return (Array.isArray(raw) ? raw : [raw])
-    .map((value) => String(value ?? '').trim())
-    .filter((value) => value && value.toLowerCase() !== UNKNOWN_VALUE);
+  return (Array.isArray(raw) ? raw : [raw]).map((value) => String(value ?? '').trim()).filter(isProvided);
 }
 
 function facetHasData(facet) {
@@ -233,9 +249,20 @@ function syncFilterDrawer() {
 
 function card(candidate) {
   const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
-  const enrichment = candidate.enriched ? `<span class="chip enriched">✦ enriched</span>` : '';
-  const companies = candidate.companies.length ? `<span>Previously at <b>${escapeHtml(candidate.companies.join(', '))}</b></span>` : '<span>Employment history <b>not enriched</b></span>';
-  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div><span class="availability">${escapeHtml(candidate.availability)}</span></div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}${enrichment}</div><div class="card-bottom"><div class="metadata"><span>${escapeHtml(candidate.location)}</span><span>${escapeHtml(candidate.mode)}</span><span>${escapeHtml(candidate.university)}</span><span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
+  const metadata = [candidate.location, candidate.mode, candidate.university]
+    .filter(isProvided)
+    .map((value) => `<span>${escapeHtml(value)}</span>`)
+    .join('');
+  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div>${availability}</div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}</div><div class="card-bottom"><div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+}
+
+function profileBackground(candidate) {
+  const facts = [
+    isProvided(candidate.university) ? `Studied at <strong>${escapeHtml(candidate.university)}</strong>` : '',
+    isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${escapeHtml(candidate.companies.join(', '))}</strong>` : ''
+  ].filter(Boolean);
+  return facts.length ? `<p class="dialog-copy" style="margin-top:20px">${facts.join(' · ')}</p>` : '';
 }
 
 function sourceLink(candidate) {
@@ -339,7 +366,8 @@ document.addEventListener('click', (event) => {
   const view = event.target.closest('[data-view]');
   if (view) {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2><p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div><p class="dialog-copy" style="margin-top:20px">Enriched fields: <strong>${escapeHtml(candidate.university)}</strong> · ${escapeHtml(candidate.companies.join(', ') || 'pending document processing')}</p><div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    const background = profileBackground(candidate);
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2><p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');

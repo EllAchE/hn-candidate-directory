@@ -22,7 +22,6 @@ const HN_SHAPED_CANDIDATES = [
     summary: 'Ships small well-scoped backend work.',
     source: 'HN · August 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=49156682',
-    enriched: false,
     posted: 1,
     publishedAt: '2026-08-03T12:00:00.000Z'
   },
@@ -39,7 +38,6 @@ const HN_SHAPED_CANDIDATES = [
     summary: 'Two years building retrieval systems.',
     source: 'HN · August 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=49156683',
-    enriched: false,
     posted: 2,
     publishedAt: '2026-08-03T13:00:00.000Z'
   }
@@ -59,7 +57,6 @@ const PUBLIC_CANDIDATES = [
     summary: 'Builds reliable storage systems for high-throughput products.',
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601001',
-    enriched: true,
     posted: 4,
     publishedAt: '2026-07-27T12:00:00.000Z'
   },
@@ -76,7 +73,6 @@ const PUBLIC_CANDIDATES = [
     summary: 'Evaluates trustworthy climate models with product and research teams.',
     source: 'HN · July 2026',
     sourceUrl: 'http://news.ycombinator.com/item?id=44601002',
-    enriched: true,
     posted: 1,
     publishedAt: '2026-07-30T12:00:00.000Z'
   },
@@ -92,7 +88,6 @@ const PUBLIC_CANDIDATES = [
     skills: ['React', 'Design systems', 'Accessibility'],
     summary: 'Leads accessible platform migrations and web performance programs.',
     source: 'HN · June 2026',
-    enriched: false,
     posted: 9,
     publishedAt: '2026-07-20T12:00:00.000Z'
   },
@@ -109,7 +104,6 @@ const PUBLIC_CANDIDATES = [
     summary: 'Scales payment systems for async software teams.',
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601004',
-    enriched: true,
     posted: 2,
     publishedAt: '2026-07-29T12:00:00.000Z'
   },
@@ -126,7 +120,6 @@ const PUBLIC_CANDIDATES = [
     summary: 'Builds practical fintech security controls for early-stage teams.',
     source: 'HN · July 2026',
     sourceUrl: 'javascript:alert(document.domain)',
-    enriched: true,
     posted: 7,
     publishedAt: '2026-07-24T12:00:00.000Z'
   },
@@ -143,7 +136,6 @@ const PUBLIC_CANDIDATES = [
     summary: 'Ships education products from customer discovery through launch.',
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601006&x="><script>alert(1)</script>',
-    enriched: false,
     posted: 3,
     publishedAt: '2026-07-28T12:00:00.000Z'
   }
@@ -232,8 +224,6 @@ test(
       await clearFilters(cdp);
       await setControl(cdp, 'sort', 'recent', 'change');
       expect(await candidateNames(cdp)).toEqual(['Beatrice Okafor', 'Diego Silva', 'Fatima Noor', 'Ada Rivera', 'Evelyn Stone', 'Chen Ito']);
-      await setControl(cdp, 'sort', 'enriched', 'change');
-      expect(await candidateNames(cdp)).toEqual(['Ada Rivera', 'Beatrice Okafor', 'Diego Silva', 'Evelyn Stone', 'Chen Ito', 'Fatima Noor']);
       await setControl(cdp, 'sort', 'relevant', 'change');
       expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
 
@@ -472,10 +462,10 @@ test(
       expect(await evaluate(cdp, `/ellache|built in public/i.test(document.documentElement.innerHTML)`)).toBe(false);
       expect(await evaluate(cdp, `document.querySelector('.pipeline-card')`)).toBe(null);
 
-      expect(await evaluate(cdp, `[...document.querySelectorAll('.stats div')].map((stat) => [stat.querySelector('strong').textContent, stat.querySelector('span').textContent])`)).toEqual([
+      expect(await evaluate(cdp, `[...document.querySelectorAll('.stats div:not([hidden])')].map((stat) => [stat.querySelector('strong').textContent, stat.querySelector('span').textContent])`)).toEqual([
         ['6', 'candidate profiles'],
-        ['4', 'universities represented'],
-        ['4', 'profiles enriched']
+        ['4', 'locations represented'],
+        ['4', 'universities represented']
       ]);
 
       const markup = await evaluate(cdp, `fetch('/who-is-hiring.html').then((response) => response.text())`);
@@ -526,6 +516,59 @@ test(
       },
       { candidates: HN_SHAPED_CANDIDATES }
     );
+  },
+  30_000
+);
+
+test(
+  'a cohort that supplied no university renders neither the tile nor the sentinel on its cards',
+  async () => {
+    await withPage(
+      async (cdp) => {
+        expect(
+          await evaluate(
+            cdp,
+            `[...document.querySelectorAll('.stats div:not([hidden])')].map((stat) => [stat.querySelector('strong').textContent, stat.querySelector('span').textContent])`
+          )
+        ).toEqual([
+          ['2', 'candidate profiles'],
+          ['2', 'locations represented']
+        ]);
+
+        // Every unanswered field carried the sentinel, so an unguarded card body repeated
+        // "Not specified" twice per row — once as the availability badge, once as metadata.
+        expect(await evaluate(cdp, `document.getElementById('candidate-list').textContent.includes('Not specified')`)).toBe(false);
+        expect(await evaluate(cdp, `document.querySelectorAll('#candidate-list .availability').length`)).toBe(0);
+        expect(await evaluate(cdp, `[...document.querySelectorAll('#candidate-list .metadata span')].map((node) => node.textContent)`)).toEqual([
+          'Toronto, Canada',
+          'Remote',
+          'from HN · August 2026',
+          'Gipuzkoa, Spain',
+          'Remote',
+          'from HN · August 2026'
+        ]);
+
+        await click(cdp, '[data-view="hn-49156682-01"]');
+        expect(await evaluate(cdp, `document.getElementById('dialog-content').textContent.includes('Not specified')`)).toBe(false);
+        expect(await evaluate(cdp, `document.querySelector('#dialog-content .dialog-copy[style]')`)).toBe(null);
+      },
+      { candidates: HN_SHAPED_CANDIDATES }
+    );
+  },
+  30_000
+);
+
+test(
+  'the profile dialog lists background only where the source supplied it',
+  async () => {
+    await withPage(async (cdp) => {
+      await click(cdp, '[data-view="chen-ito"]');
+      expect(await textContent(cdp, '#dialog-content .dialog-copy[style]')).toBe('Studied at Carnegie Mellon University · Previously at Meta');
+      await click(cdp, '#candidate-dialog [data-close-dialog]');
+
+      await click(cdp, '[data-view="fatima-noor"]');
+      expect(await textContent(cdp, '#dialog-content .dialog-copy[style]')).toBe('Studied at Carnegie Mellon University');
+    });
   },
   30_000
 );
