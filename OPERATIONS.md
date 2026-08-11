@@ -118,7 +118,7 @@ Record the pre-deploy version, new version, staging URL, resource names, D1 ID, 
 
 ### 4. Write the staging secrets — mutation and immediate deploy
 
-`wrangler secret put` creates a new Worker version and deploys it immediately. Treat each one as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely. `HN_INGEST_TOKEN` gates `POST /api/admin/ingest/hn`; generate a fresh random value per environment and never reuse the staging value in production:
+`wrangler secret put` creates a new Worker version and deploys it immediately. Treat each one as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely. `HN_INGEST_TOKEN` gates `POST /api/admin/ingest/hn`, `POST /api/admin/profiles/hn`, and `GET /api/admin/profiles/hn/pending`; generate a fresh random value per environment and never reuse the staging value in production:
 
 ```sh
 wrangler secret put UNBLOCKER_ORG_API_KEY --config wrangler.staging.toml
@@ -335,6 +335,41 @@ Paid upgrade path, if the free-tier controls stop being enough: a WAF rate-limit
 - An extraction fix does not reach already-ingested profiles on its own, because their comment text is unchanged. Bump `HN_EXTRACTION_VERSION` in `worker.js` in the same PR as the fix; the next run re-derives every non-suppressed comment it discovers, updates the published rows in place, and the run after that skips them again. Suppressed rows stay suppressed at any version. A bumped run queues one message and roughly three D1 writes per comment in the two threads discovery returns, so treat it as a first ingest of those threads rather than a routine run.
 - If a profile someone asked to remove reappears, that is an incident, not a retry. Confirm `suppressed_at` is set for its `hn_item_id` before doing anything else, and preserve the row.
 - To stop ingestion entirely, remove the `[triggers]` block and deploy; that is an ordinary reviewed code change, not a console edit.
+
+### Externally-extracted profiles
+
+The scheduled ingest reads only labelled `Field: value` lines, which is why employer and education
+coverage is near zero: that history is almost always in the unlabelled prose, and three quarters of
+comments link a resume the Worker cannot read at all. A better extractor therefore runs outside the
+Worker and pushes its results back through `POST /api/admin/profiles/hn`, gated on the same
+`HN_INGEST_TOKEN`. `GET /api/admin/profiles/hn/pending?extractor=<id>` lists what it has not yet
+improved.
+
+Migration `0004_external_extraction.sql` must be applied **before** this code is deployed. The
+scheduled ingest writes the new columns too, so a deploy that runs ahead of the migration breaks
+ordinary ingestion, not just the new endpoint. It is additive (`ALTER TABLE ADD COLUMN`), so it does
+not rebuild a table or disturb existing rows:
+
+```bash
+wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
+```
+
+- Precedence, not recency, decides who wins. `profile_revisions.extractor_rank` blocks a lower-ranked
+  extractor from overwriting a higher-ranked one, which is what stops an `HN_EXTRACTION_VERSION` bump
+  from silently reverting every pushed profile to deterministic output.
+- **Escape hatch:** to hand a profile back to the scheduled extractor, set its
+  `profile_revisions.extractor_rank` to `0`. It will be re-derived on the next bumped run.
+- A push writes the same `comment_hash` the scheduled path would, so an ordinary run afterwards
+  reports `queued: 0` and a genuine comment edit still re-queues. An edited comment resets
+  `hn_ingests.extractor_rank`, returning it to the pending set while its existing profile stays
+  published — stale and good beats fresh and bad on a directory card.
+- Pushes are rate-limited separately from the ingest run reservation, so a backfill of dozens of
+  requests cannot starve the scheduled ingest.
+- The endpoint re-validates, redacts, and bounds every draft server-side and refuses to resurrect a
+  suppressed candidate, so a compromised or buggy extractor cannot widen what reaches the database.
+  `hn_permalink` is always derived from the item id and never accepted from the caller.
+- **TODO:** the extractor is invoked by hand today. Wire it to a scheduled refresh once it has proven
+  out over a few manual runs.
 
 ### Sensitive-data exposure
 

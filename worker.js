@@ -34,6 +34,14 @@ const HN_INGEST_LIMITS = Object.freeze({
 // forever. Bump this in the same commit as any change to what extraction produces; leaving it alone
 // is what keeps an ordinary run skipping unchanged comments.
 const HN_EXTRACTION_VERSION = 1;
+// Rank, not identity, is what the write guards compare: a profile may only be overwritten by an
+// extractor at least as good as the one that produced it. Rank 0 is the deterministic pass and is
+// deliberately not pushable -- the push endpoint exists to improve on it, never to replay it.
+const HN_EXTRACTORS = Object.freeze({ 'deterministic-labels-v1': 0, 'claude-skill-v1': 1 });
+const HN_PUSH_LIMITS = Object.freeze({ batch: 25, pendingPage: 100 });
+// A pushed item carries the whole comment as well as its draft, so the body cap is derived from the
+// largest comment the ingest will ever hold rather than picked as a round number.
+const MAX_HN_PUSH_REQUEST_BYTES = HN_PUSH_LIMITS.batch * (HN_INGEST_LIMITS.commentChars + 8_192);
 const HN_MONTHS = Object.freeze([
   'January',
   'February',
@@ -98,6 +106,10 @@ const RATE_LIMITS = Object.freeze({
   authFailure: { limit: 20, windowSeconds: 600 },
   ingestRequest: { limit: 10, windowSeconds: 600 },
   ingestRun: { limit: 1, windowSeconds: 900 },
+  // Deliberately not the ingestRequest bucket. That one throttles amplification against the Algolia
+  // API; a push makes no outbound request, and a full backfill is 40+ calls, so sharing it would
+  // wedge the endpoint after the second one.
+  profilePush: { limit: 120, windowSeconds: 600 },
   removalRequest: { limit: 20, windowSeconds: 3_600 }
 });
 const STORAGE_LIMITS = Object.freeze({
@@ -224,6 +236,16 @@ async function routeRequest(request, env) {
   if (url.pathname === '/api/admin/ingest/hn') {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return runHackerNewsIngest(request, env);
+  }
+
+  if (url.pathname === '/api/admin/profiles/hn') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return pushHackerNewsProfiles(request, env);
+  }
+
+  if (url.pathname === '/api/admin/profiles/hn/pending') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return listPendingHackerNewsExtractions(request, env);
   }
 
   if (url.pathname.startsWith('/api/')) return json({ error: 'not_found' }, 404);
@@ -1196,15 +1218,8 @@ async function processSubmissionMessage(message, env) {
 async function runHackerNewsIngest(request, env) {
   if (!env.DB || !env.SUBMISSION_QUEUE) return json({ error: 'service_not_configured' }, 503);
 
-  const quota = await enforceQuota(env, 'ingestRequest', await clientKey(env, request));
-  if (quota) return quota;
-  if (!isUsableIngestToken(env.HN_INGEST_TOKEN)) return json({ error: 'ingest_not_configured' }, 503);
-
-  const token = bearerToken(request);
-  if (!token) return denyAuthorization(request, env, json({ error: 'ingest_token_required' }, 401));
-  if (!constantTimeEqual(await hashToken(token), await hashToken(env.HN_INGEST_TOKEN))) {
-    return denyAuthorization(request, env, json({ error: 'ingest_token_invalid' }, 403));
-  }
+  const denied = await authorizeIngestToken(request, env, 'ingestRequest');
+  if (denied) return denied;
 
   if (!(await reserveIngestRun(env))) return json({ error: 'ingest_in_progress' }, 429);
 
@@ -1216,6 +1231,22 @@ async function runHackerNewsIngest(request, env) {
     // operator triggering an ingest may not have, so the answer travels back in the response too.
     return json({ error: 'ingest_failed', reason: logIngestFailure('request', error) }, 502);
   }
+}
+
+// Every operator route answers a missing secret, a missing token and a wrong token the same way,
+// and counts the failure against the caller either way. The quota is consumed before the config
+// check on purpose, so an unconfigured service cannot be probed for free.
+async function authorizeIngestToken(request, env, quotaName) {
+  const quota = await enforceQuota(env, quotaName, await clientKey(env, request));
+  if (quota) return quota;
+  if (!isUsableIngestToken(env.HN_INGEST_TOKEN)) return json({ error: 'ingest_not_configured' }, 503);
+
+  const token = bearerToken(request);
+  if (!token) return denyAuthorization(request, env, json({ error: 'ingest_token_required' }, 401));
+  if (!constantTimeEqual(await hashToken(token), await hashToken(env.HN_INGEST_TOKEN))) {
+    return denyAuthorization(request, env, json({ error: 'ingest_token_invalid' }, 403));
+  }
+  return null;
 }
 
 // An unset, blank, or short secret must never degrade into an open endpoint, and a value too
@@ -1351,7 +1382,196 @@ async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRAC
   return existing ? 'updated' : 'created';
 }
 
-async function hnProfileStatements(env, submissionId, record, draft, ingestedAt) {
+// Extraction good enough to find employers and schools needs to read the whole comment, and often
+// a linked resume, which is more than this Worker can do: it has no model binding, no dependencies,
+// no PDF parser, and hasBlockedFileSignature rejects the very bytes a resume arrives as. So the
+// judgement happens outside and arrives here already structured. Everything an untrusted body could
+// influence is re-derived or re-validated below; nothing is taken on trust because the caller held
+// the token.
+async function pushHackerNewsProfiles(request, env) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+
+  const denied = await authorizeIngestToken(request, env, 'profilePush');
+  if (denied) return denied;
+
+  const body = await readJson(request, MAX_HN_PUSH_REQUEST_BYTES);
+  if (body instanceof Response) return body;
+
+  const rank = HN_EXTRACTORS[body?.extractor];
+  if (!Number.isInteger(rank) || rank < 1) return json({ error: 'unknown_extractor' }, 400);
+  if (!Array.isArray(body?.profiles) || !body.profiles.length) return json({ error: 'profiles_required' }, 400);
+  if (body.profiles.length > HN_PUSH_LIMITS.batch) {
+    return json({ error: 'batch_too_large', maxProfiles: HN_PUSH_LIMITS.batch }, 413);
+  }
+
+  const extractor = Object.freeze({ id: body.extractor, rank });
+  const records = await Promise.all(body.profiles.map((entry) => toHnRecord(null, entry?.comment)));
+  const known = await loadHnPushState(
+    env,
+    records.filter(Boolean).map((record) => record.itemId)
+  );
+  const pushedAt = new Date().toISOString();
+  const plans = await Promise.all(
+    body.profiles.map((entry, index) => planPushedProfile(env, entry, records[index], known, extractor, pushedAt))
+  );
+
+  const statements = plans.flatMap((plan) => plan.statements);
+  if (statements.length) await env.DB.batch(statements);
+
+  return json({
+    extractor: extractor.id,
+    results: plans.map((plan) => plan.result),
+    pending: await countPendingHackerNewsExtractions(env, extractor.rank)
+  });
+}
+
+// One round trip for the whole batch. This is the only dynamic SQL in the file, and it is safe
+// because the placeholder count is capped by the batch limit checked above.
+async function loadHnPushState(env, itemIds) {
+  if (!itemIds.length) return new Map();
+
+  const result = await env.DB.prepare(
+    `SELECT i.hn_item_id, i.submission_id, i.suppressed_at, i.comment_hash,
+            r.status AS revision_status, r.extractor_rank AS revision_rank
+       FROM hn_ingests i
+       LEFT JOIN profile_revisions r ON r.submission_id = i.submission_id
+      WHERE i.hn_item_id IN (${itemIds.map(() => '?').join(', ')})`
+  )
+    .bind(...itemIds)
+    .all();
+
+  return new Map((result?.results || []).map((row) => [row.hn_item_id, row]));
+}
+
+// A malformed item costs itself and nothing else: a backfill is dozens of requests and must not
+// abort a batch of 25 over one unparsable draft.
+async function planPushedProfile(env, entry, record, known, extractor, pushedAt) {
+  if (!record) return { result: { outcome: 'invalid_comment' }, statements: [] };
+
+  const hnItemId = record.itemId;
+  const state = known.get(hnItemId);
+  if (state?.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+
+  const resumeUrl = hnResumeUrl(entry?.resumeUrl);
+  if (resumeUrl === null) return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
+  const resumeFetchedAt = entry?.resumeFetchedAt ? hnTimestamp(entry.resumeFetchedAt) : '';
+  if (!resumeFetchedAt && entry?.resumeFetchedAt) {
+    return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
+  }
+
+  const prepared = pushedDraft(entry?.draft);
+  if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
+
+  const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
+
+  if (prepared.retired) {
+    const statement = hnIngestStatement(env, record, state?.submission_id || null, pushedAt, provenance);
+    return { result: { hnItemId, outcome: 'retired' }, statements: [statement] };
+  }
+
+  if (state?.revision_status && state.revision_status !== 'published') {
+    return { result: { hnItemId, outcome: 'blocked_by_status' }, statements: [] };
+  }
+  if (Number(state?.revision_rank ?? 0) > extractor.rank) {
+    return { result: { hnItemId, outcome: 'blocked_by_extractor' }, statements: [] };
+  }
+
+  const submissionId = state?.submission_id || `hn-${hnItemId}`;
+  const profileStatements = await hnProfileStatements(env, submissionId, record, prepared.draft, pushedAt, extractor);
+
+  return {
+    result: {
+      hnItemId,
+      outcome: state?.revision_status ? 'updated' : 'created',
+      redacted: prepared.redacted
+    },
+    statements: [...profileStatements, hnIngestStatement(env, record, submissionId, pushedAt, provenance)]
+  };
+}
+
+// The order is not interchangeable. validateDraft first, so an oversized field earns a real
+// rejection instead of a silent truncation; boundedDraft last, because redaction can lengthen text
+// and the value still has to fit the column.
+function pushedDraft(value) {
+  if (value === null) return { retired: true, draft: null, redacted: false };
+
+  const validated = validateDraft(value);
+  if (!validated) return null;
+
+  const sanitized = sanitizeCandidateDraft(validated);
+  return { retired: false, draft: boundedDraft(sanitized.draft), redacted: sanitized.detected };
+}
+
+// The Worker never fetches this; it is provenance so a repeat extraction run can skip a document it
+// has already read, and it is absent from every public response. The blocked-host check is here
+// anyway, so an internal address never lands in a row an operator may later paste into a browser.
+function hnResumeUrl(value) {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value !== 'string' || byteLength(value) > 2_048) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+  return isBlockedNetworkHost(parsed.hostname.toLowerCase()) ? null : parsed.href;
+}
+
+// Driven off hn_ingests alone, which is what makes it cover the comments the deterministic pass
+// could not parse at all. Those have no revision to join to, and they are the highest-value targets
+// for a better extractor.
+async function listPendingHackerNewsExtractions(request, env) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+
+  const denied = await authorizeIngestToken(request, env, 'profilePush');
+  if (denied) return denied;
+
+  const rank = HN_EXTRACTORS[new URL(request.url).searchParams.get('extractor')];
+  if (!Number.isInteger(rank) || rank < 1) return json({ error: 'unknown_extractor' }, 400);
+
+  const result = await env.DB.prepare(
+    `SELECT hn_item_id, thread_id, thread_month, hn_permalink, comment_created_at, resume_url, resume_fetched_at
+       FROM hn_ingests
+      WHERE suppressed_at IS NULL AND extractor_rank < ?
+      ORDER BY comment_created_at DESC, hn_item_id
+      LIMIT ?`
+  )
+    .bind(rank, HN_PUSH_LIMITS.pendingPage)
+    .all();
+
+  return json({
+    items: (result?.results || []).map(toPendingExtraction),
+    remaining: await countPendingHackerNewsExtractions(env, rank)
+  });
+}
+
+// No cursor, deliberately: a successful push raises the row's rank, so the pending set shrinks
+// monotonically and the caller just re-reads the first page. `draft: null` is what keeps that
+// closed -- it retires a comment nothing can extract instead of leaving it to reappear forever.
+async function countPendingHackerNewsExtractions(env, rank) {
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS pending FROM hn_ingests WHERE suppressed_at IS NULL AND extractor_rank < ?'
+  )
+    .bind(rank)
+    .first();
+  return Number(row?.pending || 0);
+}
+
+function toPendingExtraction(row) {
+  return {
+    hnItemId: row.hn_item_id,
+    threadId: row.thread_id,
+    threadMonth: row.thread_month,
+    permalink: row.hn_permalink,
+    commentCreatedAt: row.comment_created_at,
+    resumeUrl: row.resume_url || '',
+    resumeFetchedAt: row.resume_fetched_at || ''
+  };
+}
+
+async function hnProfileStatements(env, submissionId, record, draft, ingestedAt, extractor = DETERMINISTIC_HN_EXTRACTOR) {
   const reviewTokenHash = await hashToken(createToken());
 
   return [
@@ -1363,15 +1583,18 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt)
     env.DB.prepare(
       `INSERT INTO profile_revisions (
          id, submission_id, status, name, role, summary, location, work_mode, availability,
-         universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at
-       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at,
+         extractor, extractor_rank
+       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(submission_id) DO UPDATE SET
          name = excluded.name, role = excluded.role, summary = excluded.summary,
          location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
          universities_json = excluded.universities_json, companies_json = excluded.companies_json,
          skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
-         updated_at = excluded.updated_at
-       WHERE profile_revisions.status = 'published'`
+         updated_at = excluded.updated_at,
+         extractor = excluded.extractor, extractor_rank = excluded.extractor_rank
+       WHERE profile_revisions.status = 'published'
+         AND profile_revisions.extractor_rank <= excluded.extractor_rank`
     ).bind(
       crypto.randomUUID(),
       submissionId,
@@ -1387,23 +1610,33 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt)
       JSON.stringify(draft.dateRanges),
       ingestedAt,
       ingestedAt,
-      record.createdAt
+      record.createdAt,
+      extractor.id,
+      extractor.rank
     )
   ];
 }
 
 // An unextractable comment still earns an ingest row. Without the recorded hash, every run would
 // re-queue the same unparsable thread noise forever.
-function hnIngestStatement(env, record, submissionId, ingestedAt) {
+function hnIngestStatement(env, record, submissionId, ingestedAt, provenance = {}) {
   return env.DB.prepare(
     `INSERT INTO hn_ingests (
        hn_item_id, submission_id, hn_author, hn_permalink, thread_id, thread_month,
-       comment_hash, comment_created_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       comment_hash, comment_created_at, created_at, updated_at,
+       extractor_rank, resume_url, resume_fetched_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(hn_item_id) DO UPDATE SET
        submission_id = excluded.submission_id, hn_author = excluded.hn_author,
        hn_permalink = excluded.hn_permalink, thread_id = excluded.thread_id,
        thread_month = excluded.thread_month, comment_hash = excluded.comment_hash,
+       resume_url = COALESCE(excluded.resume_url, hn_ingests.resume_url),
+       resume_fetched_at = COALESCE(excluded.resume_fetched_at, hn_ingests.resume_fetched_at),
+       -- The rank records the best extractor that has read *this* text. A changed comment is a new
+       -- reading, so it drops back to whatever just wrote it and returns to the work queue.
+       extractor_rank = CASE WHEN hn_ingests.comment_hash = excluded.comment_hash
+                             THEN MAX(hn_ingests.extractor_rank, excluded.extractor_rank)
+                             ELSE excluded.extractor_rank END,
        updated_at = excluded.updated_at
      WHERE hn_ingests.suppressed_at IS NULL`
   ).bind(
@@ -1416,7 +1649,10 @@ function hnIngestStatement(env, record, submissionId, ingestedAt) {
     record.commentHash,
     record.createdAt,
     ingestedAt,
-    ingestedAt
+    ingestedAt,
+    provenance.rank ?? DETERMINISTIC_HN_EXTRACTOR.rank,
+    provenance.resumeUrl || null,
+    provenance.resumeFetchedAt || null
   );
 }
 
@@ -1463,6 +1699,7 @@ function hnCommentHash(text, version) {
 
 const DETERMINISTIC_HN_EXTRACTOR = Object.freeze({
   id: 'deterministic-labels-v1',
+  rank: HN_EXTRACTORS['deterministic-labels-v1'],
   extract: (record) => extractHnProfile(record)
 });
 
@@ -1915,7 +2152,10 @@ export {
   CANDIDATES_PAGE_SIZE,
   DETERMINISTIC_HN_EXTRACTOR,
   HN_EXTRACTION_VERSION,
+  HN_EXTRACTORS,
   HN_INGEST_LIMITS,
+  HN_PUSH_LIMITS,
+  MAX_HN_PUSH_REQUEST_BYTES,
   MAX_RESUME_BYTES,
   MAX_SOURCE_BYTES,
   STRING_WEB_ACCESS_LIMITS,
