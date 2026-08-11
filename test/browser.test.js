@@ -613,6 +613,47 @@ test(
   30_000
 );
 
+test(
+  'summary tiles report the whole directory before the listing loads and never render a zero',
+  async () => {
+    await withPage(
+      async (cdp) => {
+        // The listing is still in flight here, so these totals can only have come from the summary endpoint.
+        expect(await evaluate(cdp, `document.querySelectorAll('.candidate-name').length`)).toBe(0);
+        expect(await textContent(cdp, '#location-count')).toBe('87');
+        expect(await textContent(cdp, '#university-count')).toBe('42');
+
+        await waitFor(cdp, `document.getElementById('candidate-count').textContent === '6'`);
+        expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
+
+        const rendered = await evaluate(cdp, `window.__countSamples`);
+        expect(rendered[0]).toBe('—');
+        expect(rendered).not.toContain('0');
+        expect(new Set(rendered).size).toBeGreaterThan(3);
+        expect(rendered.at(-1)).toBe('6');
+      },
+      {
+        motion: true,
+        fixture: { stats: { candidates: 1204, locations: 87, universities: 42 }, listingDelayMs: 2500 },
+        ready: `document.getElementById('candidate-count').textContent === '1,204'`,
+        onNewDocument: `
+          window.__countSamples = [];
+          document.addEventListener('DOMContentLoaded', () => {
+            const tile = document.getElementById('candidate-count');
+            window.__countSamples.push(tile.textContent);
+            new MutationObserver(() => window.__countSamples.push(tile.textContent)).observe(tile, {
+              characterData: true,
+              childList: true,
+              subtree: true
+            });
+          });
+        `
+      }
+    );
+  },
+  30_000
+);
+
 async function withPage(run, options = {}) {
   const dataset = options.candidates || PUBLIC_CANDIDATES;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
@@ -620,7 +661,7 @@ async function withPage(run, options = {}) {
   let browser;
 
   try {
-    server = createFixtureServer(dataset);
+    server = createFixtureServer(dataset, options.fixture);
     browser = await launchBrowser(temporaryRoot);
     const cdp = await connectToPage(browser.devToolsUrl);
     const runtimeExceptions = [];
@@ -628,9 +669,15 @@ async function withPage(run, options = {}) {
 
     await Promise.all([cdp.send('Page.enable'), cdp.send('Runtime.enable'), cdp.send('Network.enable')]);
     await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*'] });
+    // The stat tiles count up over ~700ms, so every assertion on a total would race the animation.
+    // Only the test that is about the animation opts into motion.
+    await cdp.send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: options.motion ? 'no-preference' : 'reduce' }]
+    });
+    if (options.onNewDocument) await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: options.onNewDocument });
     await setViewport(cdp, 1280, 900, false);
     await navigate(cdp, `http://127.0.0.1:${server.port}/`);
-    await waitFor(cdp, `document.querySelector('.candidate-name')?.textContent === ${JSON.stringify(dataset[0].name)}`);
+    await waitFor(cdp, options.ready ?? `document.querySelector('.candidate-name')?.textContent === ${JSON.stringify(dataset[0].name)}`);
 
     await run(cdp);
     expect(runtimeExceptions).toEqual([]);
@@ -645,7 +692,7 @@ async function withPage(run, options = {}) {
   }
 }
 
-function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
+function createFixtureServer(candidates = PUBLIC_CANDIDATES, fixture = {}) {
   removalRequests.length = 0;
   const assets = new Map([
     ['/', ['who-is-hiring.html', 'text/html; charset=utf-8']],
@@ -660,8 +707,13 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES) {
     port: 0,
     fetch(request) {
       const { pathname } = new URL(request.url);
+      if (pathname === '/api/candidates/stats') {
+        if (!fixture.stats) return new Response('Not found', { status: 404 });
+        return Response.json(fixture.stats, { headers: { 'cache-control': 'no-store' } });
+      }
       if (pathname === '/api/candidates') {
-        return Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
+        const listing = Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
+        return fixture.listingDelayMs ? Bun.sleep(fixture.listingDelayMs).then(() => listing) : listing;
       }
       const removal = pathname.match(/^\/api\/candidates\/([^/]+)\/removal$/);
       if (removal && request.method === 'POST') {

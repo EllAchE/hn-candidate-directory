@@ -233,6 +233,11 @@ async function routeRequest(request, env) {
     return listPublishedCandidates(request, env);
   }
 
+  if (url.pathname === '/api/candidates/stats') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return summarizePublishedCandidates(request, env);
+  }
+
   if (url.pathname === '/api/admin/ingest/hn') {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return runHackerNewsIngest(request, env);
@@ -1026,6 +1031,64 @@ function clampCandidateOffset(raw) {
   const parsed = Number.parseInt(raw ?? '', 10);
   if (!Number.isInteger(parsed) || parsed < 0) return 0;
   return Math.min(parsed, MAX_PUBLIC_CANDIDATES);
+}
+
+// Both mirror who-is-hiring.js. HN_UNKNOWN is the extractor's marker for a field the source comment
+// never answered, so it is an absence and must not be counted as a value anyone represents.
+function isProvidedFacetValue(value) {
+  return Boolean(value) && String(value).trim().toLowerCase() !== HN_UNKNOWN.toLowerCase();
+}
+
+function facetGroupKey(facetKey, value) {
+  const grouped = facetKey === 'location' ? String(value).replace(/[·|/–—]+/g, ',') : String(value);
+  return grouped.toLowerCase().replace(/\s*,\s*/g, ', ').replace(/\s+/g, ' ').replace(/[.,]+$/, '').trim();
+}
+
+// The directory summary describes the whole cohort, so deriving it browser-side meant it was wrong
+// until the last page of a six-request pagination arrived. These are the same totals the client
+// would compute from a fully loaded listing; test/worker.test.js pins the two to agree.
+async function summarizePublishedCandidates(request, env) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+  const edge = await consumeEdgeQuota(env, `stats:${await clientKey(env, request)}`);
+  if (edge) return edge;
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `SELECT r.location, r.universities_json
+         FROM profile_revisions r
+         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+        WHERE r.status = 'published' AND i.suppressed_at IS NULL
+        LIMIT ?`
+    ).bind(MAX_PUBLIC_CANDIDATES).all();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
+  const locations = new Set();
+  const universities = new Set();
+  for (const row of result.results) {
+    // The listing publishes sanitized values, so the summary has to count the sanitized forms or a
+    // redaction would split one location into two.
+    const { draft } = sanitizeCandidateDraft({
+      name: '',
+      role: '',
+      summary: '',
+      location: row.location,
+      workMode: '',
+      availability: '',
+      universities: parseList(row.universities_json),
+      companies: [],
+      skills: [],
+      dateRanges: []
+    });
+    if (isProvidedFacetValue(draft.location)) locations.add(facetGroupKey('location', draft.location));
+    for (const university of draft.universities) {
+      if (isProvidedFacetValue(university)) universities.add(facetGroupKey('university', university));
+    }
+  }
+
+  return json({ candidates: result.results.length, locations: locations.size, universities: universities.size });
 }
 
 // Deliberately unauthenticated. A profile built from a Hacker News comment is published without
