@@ -61,11 +61,27 @@
         <p class="section-copy">Listings are read from Hacker News “Who wants to be hired?” threads and normalized into companies, universities, skills, dates, and locations. Each card links back to the comment it came from.</p>
         <p class="section-copy">A listing compiled from a Hacker News comment is published without being asked for, so it can be taken down without a token or an account: open the profile and choose <strong>“This is me — remove my listing”</strong>. Removal is immediate, and the comment is not collected again.</p>
         <p class="section-copy">A resume, LinkedIn profile, or source text you submit yourself works the other way around. It becomes a private draft that stays out of search until it is reviewed and explicitly approved, and the token issued at submission can update or remove it later.</p>
-        <p class="about-actions"><button class="text-link" data-open-import>Add your own listing</button><button class="text-link" data-open-request>Update or remove your listing</button></p>
+        <p class="about-actions"><button class="text-link" data-open-import>Add your own listing</button><button class="text-link" data-open-request>Update or remove your listing</button><button class="text-link" data-open-feedback>Send feedback</button></p>
       </section>
     </main>
 
-    <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="#about">How this works</a></footer>
+    <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="#about">How this works</a><button class="text-link" data-open-feedback>Send feedback</button></footer>
+
+    <dialog id="feedback-dialog" class="dialog">
+      <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
+      <div class="section-kicker">Pilot feedback</div>
+      <h2>Tell us what is wrong or missing</h2>
+      <p class="dialog-copy">This directory is an early pilot. Wrong data, a listing that should not be here, a search that missed something, or an idea — all of it is read.</p>
+      <form id="feedback-form">
+        <label class="field-label" for="feedback-message">What happened?</label>
+        <textarea id="feedback-message" required maxlength="4000" placeholder="The location filter shows “Remote” twice…"></textarea>
+        <label class="field-label" for="feedback-contact">Email or handle (optional)</label>
+        <input id="feedback-contact" type="text" autocomplete="email" spellcheck="false" maxlength="200" placeholder="Only if you want a reply" />
+        <p class="privacy-note" id="feedback-state">Feedback is stored privately for the operator; it is never published to the directory. To take your own listing down, use “Update or remove your listing” instead — that is immediate.</p>
+        <div class="dialog-actions"><button class="button button-ghost" type="button" data-close-dialog>Cancel</button><button class="button button-primary" type="submit">Send feedback</button></div>
+      </form>
+      <div class="success-message" id="feedback-success" hidden></div>
+    </dialog>
 
     <dialog id="candidate-dialog" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
