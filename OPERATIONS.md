@@ -371,6 +371,29 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
 - **TODO:** the extractor is invoked by hand today. Wire it to a scheduled refresh once it has proven
   out over a few manual runs.
 
+### Pilot feedback
+
+`POST /api/feedback` stores what the directory's feedback dialog collects. Migration
+`0005_launch_feedback.sql` must be applied **before** the code is deployed; until the table exists
+the endpoint answers `503` and the dialog reports the failure to the reader:
+
+```bash
+wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
+```
+
+There is deliberately no route that reads the table back, so reports are only readable here:
+
+```bash
+wrangler d1 execute hn-candidate-directory --remote --config wrangler.production.toml \
+  --command "SELECT created_at, contact, candidate_id, message FROM launch_feedback ORDER BY created_at DESC LIMIT 50"
+```
+
+- A report can name a person or quote a private detail, which is why it is write-only from the edge
+  and never rendered anywhere in the directory.
+- Ten reports per hour per client address, on the same fixed-window limiter as every other bucket.
+- Removal is not feedback. The dialog points a candidate at the immediate self-serve removal instead,
+  so a takedown never waits on someone reading this table.
+
 ### Sensitive-data exposure
 
 - Treat a review token, source text, resume content, secret, email, phone, or private status on a public response or in logs as an incident.

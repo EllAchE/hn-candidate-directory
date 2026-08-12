@@ -406,6 +406,11 @@ document.querySelectorAll('[data-open-import]').forEach((button) => button.addEv
 }));
 document.querySelectorAll('[name="import-source"]').forEach((input) => input.addEventListener('change', syncImportSource));
 document.querySelectorAll('[data-open-request]').forEach((button) => button.addEventListener('click', () => openManagementDialog()));
+document.querySelectorAll('[data-open-feedback]').forEach((button) => button.addEventListener('click', () => {
+  el('feedback-form').hidden = false;
+  el('feedback-success').hidden = true;
+  openDialog(el('feedback-dialog'));
+}));
 document.addEventListener('click', (event) => {
   if (event.target.matches('[data-close-dialog]')) closeDialogs();
   const view = event.target.closest('[data-view]');
@@ -571,6 +576,32 @@ el('request-form').addEventListener('submit', async (event) => {
     el('request-state').textContent = error.message;
   } finally {
     setManagementBusy(false);
+  }
+});
+el('feedback-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const message = el('feedback-message').value.trim();
+  if (!message) return;
+
+  const submit = event.target.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  el('feedback-state').textContent = 'Sending…';
+  try {
+    const response = await fetch(apiPath('/api/feedback'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message, contact: el('feedback-contact').value.trim() })
+    });
+    if (!response.ok) throw new Error(await apiError(response, 'Feedback could not be sent'));
+    el('feedback-message').value = '';
+    el('feedback-contact').value = '';
+    event.target.hidden = true;
+    el('feedback-success').hidden = false;
+    el('feedback-success').innerHTML = '<span>✓</span><div><strong>Thank you</strong><p>Your feedback reached the operator. Nothing you wrote is published to the directory.</p></div>';
+  } catch (error) {
+    el('feedback-state').textContent = error.message;
+  } finally {
+    submit.disabled = false;
   }
 });
 buildFacets();

@@ -40,6 +40,7 @@ class MemoryD1 {
     this.hnIngests = new Map();
     this.rateLimits = new Map();
     this.serviceState = new Map();
+    this.launchFeedback = [];
     this.batchTail = Promise.resolve();
   }
 
@@ -206,6 +207,17 @@ class MemoryStatement {
       const stale = [...this.database.rateLimits.values()].filter((row) => row.window_start < first);
       stale.forEach((row) => this.database.rateLimits.delete(row.bucket));
       return success(stale.length);
+    }
+    if (this.sql.startsWith('INSERT INTO launch_feedback')) {
+      const [id, message, contact, candidateId, createdAt] = this.values;
+      this.database.launchFeedback.push({
+        id,
+        message,
+        contact,
+        candidate_id: candidateId,
+        created_at: createdAt
+      });
+      return success();
     }
     if (this.sql.startsWith('INSERT INTO service_state')) {
       this.database.serviceState.set('pending_submissions', {

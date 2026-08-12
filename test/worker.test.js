@@ -1107,6 +1107,52 @@ function resumeRequest(body, overrides = {}) {
   });
 }
 
+describe('pilot feedback', () => {
+  test('stores a report without ever exposing a route that reads it back', async () => {
+    const env = createEnvironment();
+
+    const response = await worker.fetch(
+      apiRequest('/api/feedback', 'POST', { message: '  The location filter shows Remote twice.  ', contact: 'ada@example.com' }),
+      env
+    );
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ received: true });
+    expect(env.DB.launchFeedback).toHaveLength(1);
+    expect(env.DB.launchFeedback[0]).toMatchObject({
+      message: 'The location filter shows Remote twice.',
+      contact: 'ada@example.com',
+      candidate_id: null
+    });
+
+    const read = await worker.fetch(apiRequest('/api/feedback'), env);
+    expect(read.status).toBe(405);
+  });
+
+  test('rejects an empty message and a body past the size ceiling', async () => {
+    const env = createEnvironment();
+
+    const empty = await worker.fetch(apiRequest('/api/feedback', 'POST', { message: '   ' }), env);
+    expect(empty.status).toBe(400);
+    expect((await empty.json()).error).toBe('feedback_message_required');
+
+    const oversized = await worker.fetch(apiRequest('/api/feedback', 'POST', { message: 'x'.repeat(6_000) }), env);
+    expect(oversized.status).toBe(413);
+    expect(env.DB.launchFeedback).toHaveLength(0);
+  });
+
+  test('throttles a client that floods the endpoint', async () => {
+    const env = createEnvironment();
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const accepted = await worker.fetch(apiRequest('/api/feedback', 'POST', { message: `report ${attempt}` }), env);
+      expect(accepted.status).toBe(201);
+    }
+
+    const limited = await worker.fetch(apiRequest('/api/feedback', 'POST', { message: 'one too many' }), env);
+    expect(limited.status).toBe(429);
+    expect(env.DB.launchFeedback).toHaveLength(10);
+  });
+});
+
 function apiRequest(path, method = 'GET', body = null, token = '') {
   const headers = {};
   if (body !== null) headers['content-type'] = 'application/json';

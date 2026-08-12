@@ -8,6 +8,9 @@ const NO_REDIRECT = 'manual';
 const MAX_SOURCE_BYTES = 100_000;
 const MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 4_096;
 const MAX_URL_REQUEST_BYTES = 4_096;
+const MAX_FEEDBACK_BYTES = 4_000;
+const MAX_FEEDBACK_REQUEST_BYTES = MAX_FEEDBACK_BYTES + 1_024;
+const MAX_FEEDBACK_CONTACT_LENGTH = 200;
 const MAX_RESUME_BYTES = MAX_SOURCE_BYTES;
 const MAX_RESUME_FILENAME_BYTES = 128;
 const STRING_WEB_ACCESS_ENDPOINT = 'https://request.usestring.ai/v1/fetch';
@@ -113,7 +116,8 @@ const RATE_LIMITS = Object.freeze({
   // API; a push makes no outbound request, and a full backfill is 40+ calls, so sharing it would
   // wedge the endpoint after the second one.
   profilePush: { limit: 120, windowSeconds: 600 },
-  removalRequest: { limit: 20, windowSeconds: 3_600 }
+  removalRequest: { limit: 20, windowSeconds: 3_600 },
+  feedback: { limit: 10, windowSeconds: 3_600 }
 });
 const STORAGE_LIMITS = Object.freeze({
   pendingSubmissions: 5_000,
@@ -229,6 +233,11 @@ async function routeRequest(request, env) {
   if (managementMatch) {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return manageCandidate(request, env, managementMatch[1]);
+  }
+
+  if (url.pathname === '/api/feedback') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return recordFeedback(request, env);
   }
 
   if (url.pathname === '/api/candidates') {
@@ -1142,6 +1151,38 @@ async function requestCandidateRemoval(request, env, candidateId) {
   }
 
   return json({ removed: true });
+}
+
+// Feedback is stored, never served: the directory has no route that reads this table back, so a
+// report that names someone or quotes a private detail cannot be turned into a public page by the
+// same request that wrote it.
+async function recordFeedback(request, env) {
+  const oversized = () => json({ error: 'feedback_too_large', maxBytes: MAX_FEEDBACK_BYTES }, 413);
+  const body = await readJson(request, MAX_FEEDBACK_REQUEST_BYTES, oversized);
+  if (body instanceof Response) return body;
+
+  const message = typeof body?.message === 'string' ? body.message.trim() : '';
+  if (!message) return json({ error: 'feedback_message_required' }, 400);
+  if (byteLength(message) > MAX_FEEDBACK_BYTES) return oversized();
+
+  const contact = typeof body?.contact === 'string' ? body.contact.trim().slice(0, MAX_FEEDBACK_CONTACT_LENGTH) : '';
+  const candidateId = typeof body?.candidateId === 'string' ? body.candidateId.trim().slice(0, 64) : '';
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+
+  const limited = await enforceQuota(env, 'feedback', await clientKey(env, request));
+  if (limited) return limited;
+
+  try {
+    await env.DB.prepare(
+      'INSERT INTO launch_feedback (id, message, contact, candidate_id, created_at) VALUES (?, ?, ?, ?, ?)'
+    )
+      .bind(crypto.randomUUID(), message, contact || null, candidateId || null, new Date().toISOString())
+      .run();
+  } catch {
+    return json({ error: 'submission_storage_unavailable' }, 503);
+  }
+
+  return json({ received: true }, 201);
 }
 
 async function manageCandidate(request, env, candidateId) {
