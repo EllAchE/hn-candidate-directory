@@ -345,6 +345,10 @@ Worker and pushes its results back through `POST /api/admin/profiles/hn`, gated 
 `HN_INGEST_TOKEN`. `GET /api/admin/profiles/hn/pending?extractor=<id>` lists what it has not yet
 improved.
 
+Run the repository-local `$extract-hn-profiles` skill from this repository's root for the manual
+extraction pass. Its helpers live under `scripts/extract-hn-profiles/`; the skill keeps the ingest
+credential out of the model context and requires a review before the first push in a session.
+
 Migration `0004_external_extraction.sql` must be applied **before** this code is deployed. The
 scheduled ingest writes the new columns too, so a deploy that runs ahead of the migration breaks
 ordinary ingestion, not just the new endpoint. It is additive (`ALTER TABLE ADD COLUMN`), so it does
