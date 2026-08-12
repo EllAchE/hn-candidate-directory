@@ -1,5 +1,7 @@
 
 let candidates = [];
+let directoryTotals = null;
+let listingComplete = false;
 let listingTruncated = false;
 let activeReview = null;
 const el = (id) => document.getElementById(id);
@@ -14,10 +16,11 @@ const FACETS = [
   { key: 'skill', label: 'Skill or stack', kind: 'combobox', placeholder: 'Type a skill or stack', values: (candidate) => candidate.skills }
 ];
 const STAT_TILES = [
-  { id: 'candidate-count', count: () => candidates.length },
-  { id: 'location-count', count: () => distinctFacetValues('location') },
-  { id: 'university-count', count: () => distinctFacetValues('university') }
+  { id: 'candidate-count', key: 'candidates', count: () => candidates.length },
+  { id: 'location-count', key: 'locations', count: () => distinctFacetValues('location') },
+  { id: 'university-count', key: 'universities', count: () => distinctFacetValues('university') }
 ];
+const COUNT_ANIMATION_MS = 700;
 const selections = new Map(FACETS.map((facet) => [facet.key, new Set()]));
 const selectionLabels = new Map();
 const comboState = new Map(FACETS.filter((facet) => facet.kind === 'combobox').map((facet) => [facet.key, { query: '', open: false, active: '' }]));
@@ -39,14 +42,54 @@ function render() {
 
 // A tile reading zero states nothing about the directory; it reports a field the cohort was never
 // asked for. Hidden at zero for the same reason the matching facet is withheld.
+//
+// The server's summary covers the whole cohort, so it is what a partly-paginated listing shows;
+// once every page has arrived the browser's own count is authoritative and takes over. Until one of
+// the two exists the markup's placeholder stays put, because a tile counting the rows that happen
+// to have loaded describes the network, not the directory.
 function renderStats() {
+  const totals = listingComplete ? derivedTotals() : directoryTotals;
+  if (!totals) return;
   STAT_TILES.forEach((tile) => {
     const node = el(tile.id);
     if (!node) return;
-    const count = tile.count();
-    node.textContent = count.toLocaleString();
+    const count = totals[tile.key];
     if (node.parentElement) node.parentElement.hidden = count === 0;
+    animateCount(node, count);
   });
+}
+
+function derivedTotals() {
+  return Object.fromEntries(STAT_TILES.map((tile) => [tile.key, tile.count()]));
+}
+
+// render() runs on every keystroke, so an unchanged target must not restart the animation.
+function animateCount(node, target) {
+  if (node.dataset.countTarget === String(target)) return;
+  node.dataset.countTarget = String(target);
+
+  const from = Number.parseInt(node.dataset.countValue ?? '', 10);
+  const start = Number.isInteger(from) ? from : 0;
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (reduceMotion || start === target || typeof requestAnimationFrame !== 'function') {
+    node.dataset.countValue = String(target);
+    node.textContent = target.toLocaleString();
+    return;
+  }
+
+  const began = performance.now();
+  const step = (now) => {
+    if (node.dataset.countTarget !== String(target)) return;
+    const progress = Math.min(1, (now - began) / COUNT_ANIMATION_MS);
+    const eased = 1 - (1 - progress) ** 3;
+    // A tile climbing toward a real total must never render 0 on its first frames: a reader glancing
+    // at the page would read it as "this directory is empty" rather than "this number is arriving".
+    const value = Math.max(Math.round(start + (target - start) * eased), target > 0 ? 1 : 0);
+    node.dataset.countValue = String(value);
+    node.textContent = value.toLocaleString();
+    if (progress < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function distinctFacetValues(key) {
@@ -532,6 +575,7 @@ el('request-form').addEventListener('submit', async (event) => {
 });
 buildFacets();
 render();
+loadDirectoryTotals();
 loadPublishedCandidates();
 
 // Two-step rather than window.confirm so the confirmation renders inside the open dialog.
@@ -558,9 +602,27 @@ async function handleRemovalClick(button) {
   }
 }
 
+// One request, answered before the first page of the listing, so the summary is right immediately
+// instead of climbing a page at a time.
+async function loadDirectoryTotals() {
+  try {
+    const response = await fetch(apiPath('/api/candidates/stats'));
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (!STAT_TILES.every((tile) => Number.isInteger(payload[tile.key]))) return;
+    directoryTotals = payload;
+    render();
+  } catch {
+    // The listing's own pages still produce a total; a failed summary only delays it.
+  }
+}
+
 async function loadPublishedCandidates() {
   const loaded = [];
   let offset = 0;
+  // A reload rebuilds the array from page one, so the previous run's completeness cannot carry over
+  // or the summary would dip to one page's worth on the way back up.
+  listingComplete = false;
   try {
     while (offset !== null) {
       const response = await fetch(apiPath(`/api/candidates?offset=${offset}`));
@@ -577,6 +639,10 @@ async function loadPublishedCandidates() {
     // Whatever pages already loaded stay visible rather than inventing rows; every
     // profile shown must be one the server actually confirmed as published.
   }
+  // Only a listing that paged to its end can be counted; a broken or aborted one would report the
+  // pages that happened to arrive as the size of the directory.
+  listingComplete = offset === null;
+  render();
 }
 
 async function submitSourceText(sourceText) {

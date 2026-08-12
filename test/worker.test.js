@@ -939,7 +939,51 @@ describe('candidate listing pagination', () => {
   });
 });
 
-function seedPublishedCandidate(env, index) {
+describe('directory summary', () => {
+  test('answers the whole cohort in one request instead of a page at a time', async () => {
+    const env = createEnvironment();
+    const total = CANDIDATES_PAGE_SIZE + 1;
+    for (let index = 0; index < total; index += 1) seedPublishedCandidate(env, index);
+
+    const firstPage = await worker.fetch(apiRequest('/api/candidates'), env);
+    expect((await firstPage.json()).candidates).toHaveLength(CANDIDATES_PAGE_SIZE);
+
+    const stats = await worker.fetch(apiRequest('/api/candidates/stats'), env);
+    expect(stats.status).toBe(200);
+    expect(await stats.json()).toEqual({ candidates: total, locations: 1, universities: 0 });
+  });
+
+  test('groups summary values exactly as the browser groups its filters', async () => {
+    const env = createEnvironment();
+    // Same city written three ways, and the separator form the location facet rewrites to a comma.
+    seedPublishedCandidate(env, 0, { location: 'Berlin, Germany' });
+    seedPublishedCandidate(env, 1, { location: 'berlin,  germany' });
+    seedPublishedCandidate(env, 2, { location: 'Berlin · Germany' });
+    seedPublishedCandidate(env, 3, { location: 'Lisbon' });
+    // The extractor's marker for a field the comment never answered is an absence, not a location.
+    seedPublishedCandidate(env, 4, { location: 'Not specified' });
+    seedPublishedCandidate(env, 5, {
+      location: 'Lisbon',
+      universities_json: JSON.stringify(['MIT', 'Not specified'])
+    });
+    seedPublishedCandidate(env, 6, { universities_json: JSON.stringify(['mit', 'Stanford University']) });
+
+    const stats = await worker.fetch(apiRequest('/api/candidates/stats'), env);
+    expect(await stats.json()).toEqual({ candidates: 7, locations: 3, universities: 2 });
+  });
+
+  test('rejects a non-GET summary and reports an unconfigured service', async () => {
+    const env = createEnvironment();
+    const posted = await worker.fetch(new Request('https://example.com/api/candidates/stats', { method: 'POST' }), env);
+    expect(posted.status).toBe(405);
+
+    const unconfigured = await worker.fetch(apiRequest('/api/candidates/stats'), { ...env, DB: null });
+    expect(unconfigured.status).toBe(503);
+    expect(await unconfigured.json()).toEqual({ error: 'service_not_configured' });
+  });
+});
+
+function seedPublishedCandidate(env, index, overrides = {}) {
   const submissionId = `seed-submission-${index}`;
   env.DB.revisions.set(submissionId, {
     id: `seed-candidate-${index}`,
@@ -948,10 +992,10 @@ function seedPublishedCandidate(env, index) {
     name: `Candidate ${index}`,
     role: `Engineer ${index}`,
     summary: `Summary for candidate ${index}.`,
-    location: 'Remote',
+    location: overrides.location ?? 'Remote',
     work_mode: 'Remote',
     availability: 'Immediate',
-    universities_json: '[]',
+    universities_json: overrides.universities_json ?? '[]',
     companies_json: '[]',
     skills_json: '[]',
     date_ranges_json: '[]',
