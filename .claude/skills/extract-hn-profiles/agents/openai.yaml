@@ -1,0 +1,7 @@
+interface:
+  display_name: "Extract HN Profiles"
+  short_description: "Re-extract HN candidate profiles with Claude and read linked resumes"
+  default_prompt: "Use $extract-hn-profiles to re-extract pending Hacker News candidate profiles and push them to the directory."
+
+policy:
+  allow_implicit_invocation: false
