@@ -372,8 +372,33 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
 - The endpoint re-validates, redacts, and bounds every draft server-side and refuses to resurrect a
   suppressed candidate, so a compromised or buggy extractor cannot widen what reaches the database.
   `hn_permalink` is always derived from the item id and never accepted from the caller.
+- `workMode` and `availability` are **coerced, not accepted**, on every write path — see "Facet
+  vocabularies" below. An extractor is free to send whatever a comment says; only the canonical value
+  is stored.
 - **TODO:** the extractor is invoked by hand today. Wire it to a scheduled refresh once it has proven
   out over a few manual runs.
+
+### Facet vocabularies
+
+`workMode` and `availability` drive the directory's filters, so they hold a closed vocabulary rather
+than whatever a comment happens to say. `HN_WORK_MODES` is `Remote` / `Hybrid` / `On-site` /
+`Flexible`; `HN_AVAILABILITIES` is `Immediately` / `Notice period` / `Future date`. Anything
+unrecognized becomes `Not specified` — the sentence itself survives verbatim in `summary`, which is
+what a reader actually wants, and is not lost.
+
+This is a data-quality control, not a display preference. Before it, both fields stored the stated
+text verbatim, so one meaning became several filter options: `Immediately`,
+`immediate — open to contract or full-time` and `Immediately | Full-time or contract` each appeared
+as its own choice, and `mode` offered seven values for four arrangements. A filter that does not
+group is worse than no filter.
+
+- **Enforced in `validateDraft`, not only in the deterministic pass.** The push endpoint exists to
+  overwrite that pass, so normalizing one side alone would last exactly until the first backfill ran.
+- **The review form is unaffected.** Its `Needs review` placeholder is built before validation, so a
+  reviewer still sees the prompt; the value is canonicalized when the profile publishes, so the
+  placeholder never becomes a public filter option.
+- **Changing a vocabulary is an `HN_EXTRACTION_VERSION` bump**, same as any other extraction change.
+  Already-published rows keep their old value until a bumped run re-derives them.
 
 ### Pilot feedback
 

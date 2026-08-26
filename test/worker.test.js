@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import worker, {
   CANDIDATES_PAGE_SIZE,
+  HN_UNKNOWN,
   MAX_RESUME_BYTES,
   MAX_SOURCE_BYTES,
   STRING_WEB_ACCESS_LIMITS,
@@ -607,8 +608,11 @@ describe('candidate consent decisions', () => {
       role: approvedDraft.role,
       summary: approvedDraft.summary,
       location: approvedDraft.location,
-      mode: approvedDraft.workMode,
-      availability: approvedDraft.availability,
+      // The two facets publish canonicalized rather than verbatim. This submission states neither, so
+      // the review form's `Needs review` placeholder reaches the approval — and publishing it would
+      // put a non-answer in the filter list beside the real values.
+      mode: HN_UNKNOWN,
+      availability: HN_UNKNOWN,
       universities: approvedDraft.universities,
       companies: approvedDraft.companies,
       skills: approvedDraft.skills,

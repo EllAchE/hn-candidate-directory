@@ -46,7 +46,7 @@ const HN_INGEST_LIMITS = Object.freeze({
 // comments first seen after it ships and every already-ingested profile keeps its old values
 // forever. Bump this in the same commit as any change to what extraction produces; leaving it alone
 // is what keeps an ordinary run skipping unchanged comments.
-const HN_EXTRACTION_VERSION = 1;
+const HN_EXTRACTION_VERSION = 2;
 // Rank, not identity, is what the write guards compare: a profile may only be overwritten by an
 // extractor at least as good as the one that produced it. Rank 0 is the deterministic pass and is
 // deliberately not pushable -- the push endpoint exists to improve on it, never to replay it.
@@ -100,6 +100,25 @@ const HN_MAPPED_LABELS = new Set([
   ...HN_NAME_LABELS
 ]);
 const HN_UNKNOWN = 'Not specified';
+// One definition of "this line is a label", because three near-copies had drifted apart. The entry
+// parser accepted a bare `Technologies:` while the two prose filters required a space after the
+// colon, so a valueless label was neither indexed as a label nor filtered out of the prose -- and
+// the first prose line becomes the role. That is how `Technologies:`, `Email:[redacted]` and
+// `Willing to relocate:Yes` ended up published as job titles.
+const HN_LABEL_LINE = /^([^:]{2,32}):\s*(.*)$/;
+// Closed facet vocabularies. Anything a comment says that does not map to one of these is dropped
+// rather than passed through: `availability` offered `Immediately`, `immediate -- open to contract
+// or full-time` and `Immediately | Full-time or contract` as three separate filter options for one
+// meaning, which is worse than offering none. The raw sentence survives in `summary`.
+const HN_WORK_MODES = Object.freeze(['Remote', 'Hybrid', 'On-site', 'Flexible']);
+const HN_AVAILABILITIES = Object.freeze(['Immediately', 'Notice period', 'Future date']);
+// Months are spelled out rather than matched as three-letter prefixes: `jun[a-z]*` also matches
+// "junior" and `sep[a-z]*` matches "separation", and a false month here does not merely mislabel a
+// date -- it suppresses the `Immediately` branch below. "May" is deliberately absent for the same
+// reason, since the modal verb is far commoner in these answers than the month; `May 2026` is still
+// caught by the year.
+const HN_MONTH_PATTERN =
+  /\b(?:jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b|\b20\d{2}\b|\bq[1-4]\b/i;
 // A card headline: long enough for a real title or a short opening sentence, short enough that a
 // candidate's whole self-introduction can never pass as one.
 const HN_TITLE_MAX_CHARS = 140;
@@ -1946,7 +1965,7 @@ function extractHnProfile(record) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^([^:]{2,32}):\s*(.*)$/);
+      const match = line.match(HN_LABEL_LINE);
       return { line, label: match ? normalizeHnLabel(match[1]) : '', value: match ? match[2].trim() : '' };
     });
 
@@ -1964,12 +1983,13 @@ function extractHnProfile(record) {
   const prose = leftovers.map((entry) => entry.line);
   if (!location && !skills.length && !role && prose.join(' ').length < HN_INGEST_LIMITS.minProseChars) return null;
 
-  const separator = prose.some((line) => /^[^:]{2,32}:\s/.test(line)) ? ' · ' : ' ';
+  const separator = prose.some((line) => HN_LABEL_LINE.test(line)) ? ' · ' : ' ';
   const dateRanges = [...record.text.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map(
     (match) => match[0]
   );
-  const openingLine = prose.find((line) => !/^[^:]{2,32}:\s/.test(line)) || '';
-  const title = role || hnTitleFromOpeningLine(openingLine);
+  // Scan for the first line that reads like a title rather than taking the first prose line and
+  // hoping. A comment that opens with `---` or a bare label used to yield that line as the role.
+  const title = role || prose.map((line) => hnTitleFromOpeningLine(line)).find(Boolean) || '';
 
   return boundedDraft(sanitizeCandidateDraft({
     name: (valueFor(HN_NAME_LABELS) || record.author || HN_UNKNOWN).slice(0, 200),
@@ -2013,26 +2033,60 @@ function hostnameOf(value) {
   }
 }
 
+// A line becomes somebody's public job title, so it has to read like one. A separator rule and a
+// bare label both reach here and were published verbatim -- `---` on five of 200 sampled profiles,
+// `Technologies:` on seven -- because the only previous test was a length bound.
 function hnTitleFromOpeningLine(line) {
+  if (HN_LABEL_LINE.test(line) || !/[A-Za-z]{2}/.test(line)) return '';
   const sentence = HN_TITLE_SENTENCE_PATTERN.exec(line);
   if (sentence) return sentence[1].trim();
   return line.length <= HN_TITLE_MAX_CHARS ? line : '';
 }
 
+// Ordered by how much each signal narrows the answer, not by how the checks read. Naming both ends
+// settles it first -- `Remote/Hybrid/Onsite all OK` is flexibility, and a first-match-wins hybrid
+// check would call it Hybrid -- then hybrid, which is the specific arrangement someone naming it is
+// offering. An unmatched non-empty value stops here rather than falling through to the source text:
+// the person answered the question, and re-reading their whole comment for a contradicting mention
+// would overrule them.
 function hnWorkMode(remoteValue, sourceText) {
-  if (/^(yes|yes\b.*|remote|remote only|only remote|preferred|strongly preferred)$/i.test(remoteValue)) return 'Remote';
-  if (/^(no|no\b.*|onsite|on-site|office|not preferred)$/i.test(remoteValue)) return 'On-site';
-  if (remoteValue) return remoteValue.slice(0, 100);
+  const stated = String(remoteValue || '').toLowerCase();
+  // A negated answer names the arrangement it rules out, so keyword presence reads it backwards:
+  // `no remote` and `not preferred` both resolve to Remote without this.
+  if (/\bnot? remote\b|\bnot preferred\b/.test(stated)) return 'On-site';
+  const onsite = /\bon-?site\b|\bin[- ]?person\b|\bin[- ]?office\b|\blocal only\b/.test(stated);
+  // A bare `Yes` or `Preferred` under a label that already asks about remote is a remote answer, so
+  // it counts toward "named both" -- `Preferred, also open to in-person` is flexibility, not on-site.
+  const remote = /\bremote\b|\bwfh\b|^y$|^yes\b|\bpreferred\b/.test(stated);
+  if (onsite && remote) return 'Flexible';
+  if (/\bhybrid\b/.test(stated)) return 'Hybrid';
+  if (/\b(?:flexible|either|no preference|open to both)\b/.test(stated)) return 'Flexible';
+  // `^n$` rather than `^n\b`, so `n/a` reaches the unknown fallthrough instead of becoming On-site.
+  if (onsite || /^n$|^no\b/.test(stated)) return 'On-site';
+  if (remote) return 'Remote';
+  if (stated) return HN_UNKNOWN;
+  if (/\bhybrid\b/i.test(sourceText)) return 'Hybrid';
   if (/\bremote\b/i.test(sourceText)) return 'Remote';
   return HN_UNKNOWN;
 }
 
-// Most candidates never state a start date at all, and the few who do rarely use a labelled
-// line — they fold it into the closing sentence of their prose. This only catches the small,
-// unambiguous "available now/immediately" idiom; open-ended phrasing ("available for contract",
-// a specific date) is left alone rather than guessed at.
+// Most candidates never state a start date at all, and the few who do rarely use a labelled line --
+// they fold it into the closing sentence of their prose. The source-text fallback therefore catches
+// only the unambiguous "available now" idiom; open-ended phrasing is left alone rather than guessed
+// at. A month or year outranks a notice period because "end of September" is a date with a notice
+// word in it, not a notice period with a month in it.
 function hnAvailability(labelValue, sourceText) {
-  if (labelValue) return labelValue.slice(0, 100);
+  const stated = String(labelValue || '').toLowerCase();
+  // "Available" on its own is not evidence: it is the label restated, and it is equally present in
+  // "available from October" and "available for contract work".
+  if (/\b(?:immediate|immediately|now|asap|right away)\b/.test(stated) && !HN_MONTH_PATTERN.test(stated)) {
+    return 'Immediately';
+  }
+  if (HN_MONTH_PATTERN.test(stated)) return 'Future date';
+  // "Employed" is absent deliberately -- "not currently employed" is the opposite of a notice period,
+  // and someone who is employed without naming a notice has still not named a start date.
+  if (/\b(?:\d+\s*(?:week|month|day)s?|notice|end of|starting)\b/.test(stated)) return 'Notice period';
+  if (stated) return HN_UNKNOWN;
   if (HN_IMMEDIATE_AVAILABILITY_PATTERN.test(sourceText)) return 'Immediately';
   return HN_UNKNOWN;
 }
@@ -2215,13 +2269,21 @@ function validateDraft(value) {
     if (raw === undefined || raw === null || raw === '') return '';
     return typeof raw === 'string' ? canonical(raw) : null;
   };
+  // Normalizing only the deterministic pass would not hold the vocabulary for long: the push endpoint
+  // exists so a better extractor can *overwrite* that pass, so a model answering "Remote-first" would
+  // put the variants straight back. Coerced rather than rejected, because an unrecognized answer is
+  // the one field of an otherwise good profile, and `Not specified` is what the comment supports.
+  const facet = (key, canonical) => {
+    const raw = text(key, DRAFT_FIELD_LIMITS[key]);
+    return raw === null ? null : canonical(raw, '');
+  };
   const draft = {
     name: text('name', DRAFT_FIELD_LIMITS.name),
     role: text('role', DRAFT_FIELD_LIMITS.role),
     summary: text('summary', DRAFT_FIELD_LIMITS.summary),
     location: text('location', DRAFT_FIELD_LIMITS.location),
-    workMode: text('workMode', DRAFT_FIELD_LIMITS.workMode),
-    availability: text('availability', DRAFT_FIELD_LIMITS.availability),
+    workMode: facet('workMode', hnWorkMode),
+    availability: facet('availability', hnAvailability),
     hnUsername: optional('hnUsername', (raw) => hnAuthor(raw) || null),
     linkedinUrl: optional('linkedinUrl', linkedinProfileUrl),
     githubUrl: optional('githubUrl', githubProfileUrl),
@@ -2444,10 +2506,13 @@ function json(value, status = 200, extraHeaders = {}) {
 export {
   CANDIDATES_PAGE_SIZE,
   DETERMINISTIC_HN_EXTRACTOR,
+  HN_AVAILABILITIES,
   HN_EXTRACTION_VERSION,
   HN_EXTRACTORS,
   HN_INGEST_LIMITS,
   HN_PUSH_LIMITS,
+  HN_UNKNOWN,
+  HN_WORK_MODES,
   MAX_HN_PUSH_REQUEST_BYTES,
   MAX_RESUME_BYTES,
   MAX_SOURCE_BYTES,
