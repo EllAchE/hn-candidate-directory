@@ -413,7 +413,9 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
   comment's own author, for the same reason `hn_permalink` is derived from the item id. Otherwise
   anyone holding `HN_INGEST_TOKEN` could attribute a profile to someone else's HN identity on a public
   card. It also separates the handle from `name`, which until now held the handle whenever a comment
-  carried no labelled name line.
+  carried no labelled name line. The review form deliberately does not offer the field: a
+  self-submitted profile has no HN comment behind it, so a handle typed there would be an unverified
+  claim rendered exactly like an ingested one.
 - Links are stored **canonicalized**, not as written: https only, credentials and port rejected,
   query and fragment dropped, LinkedIn folded to `https://www.linkedin.com/in/<slug>` and GitHub to
   `https://github.com/<login>`. A query string on a profile link is tracking or a session, never part

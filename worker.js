@@ -860,13 +860,10 @@ function validateCandidateSourceUrl(value) {
   return `https://www.linkedin.com/in/${pathMatch[1]}`;
 }
 
-// A profile link is a destination, not a request: no credentials, no port, and no query or fragment.
-// Stripping the last two rather than rejecting on them is the difference between this and
-// `validateCandidateSourceUrl` above, and it is deliberate. That one screens what a person typed
-// into the submission form, where a rejection reaches someone who can retype it; this one salvages
-// what an extractor found in a comment, where there is nobody to tell and the tracking parameters
-// HN commenters paste along with their links are not part of the destination anyway. Both agree on
-// what is reachable -- `isBlockedNetworkHost` -- which is the part that must never diverge.
+// Strips query and fragment where `validateCandidateSourceUrl` above rejects on them: that one
+// screens what a person typed into a form and a rejection reaches someone who can retype it, while
+// this one salvages what an extractor found in a comment, where nobody is listening. The two must
+// never diverge on what is *reachable* -- hence the shared `isBlockedNetworkHost`.
 function profileLinkUrl(value) {
   if (typeof value !== 'string' || byteLength(value) > DRAFT_FIELD_LIMITS.url) return null;
 
@@ -918,9 +915,15 @@ function githubProfileUrl(value) {
 function personalProfileUrl(value) {
   const parsed = profileLinkUrl(value);
   if (!parsed) return null;
-  const hostname = parsed.hostname.toLowerCase();
-  if (LINKEDIN_PROFILE_HOSTS.test(hostname) || hostname === 'github.com' || hostname.endsWith('.github.com')) return null;
-  return parsed.href;
+  return isNetworkProfileHost(parsed.hostname.toLowerCase()) ? null : parsed.href;
+}
+
+// Every subdomain, not just the locale ones `LINKEDIN_PROFILE_HOSTS` accepts, because the question
+// here is the opposite one: not "is this a profile URL" but "is this someone's own site", and
+// `careers.linkedin.com` is not. `github.io` is deliberately absent -- a user page there is exactly
+// the personal site this column wants.
+function isNetworkProfileHost(hostname) {
+  return ['linkedin.com', 'github.com'].some((host) => hostname === host || hostname.endsWith(`.${host}`));
 }
 
 function isBlockedNetworkHost(hostname) {

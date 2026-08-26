@@ -465,8 +465,19 @@ describe('profile links and the HN handle', () => {
   test('a network URL never lands in the personal-site column', async () => {
     const env = configured();
 
-    const response = await push(env, [item(PROSE_COMMENT, { personalUrl: 'https://www.linkedin.com/company/example' })]);
-    expect((await response.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'invalid_draft' }]);
+    for (const personalUrl of [
+      'https://www.linkedin.com/company/example',
+      'https://careers.linkedin.com/',
+      'https://gist.github.com/adacandidate'
+    ]) {
+      const response = await push(env, [item(PROSE_COMMENT, { personalUrl })]);
+      expect((await response.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'invalid_draft' }]);
+    }
+
+    // A user page is the person's own site, which is the one thing this column is for.
+    const pages = await push(env, [item(PROSE_COMMENT, { personalUrl: 'https://adacandidate.github.io/' })]);
+    expect((await pages.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'created', redacted: false }]);
+    expect([...env.DB.revisions.values()][0].personal_url).toBe('https://adacandidate.github.io/');
   });
 
   test('the cron extractor reads links out of comment prose and records the handle', async () => {
