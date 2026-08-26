@@ -370,6 +370,133 @@ describe('pushing externally-extracted HN profiles', () => {
   });
 });
 
+describe('profile links and the HN handle', () => {
+  // The extractor skill in this repo pushes drafts written against the previous shape. If the new
+  // columns were required, every one of those would come back invalid_draft -- and the extractor is
+  // the thing that is supposed to fill them.
+  test('a draft with no link fields at all still publishes', async () => {
+    const env = configured();
+
+    const response = await push(env, [item()]);
+    expect(response.status).toBe(200);
+    expect((await response.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'created', redacted: false }]);
+
+    const revision = env.DB.revisions.get('hn-44444501');
+    expect(revision.linkedin_url).toBe('');
+    expect(revision.github_url).toBe('');
+    expect(revision.personal_url).toBe('');
+    // Supplied by nobody, and still correct: the handle comes off the ingested comment.
+    expect(revision.hn_username).toBe('proseposter');
+  });
+
+  // The rank guard only stops a *lower*-ranked extractor, so an extractor written against the
+  // previous draft shape would otherwise blank the links the scheduled pass had already found --
+  // a push that makes the profile worse.
+  test('an omitted link falls back to the comment, an explicit empty one clears it', async () => {
+    const env = configured();
+    const withLinks = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>https://github.com/adacandidate` };
+
+    await push(env, [{ ...item(), comment: commentBody(withLinks) }]);
+    expect(env.DB.revisions.get('hn-44444501').github_url).toBe('https://github.com/adacandidate');
+
+    await push(env, [{ ...item(PROSE_COMMENT, { githubUrl: '' }), comment: commentBody(withLinks) }]);
+    expect(env.DB.revisions.get('hn-44444501').github_url).toBe('');
+  });
+
+  // The same reason `hn_permalink` is derived rather than accepted. The handle renders on a public
+  // card as this person's HN identity, so a caller who could set it could attribute a profile to
+  // someone else.
+  test('a caller-supplied handle is ignored in favour of the comment author', async () => {
+    const env = configured();
+
+    await push(env, [item(PROSE_COMMENT, { hnUsername: 'pg' })]);
+    expect(env.DB.revisions.get('hn-44444501').hn_username).toBe('proseposter');
+
+    // Unusable client input is replaced rather than failing the item, since the value is not the
+    // client's to give in the first place.
+    await push(env, [item(SECOND_COMMENT, { hnUsername: 'not a handle' })]);
+    expect(env.DB.revisions.get('hn-44444502').hn_username).toBe('secondposter');
+  });
+
+  test('links are stored canonicalized and surface on the public candidate', async () => {
+    const env = configured();
+
+    await push(env, [
+      item(PROSE_COMMENT, {
+        hnUsername: 'proseposter',
+        linkedinUrl: 'https://de.linkedin.com/in/ada-candidate?trk=public_profile',
+        githubUrl: 'https://github.com/adacandidate/',
+        personalUrl: 'https://ada.example/#about'
+      })
+    ]);
+
+    const [candidate] = (await (await worker.fetch(apiRequest('/api/candidates'), env)).json()).candidates;
+    expect(candidate.hnUsername).toBe('proseposter');
+    // Regional front door and tracking parameter both gone, so the same profile written two ways
+    // stores as one value.
+    expect(candidate.linkedinUrl).toBe('https://www.linkedin.com/in/ada-candidate');
+    expect(candidate.githubUrl).toBe('https://github.com/adacandidate');
+    expect(candidate.personalUrl).toBe('https://ada.example/');
+  });
+
+  test('a present but unusable link fails the item instead of being dropped', async () => {
+    const env = configured();
+
+    for (const overrides of [
+      { linkedinUrl: 'https://www.linkedin.com/company/example' },
+      { linkedinUrl: 'http://www.linkedin.com/in/ada-candidate' },
+      { githubUrl: 'https://github.com/features' },
+      { githubUrl: 'https://github.com/adacandidate/some-repo' },
+      { personalUrl: 'https://127.0.0.1/ada' },
+      { personalUrl: 'https://ada.internal/' },
+      { personalUrl: 'https://user:pass@ada.example/' },
+      { personalUrl: 'https://ada.example/contact/ada%40example.com' }
+    ]) {
+      const response = await push(env, [item(PROSE_COMMENT, overrides)]);
+      expect(response.status).toBe(200);
+      expect((await response.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'invalid_draft' }]);
+    }
+
+    expect(env.DB.revisions.size).toBe(0);
+  });
+
+  // Otherwise every LinkedIn URL that is not a `/in/<slug>` profile falls through the LinkedIn
+  // check and is stored as somebody's personal website.
+  test('a network URL never lands in the personal-site column', async () => {
+    const env = configured();
+
+    const response = await push(env, [item(PROSE_COMMENT, { personalUrl: 'https://www.linkedin.com/company/example' })]);
+    expect((await response.json()).results).toEqual([{ hnItemId: '44444501', outcome: 'invalid_draft' }]);
+  });
+
+  test('the cron extractor reads links out of comment prose and records the handle', async () => {
+    const env = configured();
+    await ingestThread(
+      env,
+      transport([
+        {
+          ...PROSE_COMMENT,
+          comment_text: [
+            'Location: Toronto, Canada',
+            'Technologies: Rust, Go',
+            'Resume is at <a href="https://drive.google.com/file/d/abc/view?usp=sharing">drive.google.com/file/d/abc...</a>',
+            'Also <a href="https://www.linkedin.com/in/ada-candidate">LinkedIn</a>, ' +
+              '<a href="https://github.com/adacandidate">GitHub</a> and <a href="https://ada.example/">my site</a>.'
+          ].join('<p>')
+        }
+      ])
+    );
+
+    const revision = env.DB.revisions.get('hn-44444501');
+    expect(revision.hn_username).toBe('proseposter');
+    expect(revision.linkedin_url).toBe('https://www.linkedin.com/in/ada-candidate');
+    expect(revision.github_url).toBe('https://github.com/adacandidate');
+    // The Drive link is the resume, which belongs to hn_ingests.resume_url, not to the column that
+    // means "this person's own site".
+    expect(revision.personal_url).toBe('https://ada.example/');
+  });
+});
+
 function configured() {
   const env = createEnvironment();
   env.HN_INGEST_TOKEN = TOKEN;

@@ -763,7 +763,7 @@ function renderReviewDraft(draft) {
   el('run-import').closest('.dialog-actions').hidden = true;
   result.hidden = false;
   result.classList.add('review-ready');
-  result.innerHTML = `${managementTokenPanel()}<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
+  result.innerHTML = `${managementTokenPanel()}<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewInput('Hacker News handle', 'hnUsername', draft.hnUsername || '')}${reviewInput('LinkedIn', 'linkedinUrl', draft.linkedinUrl || '')}${reviewInput('GitHub', 'githubUrl', draft.githubUrl || '')}${reviewInput('Personal site', 'personalUrl', draft.personalUrl || '')}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
 }
 
 function renderPublicationResult(result) {
@@ -822,6 +822,10 @@ function draftFromForm(form) {
     location: String(data.get('location') || '').trim(),
     workMode: String(data.get('workMode') || '').trim(),
     availability: String(data.get('availability') || '').trim(),
+    hnUsername: String(data.get('hnUsername') || '').trim(),
+    linkedinUrl: String(data.get('linkedinUrl') || '').trim(),
+    githubUrl: String(data.get('githubUrl') || '').trim(),
+    personalUrl: String(data.get('personalUrl') || '').trim(),
     universities: list('universities'),
     companies: list('companies'),
     skills: list('skills'),
