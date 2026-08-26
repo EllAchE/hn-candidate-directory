@@ -292,14 +292,46 @@ function syncFilterDrawer() {
   toggle.setAttribute('aria-expanded', String(!collapsible || filtersOpen));
 }
 
+const CARD_SKILL_LIMIT = 6;
+
 function card(candidate) {
-  const chips = candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('');
+  const overflowSkills = candidate.skills.slice(CARD_SKILL_LIMIT);
+  const chips = candidate.skills
+    .slice(0, CARD_SKILL_LIMIT)
+    .map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`)
+    .join('');
+  const overflow = overflowSkills.length
+    ? `<span class="chip chip-more" title="${escapeHtml(overflowSkills.join(', '))}">+${overflowSkills.length}</span>`
+    : '';
   const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
   const metadata = [candidate.location, candidate.mode, candidate.university]
     .filter(isProvided)
     .map((value) => `<span>${escapeHtml(value)}</span>`)
     .join('');
-  return `<article class="candidate-card"><div class="card-top"><div><div class="candidate-name">${escapeHtml(candidate.name)}</div><div class="candidate-role">${escapeHtml(candidate.role)}</div></div>${availability}</div><p class="candidate-summary">${escapeHtml(candidate.summary)}</p><div class="chips">${chips}</div><div class="card-bottom"><div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  // Both of these are clamped to one line in CSS — the role to 300 characters of extractor output,
+  // the card body to none of the summary at all — so the title attribute is the only way the rest of
+  // either stays reachable without opening the dialog.
+  const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
+  const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
+  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(candidate.name)}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+}
+
+// Most rows still carry the handle as the name, because the extractor falls back to the comment's
+// author when nothing in it names a person. Printing `patio11 @patio11` reads as a bug rather than as
+// provenance, so the handle shows only where it says something the name does not.
+function handleLink(candidate) {
+  const handle = String(candidate.hnUsername || '').trim();
+  if (!handle || handle.toLowerCase() === String(candidate.name || '').trim().toLowerCase()) return '';
+  return `<a class="candidate-handle" href="https://news.ycombinator.com/user?id=${escapeHtml(encodeURIComponent(handle))}" target="_blank" rel="noopener noreferrer">@${escapeHtml(handle)}</a>`;
+}
+
+const PROFILE_LINK_FIELDS = [['linkedinUrl', 'LinkedIn'], ['githubUrl', 'GitHub'], ['personalUrl', 'Website']];
+
+function profileLinks(candidate) {
+  return PROFILE_LINK_FIELDS.map(([field, label]) => {
+    const href = httpsUrl(candidate[field]);
+    return href ? `<a class="profile-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : '';
+  }).join('');
 }
 
 function profileBackground(candidate) {
@@ -417,7 +449,8 @@ document.addEventListener('click', (event) => {
   if (view) {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
     const background = profileBackground(candidate);
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2><p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');

@@ -142,6 +142,37 @@ const PUBLIC_CANDIDATES = [
 ];
 
 const EXPECTED_DEFAULT_NAMES = PUBLIC_CANDIDATES.map(({ name }) => name);
+// Sized like a real "Who wants to be hired" comment rather than the one-sentence fixtures above: a
+// summary of a few hundred characters and more skills than a card shows are exactly what made a row
+// twelve lines tall, and neither shows up in a fixture written to be readable.
+const LONG_SUMMARY =
+  'Senior platform engineer with eleven years shipping distributed storage and payments infrastructure at scale. I have led migrations off legacy monoliths, run on-call for petabyte-scale ingestion pipelines, and mentored teams of six to ten engineers through their first production incidents. Looking for a team that treats reliability as a product feature rather than an afterthought.';
+// The extractor allows 300 characters of role, and the live sample is full of whole sentences. A role
+// this long is what proves the ellipsis actually clamps rather than widening the column.
+const LONG_ROLE =
+  'Staff infrastructure engineer and sometime engineering manager, eleven years across storage, payments, and developer platforms, currently looking for something closer to the metal again';
+const DENSE_CANDIDATES = [
+  {
+    ...PUBLIC_CANDIDATES[0],
+    role: LONG_ROLE,
+    hnUsername: 'adar',
+    linkedinUrl: 'https://www.linkedin.com/in/ada-rivera',
+    githubUrl: 'https://github.com/adariv',
+    // Screened out rather than rendered — the same http/https rule the source link already enforces.
+    personalUrl: 'http://ada.example.com',
+    summary: LONG_SUMMARY,
+    skills: ['Rust', 'Go', 'PostgreSQL', 'Kubernetes', 'Terraform', 'gRPC', 'Kafka', 'Python', 'TypeScript', 'React']
+  },
+  {
+    ...PUBLIC_CANDIDATES[1],
+    name: 'clearbacklog',
+    hnUsername: 'ClearBacklog',
+    linkedinUrl: '',
+    githubUrl: '',
+    personalUrl: '',
+    summary: LONG_SUMMARY
+  }
+];
 const removalRequests = [];
 const RETIRED_HARDCODED_OPTIONS = ['University of Texas at Dallas', 'YC startup'];
 const KEY_CODES = { ArrowDown: 40, ArrowUp: 38, Enter: 13, Escape: 27, Home: 36, End: 35, Backspace: 8 };
@@ -649,6 +680,84 @@ test(
           });
         `
       }
+    );
+  },
+  30_000
+);
+
+test(
+  'a candidate row stays scannable: no summary on the card, the handle only where it says something, screened links',
+  async () => {
+    await withPage(
+      async (cdp) => {
+        const cardOf = (id) => `document.querySelector('[data-view="${id}"]').closest('.candidate-card')`;
+
+        // The height bound is the assertion that matters here. Rendering the summary inline is what
+        // made a row twelve lines tall — six of these filled 1,586px against a 900px viewport, so no
+        // two candidates were ever on screen together. Anything moved back into the card body puts it
+        // straight back over the bound.
+        expect(await evaluate(cdp, `Math.round(${cardOf('ada-rivera')}.getBoundingClientRect().height)`)).toBeLessThan(130);
+        expect(await evaluate(cdp, `document.getElementById('candidate-list').textContent.includes('petabyte-scale')`)).toBe(false);
+        expect(await evaluate(cdp, `${cardOf('ada-rivera')}.getAttribute('title')`)).toBe(LONG_SUMMARY);
+
+        // The one-line role is ellipsized, and the ellipsis is why this has to be measured on the
+        // document: `white-space:nowrap` gives the role a min-content width of the whole string, which
+        // propagates up into the results grid's auto-sized track and scrolls the entire page sideways
+        // while every individual card still measures as fitting its own box.
+        expect(await evaluate(cdp, `document.documentElement.scrollWidth - document.documentElement.clientWidth`)).toBe(0);
+        const roleOf = `${cardOf('ada-rivera')}.querySelector('.candidate-role')`;
+        expect(await evaluate(cdp, `${roleOf}.scrollWidth > ${roleOf}.clientWidth`)).toBe(true);
+        expect(await evaluate(cdp, `${roleOf}.getAttribute('title')`)).toBe(LONG_ROLE);
+
+        // Six of ten skills, with the rest reachable rather than merely counted.
+        expect(await evaluate(cdp, `[...${cardOf('ada-rivera')}.querySelectorAll('.chip')].map((chip) => chip.textContent)`)).toEqual([
+          'Rust',
+          'Go',
+          'PostgreSQL',
+          'Kubernetes',
+          'Terraform',
+          'gRPC',
+          '+4'
+        ]);
+        expect(await evaluate(cdp, `${cardOf('ada-rivera')}.querySelector('.chip-more').getAttribute('title')`)).toBe('Kafka, Python, TypeScript, React');
+
+        expect(await evaluate(cdp, `${cardOf('ada-rivera')}.querySelector('.candidate-handle').textContent`)).toBe('@adar');
+        expect(await evaluate(cdp, `${cardOf('ada-rivera')}.querySelector('.candidate-handle').getAttribute('href')`)).toBe(
+          'https://news.ycombinator.com/user?id=adar'
+        );
+        // The extractor falls back to the comment's author, so most rows carry the handle *as* the
+        // name. `clearbacklog @ClearBacklog` reads as a rendering bug rather than as provenance.
+        expect(await evaluate(cdp, `${cardOf('beatrice-okafor')}.querySelector('.candidate-handle')`)).toBe(null);
+
+        expect(
+          await evaluate(
+            cdp,
+            `[...${cardOf('ada-rivera')}.querySelectorAll('.profile-link')].map((link) => [link.textContent, link.getAttribute('href'), link.getAttribute('target'), link.getAttribute('rel')])`
+          )
+        ).toEqual([
+          ['LinkedIn', 'https://www.linkedin.com/in/ada-rivera', '_blank', 'noopener noreferrer'],
+          ['GitHub', 'https://github.com/adariv', '_blank', 'noopener noreferrer']
+        ]);
+
+        // The role gets its own line below the breakpoint and the actions stack, so the row grows —
+        // but a phone still has to fit more than one candidate on screen.
+        await setViewport(cdp, 780, 900, true);
+        await waitFor(cdp, `getComputedStyle(document.getElementById('filters-toggle')).display !== 'none'`);
+        expect(await evaluate(cdp, `Math.round(${cardOf('ada-rivera')}.getBoundingClientRect().height)`)).toBeLessThan(180);
+        expect(await evaluate(cdp, `document.documentElement.scrollWidth - document.documentElement.clientWidth`)).toBe(0);
+
+        // The dialog is where the summary went, so it has to carry it in full — along with the links,
+        // since the reader who opened the detail view is the one most likely to follow them.
+        await click(cdp, '[data-view="ada-rivera"]');
+        expect(await textContent(cdp, '#dialog-content .dialog-copy')).toBe(LONG_SUMMARY);
+        expect(await evaluate(cdp, `document.querySelectorAll('#dialog-content .chip').length`)).toBe(10);
+        expect(await evaluate(cdp, `[...document.querySelectorAll('#dialog-content .dialog-links a')].map((link) => link.textContent)`)).toEqual([
+          '@adar',
+          'LinkedIn',
+          'GitHub'
+        ]);
+      },
+      { candidates: DENSE_CANDIDATES }
     );
   },
   30_000
