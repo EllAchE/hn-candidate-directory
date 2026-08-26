@@ -1,4 +1,4 @@
-import { sanitizeCandidateDraft } from './sensitive-data.js';
+import { redactSensitiveText, sanitizeCandidateDraft } from './sensitive-data.js';
 
 // Outbound fetches must never follow a redirect, but `redirect: 'error'` is not implementable at
 // the edge and workerd throws a TypeError on it before the request leaves. Node and Bun both accept
@@ -15,7 +15,17 @@ const MAX_RESUME_BYTES = MAX_SOURCE_BYTES;
 const MAX_RESUME_FILENAME_BYTES = 128;
 const STRING_WEB_ACCESS_ENDPOINT = 'https://request.usestring.ai/v1/fetch';
 const STRING_WEB_ACCESS_LIMITS = Object.freeze({ requests: 1, pages: 1, timeoutMs: 12_000, responseBytes: 750_000 });
-const LINKEDIN_PROFILE_HOSTS = new Set(['linkedin.com', 'www.linkedin.com']);
+// Regional subdomains (`de.`, `uk.`, `www.`) are the same profile under a localized front door, so
+// they are accepted and canonicalized to `www` rather than treated as a different site.
+const LINKEDIN_PROFILE_HOSTS = /^(?:[a-z]{2,4}\.)?linkedin\.com$/;
+const LINKEDIN_PROFILE_PATH = /^\/in\/([A-Za-z0-9-]{3,100})\/?$/;
+const GITHUB_PROFILE_PATH = /^\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/?$/;
+// Site sections that share the user namespace. A comment linking to `github.com/features` would
+// otherwise be stored as that person's GitHub account.
+const GITHUB_RESERVED_LOGINS = new Set([
+  'about', 'apps', 'collections', 'enterprise', 'explore', 'features', 'join', 'login', 'marketplace',
+  'orgs', 'pricing', 'security', 'settings', 'sponsors', 'topics', 'trending'
+]);
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 const HN_ALGOLIA_ENDPOINT = 'https://hn.algolia.com/api/v1/search';
 const HN_ALGOLIA_RECENT_ENDPOINT = 'https://hn.algolia.com/api/v1/search_by_date';
@@ -70,6 +80,14 @@ const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', '
 const HN_AVAILABILITY_LABELS = Object.freeze(['availability', 'available', 'start date', 'notice period']);
 const HN_IMMEDIATE_AVAILABILITY_PATTERN =
   /\b(?:available\s+(?:to\s+start\s+)?(?:immediately|now)|immediately\s+available|can\s+start\s+immediately)\b/i;
+const HN_LINK_PATTERN = /https?:\/\/[^\s<>"'\])]{4,2048}/g;
+// Document stores and the thread itself. Every one of these appears in "Who wants to be hired"
+// comments constantly and none of them is the person's own site, which is the only thing
+// `personal_url` is for -- a resume link belongs to `hn_ingests.resume_url` instead.
+const HN_NON_PERSONAL_HOSTS = new Set([
+  '1drv.ms', 'docs.google.com', 'drive.google.com', 'dropbox.com', 'news.ycombinator.com',
+  'onedrive.live.com', 'www.dropbox.com'
+]);
 const HN_NAME_LABELS = Object.freeze(['name']);
 const HN_MAPPED_LABELS = new Set([
   ...HN_LOCATION_LABELS,
@@ -103,6 +121,8 @@ const DRAFT_FIELD_LIMITS = Object.freeze({
   location: 300,
   workMode: 100,
   availability: 100,
+  hnUsername: 32,
+  url: 2_048,
   listItem: 200
 });
 const RATE_LIMITS = Object.freeze({
@@ -834,10 +854,76 @@ function validateCandidateSourceUrl(value) {
 
   const hostname = parsed.hostname.toLowerCase();
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash || parsed.search || parsed.port) return null;
-  if (isBlockedNetworkHost(hostname) || !LINKEDIN_PROFILE_HOSTS.has(hostname)) return null;
-  const pathMatch = parsed.pathname.match(/^\/in\/([A-Za-z0-9-]{3,100})\/?$/);
+  if (isBlockedNetworkHost(hostname) || !LINKEDIN_PROFILE_HOSTS.test(hostname)) return null;
+  const pathMatch = parsed.pathname.match(LINKEDIN_PROFILE_PATH);
   if (!pathMatch) return null;
   return `https://www.linkedin.com/in/${pathMatch[1]}`;
+}
+
+// Strips query and fragment where `validateCandidateSourceUrl` above rejects on them: that one
+// screens what a person typed into a form and a rejection reaches someone who can retype it, while
+// this one salvages what an extractor found in a comment, where nobody is listening. The two must
+// never diverge on what is *reachable* -- hence the shared `isBlockedNetworkHost`.
+function profileLinkUrl(value) {
+  if (typeof value !== 'string' || byteLength(value) > DRAFT_FIELD_LIMITS.url) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) return null;
+  if (isBlockedNetworkHost(parsed.hostname.toLowerCase())) return null;
+
+  parsed.search = '';
+  parsed.hash = '';
+  // The rest of the draft is redacted; a link is rejected instead, because replacing part of an
+  // href with `[redacted]` yields a broken link rather than a private one. Credentials, query and
+  // fragment are already gone above, so this is reached only by a path that spells out a contact
+  // detail -- `/contact/ada@example.com` and the like.
+  if (redactSensitiveText(safeDecodeUri(parsed.pathname)).detected) return null;
+  return byteLength(parsed.href) > DRAFT_FIELD_LIMITS.url ? null : parsed;
+}
+
+function safeDecodeUri(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function linkedinProfileUrl(value) {
+  const parsed = profileLinkUrl(value);
+  if (!parsed || !LINKEDIN_PROFILE_HOSTS.test(parsed.hostname.toLowerCase())) return null;
+  const pathMatch = parsed.pathname.match(LINKEDIN_PROFILE_PATH);
+  return pathMatch ? `https://www.linkedin.com/in/${pathMatch[1]}` : null;
+}
+
+function githubProfileUrl(value) {
+  const parsed = profileLinkUrl(value);
+  if (!parsed || parsed.hostname.toLowerCase() !== 'github.com') return null;
+  const pathMatch = parsed.pathname.match(GITHUB_PROFILE_PATH);
+  if (!pathMatch || GITHUB_RESERVED_LOGINS.has(pathMatch[1].toLowerCase())) return null;
+  return `https://github.com/${pathMatch[1]}`;
+}
+
+// Anything that is not one of the two known networks. Excluding them here keeps the three columns
+// disjoint: without it, a LinkedIn URL that fails the `/in/<slug>` shape -- a company page, a post,
+// a search -- would fall through and be stored as somebody's personal site.
+function personalProfileUrl(value) {
+  const parsed = profileLinkUrl(value);
+  if (!parsed) return null;
+  return isNetworkProfileHost(parsed.hostname.toLowerCase()) ? null : parsed.href;
+}
+
+// Every subdomain, not just the locale ones `LINKEDIN_PROFILE_HOSTS` accepts, because the question
+// here is the opposite one: not "is this a profile URL" but "is this someone's own site", and
+// `careers.linkedin.com` is not. `github.io` is deliberately absent -- a user page there is exactly
+// the personal site this column wants.
+function isNetworkProfileHost(hostname) {
+  return ['linkedin.com', 'github.com'].some((host) => hostname === host || hostname.endsWith(`.${host}`));
 }
 
 function isBlockedNetworkHost(hostname) {
@@ -884,6 +970,7 @@ async function updateReview(request, env, submissionId) {
   const updateResult = await env.DB.prepare(
     `UPDATE profile_revisions
         SET name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
+            hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
             universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
@@ -894,6 +981,10 @@ async function updateReview(request, env, submissionId) {
       draft.location,
       draft.workMode,
       draft.availability,
+      draft.hnUsername,
+      draft.linkedinUrl,
+      draft.githubUrl,
+      draft.personalUrl,
       JSON.stringify(draft.universities),
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
@@ -938,6 +1029,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
   const updateResult = await env.DB.prepare(
     `UPDATE profile_revisions
         SET status = 'published', name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
+            hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
             universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, published_at = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
@@ -948,6 +1040,10 @@ async function publishReview(env, submissionId, revision, draftValue) {
       approvedDraft.location,
       approvedDraft.workMode,
       approvedDraft.availability,
+      approvedDraft.hnUsername,
+      approvedDraft.linkedinUrl,
+      approvedDraft.githubUrl,
+      approvedDraft.personalUrl,
       JSON.stringify(approvedDraft.universities),
       JSON.stringify(approvedDraft.companies),
       JSON.stringify(approvedDraft.skills),
@@ -1004,6 +1100,7 @@ function reviewDecisionResponse(submissionId, revision, idempotent) {
 async function getReviewRevision(env, submissionId) {
   return env.DB.prepare(
     `SELECT id, status, name, role, summary, location, work_mode, availability,
+            hn_username, linkedin_url, github_url, personal_url,
             universities_json, companies_json, skills_json, date_ranges_json, updated_at, published_at
        FROM profile_revisions
       WHERE submission_id = ?`
@@ -1023,6 +1120,7 @@ async function listPublishedCandidates(request, env) {
   try {
     result = await env.DB.prepare(
       `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
+              r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
               r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
               i.hn_permalink, i.thread_month
          FROM profile_revisions r
@@ -1288,11 +1386,14 @@ async function processSubmissionMessage(message, env) {
       env.DB.prepare(
         `INSERT INTO profile_revisions (
            id, submission_id, status, name, role, summary, location, work_mode, availability,
+           hn_username, linkedin_url, github_url, personal_url,
            universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at
-         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(submission_id) DO UPDATE SET
            name = excluded.name, role = excluded.role, summary = excluded.summary,
            location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
+           hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
+           github_url = excluded.github_url, personal_url = excluded.personal_url,
            universities_json = excluded.universities_json, companies_json = excluded.companies_json,
            skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
            updated_at = excluded.updated_at`
@@ -1305,6 +1406,10 @@ async function processSubmissionMessage(message, env) {
         draft.location,
         draft.workMode,
         draft.availability,
+        draft.hnUsername,
+        draft.linkedinUrl,
+        draft.githubUrl,
+        draft.personalUrl,
         JSON.stringify(draft.universities),
         JSON.stringify(draft.companies),
         JSON.stringify(draft.skills),
@@ -1570,7 +1675,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
   }
 
-  const prepared = pushedDraft(entry?.draft);
+  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text) });
   if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
 
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
@@ -1603,10 +1708,24 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
 // The order is not interchangeable. validateDraft first, so an oversized field earns a real
 // rejection instead of a silent truncation; boundedDraft last, because redaction can lengthen text
 // and the value still has to fit the column.
-function pushedDraft(value) {
+// `hnUsername` is derived from the ingested comment and overwritten here, never accepted from the
+// caller, for the same reason `hn_permalink` is: it renders on a public card as this person's HN
+// identity, so anyone holding the ingest token could otherwise attribute a profile to someone else.
+//
+// The link fields only *default* to what the comment says, because a push must never be a downgrade.
+// An extractor written against the previous draft shape sends none of them, and a blank would
+// overwrite whatever the scheduled pass had already found -- the rank guard permits that, since it
+// only stops a *lower*-ranked extractor. An explicit empty string still means "this person has no
+// LinkedIn", so a caller that looked and found nothing can say so.
+function pushedDraft(value, derived) {
   if (value === null) return { retired: true, draft: null, redacted: false };
 
-  const validated = validateDraft(value);
+  const merged = { ...value, hnUsername: derived.hnUsername };
+  for (const field of ['linkedinUrl', 'githubUrl', 'personalUrl']) {
+    if (merged[field] === undefined || merged[field] === null) merged[field] = derived[field];
+  }
+
+  const validated = validateDraft(merged);
   if (!validated) return null;
 
   const sanitized = sanitizeCandidateDraft(validated);
@@ -1694,12 +1813,15 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
     env.DB.prepare(
       `INSERT INTO profile_revisions (
          id, submission_id, status, name, role, summary, location, work_mode, availability,
+         hn_username, linkedin_url, github_url, personal_url,
          universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at,
          extractor, extractor_rank
-       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(submission_id) DO UPDATE SET
          name = excluded.name, role = excluded.role, summary = excluded.summary,
          location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
+         hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
+         github_url = excluded.github_url, personal_url = excluded.personal_url,
          universities_json = excluded.universities_json, companies_json = excluded.companies_json,
          skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
          updated_at = excluded.updated_at,
@@ -1715,6 +1837,10 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
       draft.location,
       draft.workMode,
       draft.availability,
+      draft.hnUsername,
+      draft.linkedinUrl,
+      draft.githubUrl,
+      draft.personalUrl,
       JSON.stringify(draft.universities),
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
@@ -1852,11 +1978,39 @@ function extractHnProfile(record) {
     location: (location || HN_UNKNOWN).slice(0, 300),
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
+    hnUsername: record.author,
+    ...hnProfileLinks(record.text),
     universities: listFor(HN_UNIVERSITY_LABELS),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
+}
+
+// `decodeHnCommentText` has already unwrapped every anchor to its bare href, so the links a
+// candidate published are plain text here. First match per field wins: a comment that names two
+// GitHub accounts is naming a project alongside a profile, and the profile is written first.
+function hnProfileLinks(text) {
+  const links = { linkedinUrl: '', githubUrl: '', personalUrl: '' };
+
+  for (const match of String(text || '').matchAll(HN_LINK_PATTERN)) {
+    const candidate = match[0].replace(/[.,;:)\]]+$/, '');
+    links.linkedinUrl ||= linkedinProfileUrl(candidate) || '';
+    links.githubUrl ||= githubProfileUrl(candidate) || '';
+    if (!links.personalUrl && !HN_NON_PERSONAL_HOSTS.has(hostnameOf(candidate))) {
+      links.personalUrl = personalProfileUrl(candidate) || '';
+    }
+  }
+
+  return links;
+}
+
+function hostnameOf(value) {
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
 }
 
 function hnTitleFromOpeningLine(line) {
@@ -2052,6 +2206,15 @@ function validateDraft(value) {
     const items = value[key].map((item) => (typeof item === 'string' ? normalizeStoredText(item) : '')).filter(Boolean);
     return items.every((item) => item.length <= DRAFT_FIELD_LIMITS.listItem) ? unique(items) : null;
   };
+  // Absent is not invalid, for these fields only. Every draft below this one is rejected outright if
+  // any field comes back null, so a required new field would reject every push written against the
+  // previous contract -- including the external extractor's, which is the thing meant to fill them.
+  // A field that is *present* and unusable still fails, so a bad link is never quietly dropped.
+  const optional = (key, canonical) => {
+    const raw = value[key];
+    if (raw === undefined || raw === null || raw === '') return '';
+    return typeof raw === 'string' ? canonical(raw) : null;
+  };
   const draft = {
     name: text('name', DRAFT_FIELD_LIMITS.name),
     role: text('role', DRAFT_FIELD_LIMITS.role),
@@ -2059,6 +2222,10 @@ function validateDraft(value) {
     location: text('location', DRAFT_FIELD_LIMITS.location),
     workMode: text('workMode', DRAFT_FIELD_LIMITS.workMode),
     availability: text('availability', DRAFT_FIELD_LIMITS.availability),
+    hnUsername: optional('hnUsername', (raw) => hnAuthor(raw) || null),
+    linkedinUrl: optional('linkedinUrl', linkedinProfileUrl),
+    githubUrl: optional('githubUrl', githubProfileUrl),
+    personalUrl: optional('personalUrl', personalProfileUrl),
     universities: list('universities'),
     companies: list('companies'),
     skills: list('skills'),
@@ -2086,6 +2253,13 @@ function boundedDraft(draft) {
     location: normalizeStoredText(draft.location, DRAFT_FIELD_LIMITS.location),
     workMode: normalizeStoredText(draft.workMode, DRAFT_FIELD_LIMITS.workMode),
     availability: normalizeStoredText(draft.availability, DRAFT_FIELD_LIMITS.availability),
+    // Defaulted here rather than at each call site: this is the one point every draft passes
+    // through, including `extractHnProfile` and the plain-text submission parser, which build their
+    // objects by hand and would otherwise write `undefined` into the new columns.
+    hnUsername: hnAuthor(draft.hnUsername || ''),
+    linkedinUrl: linkedinProfileUrl(draft.linkedinUrl || '') || '',
+    githubUrl: githubProfileUrl(draft.githubUrl || '') || '',
+    personalUrl: personalProfileUrl(draft.personalUrl || '') || '',
     universities: boundedList(draft.universities),
     companies: boundedList(draft.companies),
     skills: boundedList(draft.skills),
@@ -2118,6 +2292,10 @@ function toPublicCandidate(row) {
     location: sanitized.location,
     mode: sanitized.workMode,
     availability: sanitized.availability,
+    hnUsername: sanitized.hnUsername,
+    linkedinUrl: sanitized.linkedinUrl,
+    githubUrl: sanitized.githubUrl,
+    personalUrl: sanitized.personalUrl,
     university: sanitized.universities[0] || HN_UNKNOWN,
     universities: sanitized.universities,
     companies: sanitized.companies,
@@ -2151,6 +2329,10 @@ function candidateDraftFromRow(row) {
     location: row.location,
     workMode: row.work_mode,
     availability: row.availability,
+    hnUsername: row.hn_username || '',
+    linkedinUrl: row.linkedin_url || '',
+    githubUrl: row.github_url || '',
+    personalUrl: row.personal_url || '',
     universities: parseList(row.universities_json),
     companies: parseList(row.companies_json),
     skills: parseList(row.skills_json),

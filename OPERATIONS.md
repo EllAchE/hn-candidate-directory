@@ -398,6 +398,37 @@ wrangler d1 execute hn-candidate-directory --remote --config wrangler.production
 - Removal is not feedback. The dialog points a candidate at the immediate self-serve removal instead,
   so a takedown never waits on someone reading this table.
 
+### Profile links and the HN handle
+
+`profile_revisions` carries `hn_username`, `linkedin_url`, `github_url` and `personal_url`. Migration
+`0006_profile_links.sql` must be applied **before** this code is deployed: the scheduled ingest writes
+all four columns, so a deploy that runs ahead of it breaks ordinary ingestion rather than just the new
+fields. It is additive (`ALTER TABLE ADD COLUMN`), so no table is rebuilt and no existing row moves:
+
+```bash
+wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
+```
+
+- `hn_username` is **derived, never accepted** — the Worker overwrites whatever a caller sends with the
+  comment's own author, for the same reason `hn_permalink` is derived from the item id. Otherwise
+  anyone holding `HN_INGEST_TOKEN` could attribute a profile to someone else's HN identity on a public
+  card. It also separates the handle from `name`, which until now held the handle whenever a comment
+  carried no labelled name line. The review form deliberately does not offer the field: a
+  self-submitted profile has no HN comment behind it, so a handle typed there would be an unverified
+  claim rendered exactly like an ingested one.
+- Links are stored **canonicalized**, not as written: https only, credentials and port rejected,
+  query and fragment dropped, LinkedIn folded to `https://www.linkedin.com/in/<slug>` and GitHub to
+  `https://github.com/<login>`. A query string on a profile link is tracking or a session, never part
+  of the destination, so removing it removes the surface rather than filtering it.
+- The three link columns are **disjoint by construction**: a LinkedIn or GitHub URL is refused for
+  `personal_url`, so a company page cannot end up presented as somebody's own website.
+- A URL whose *path* spells out a contact detail is **rejected, not redacted** — everywhere else the
+  draft is redacted, but `[redacted]` inside an `href` yields a broken link rather than a private one.
+- Omitting a link field in a push means "I did not look", and the Worker fills it from the links the
+  deterministic pass reads out of the comment. Sending `""` means "this person has no LinkedIn" and
+  clears it. Without that distinction an extractor written against the previous draft shape would
+  blank links on every profile it touched, because the rank guard only stops a *lower*-ranked writer.
+
 ### Sensitive-data exposure
 
 - Treat a review token, source text, resume content, secret, email, phone, or private status on a public response or in logs as an incident.
