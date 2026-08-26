@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import worker, {
   DETERMINISTIC_HN_EXTRACTOR,
+  HN_AVAILABILITIES,
   HN_EXTRACTION_VERSION,
+  HN_UNKNOWN,
+  HN_WORK_MODES,
   decodeHnCommentText,
   hnCommentHash,
   ingestHackerNews,
@@ -162,7 +165,7 @@ describe('deterministic Hacker News extraction', () => {
       name: 'adacandidate',
       location: 'Toronto, Canada',
       workMode: 'Remote',
-      availability: 'Immediate',
+      availability: 'Immediately',
       skills: ['Rust', 'Go', 'Kubernetes', 'PostgreSQL'],
       companies: ['Stripe', 'Example Systems'],
       universities: ['University of Waterloo'],
@@ -233,6 +236,108 @@ describe('deterministic Hacker News extraction', () => {
     expect(draft.summary).not.toContain('second.address@example.org');
     expect(draft.summary).not.toContain('415-555-0199');
     expect(draft.summary).not.toContain('415-555-0143');
+  });
+});
+
+describe('facet vocabularies', () => {
+  const ROLE_LINE = 'Staff infrastructure engineer, ten years on storage systems';
+
+  function facetComment(lines) {
+    return {
+      objectID: '44444601',
+      parent_id: 44444444,
+      author: 'facetcandidate',
+      created_at: '2026-08-03T16:20:00.000Z',
+      comment_text: ['Location: Toronto, Canada', ...lines, ROLE_LINE].join('<p>')
+    };
+  }
+
+  async function facetDraft(lines) {
+    return DETERMINISTIC_HN_EXTRACTOR.extract(await record(facetComment(lines)));
+  }
+
+  // Every distinct non-role `role` in a 200-row sample of the live directory, verbatim, with its
+  // count: 26 of the 131 populated roles were one of these. A bare label reaches here because the
+  // entry parser and the prose filter disagreed about whether a colon needs a space after it; a rule
+  // of dashes reaches here because the only previous test on an opening line was its length.
+  test.each([
+    ['Technologies:', 7],
+    ['---', 5],
+    ['Email:reachme@example.com', 3],
+    ['Summary:', 3],
+    ['Willing to relocate:Yes', 2],
+    ['=============================================', 1],
+    ['About:', 1],
+    ['Portfolio:', 1],
+    ['WILLING TO RELOCATE:No', 1],
+    ['_____________________________', 1]
+  ])('%p never becomes the role', async (line) => {
+    expect((await facetDraft([line])).role).toBe(ROLE_LINE);
+  });
+
+  test.each([
+    ['Yes', 'Remote'],
+    ['Remote only', 'Remote'],
+    ['remote (US timezones)', 'Remote'],
+    ['Hybrid, 2 days in office', 'Hybrid'],
+    ['Remote or hybrid', 'Hybrid'],
+    ['No', 'On-site'],
+    ['Onsite, Berlin', 'On-site'],
+    ['No remote', 'On-site'],
+    ['Not preferred', 'On-site'],
+    ['Onsite or remote', 'Flexible'],
+    ['Flexible', 'Flexible'],
+    ['n/a', HN_UNKNOWN],
+    ['Only within EU business hours', HN_UNKNOWN],
+    // Every distinct non-canonical `mode` in a 200-row sample of the live directory, verbatim. These
+    // were the filter options.
+    ['Happy to do either remote or hybrid', 'Hybrid'],
+    ['Hybrid or Remote', 'Hybrid'],
+    ['Remote/Hybrid/Onsite all OK', 'Flexible'],
+    ['Preferred, also open to in-person', 'Flexible'],
+    ['Maybe (English speaking countries)', HN_UNKNOWN]
+  ])('a stated work mode of %p normalizes to %p', async (stated, expected) => {
+    expect((await facetDraft([`Remote: ${stated}`])).workMode).toBe(expected);
+  });
+
+  test.each([
+    ['Immediately', 'Immediately'],
+    ['immediate - open to contract or full-time', 'Immediately'],
+    ['Immediately | Full-time or contract', 'Immediately'],
+    ['ASAP', 'Immediately'],
+    ['2 weeks notice', 'Notice period'],
+    ['Currently employed, 1 month notice', 'Notice period'],
+    ['September 2026', 'Future date'],
+    ['2026-10-01', 'Future date'],
+    ['End of September', 'Future date'],
+    ['Open to contract or full-time', HN_UNKNOWN],
+    ['Available for contract work', HN_UNKNOWN],
+    ['Not currently employed', HN_UNKNOWN],
+    ['I may be able to start soon', HN_UNKNOWN]
+  ])('a stated availability of %p normalizes to %p', async (stated, expected) => {
+    expect((await facetDraft([`Availability: ${stated}`])).availability).toBe(expected);
+  });
+
+  // The point of the two tables above is not the individual mappings but that nothing else can ever
+  // reach a facet: an unrecognized answer used to be stored verbatim, which is what turned one
+  // meaning into three filter options.
+  test('no comment can introduce a facet value outside the vocabulary', async () => {
+    const stated = [
+      'Yes, remote-first, but open to 2 days onsite in NYC for the right team',
+      'depends',
+      '???',
+      'ping me',
+      '2026',
+      'whenever'
+    ];
+    const drafts = await Promise.all(
+      stated.flatMap((value) => [facetDraft([`Remote: ${value}`]), facetDraft([`Availability: ${value}`])])
+    );
+
+    for (const draft of drafts) {
+      expect([...HN_WORK_MODES, HN_UNKNOWN]).toContain(draft.workMode);
+      expect([...HN_AVAILABILITIES, HN_UNKNOWN]).toContain(draft.availability);
+    }
   });
 });
 

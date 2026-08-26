@@ -506,6 +506,30 @@ describe('profile links and the HN handle', () => {
     // means "this person's own site".
     expect(revision.personal_url).toBe('https://ada.example/');
   });
+
+  // The push endpoint outranks the deterministic pass by design, so normalizing only that pass would
+  // hold the vocabulary exactly until the first backfill ran.
+  test('canonicalizes the facets a pushed draft states, rather than trusting them', async () => {
+    const env = configured();
+
+    await push(env, [
+      item(PROSE_COMMENT, { workMode: 'Remote-first, open to onsite in NYC', availability: 'immediate start' })
+    ]);
+
+    const revision = env.DB.revisions.get('hn-44444501');
+    expect(revision.work_mode).toBe('Flexible');
+    expect(revision.availability).toBe('Immediately');
+  });
+
+  test('drops a pushed facet it cannot place instead of publishing it as a filter option', async () => {
+    const env = configured();
+
+    await push(env, [item(PROSE_COMMENT, { workMode: 'ask me', availability: 'depends on the offer' })]);
+
+    const revision = env.DB.revisions.get('hn-44444501');
+    expect(revision.work_mode).toBe('Not specified');
+    expect(revision.availability).toBe('Not specified');
+  });
 });
 
 function configured() {
