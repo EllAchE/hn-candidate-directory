@@ -43,14 +43,19 @@ export function neutralize(value, cap = TEXT_CAP) {
     .slice(0, cap);
 }
 
-const BLOCKED_HOST = /^(localhost|.*\.local|.*\.internal|.*\.localhost|metadata\.google\.internal)$/i;
-const BLOCKED_V4 = /^(0|10|127)\./;
-const PRIVATE_V4 = [
-  /^169\.254\./,
-  /^192\.168\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./
-];
+const BLOCKED_HOST = /^(localhost|.*\.local|.*\.internal|.*\.localhost|metadata\.(google|aws)\.internal)$/i;
+
+// A resume is served from a hostname, never from a bare address, so every IP literal is
+// refused outright instead of range-checked. Enumerating private ranges is what let
+// `https://[::ffff:127.0.0.1]/` through -- loopback wearing an IPv6 costume, matching none of
+// `::1`, `fc00::/7`, or `fe80::/10`. Refusing the whole shape also makes this agree with the
+// Worker's `isBlockedNetworkHost`, which already blocks every dotted quad and every host
+// containing a colon; two screens in one repo disagreeing about what is reachable is the
+// condition under which the weaker one gets used by mistake.
+//
+// Decimal and hex forms (`2130706433`, `0x7f000001`, `127.1`) need no separate case: the URL
+// parser normalizes them to a dotted quad before this sees them.
+const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/;
 
 export function screenUrl(value) {
   let parsed;
@@ -65,8 +70,8 @@ export function screenUrl(value) {
 
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (BLOCKED_HOST.test(host)) return null;
-  if (BLOCKED_V4.test(host) || PRIVATE_V4.some((range) => range.test(host))) return null;
-  if (host === '::1' || /^f[cd]/i.test(host) || /^fe80:/i.test(host)) return null;
+  if (IPV4_LITERAL.test(host)) return null;
+  if (host.includes(':')) return null;
   return parsed.href;
 }
 

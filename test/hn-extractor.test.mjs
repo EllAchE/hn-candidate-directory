@@ -28,11 +28,25 @@ test('screenUrl rejects every SSRF and downgrade shape', () => {
     'https://build.internal/cv.pdf',
     'https://user:pass@example.com/cv.pdf',
     'file:///etc/passwd',
-    'not a url'
+    'not a url',
+    // Loopback in an IPv6 costume. Range enumeration missed this one: it is none of `::1`,
+    // `fc00::/7`, or `fe80::/10`, so it reached the fetcher until every literal was refused.
+    'https://[::ffff:127.0.0.1]/cv.pdf',
+    'https://[::1]/cv.pdf',
+    'https://[fd00::1]/cv.pdf',
+    // Normalized to a dotted quad by the URL parser before screening sees them.
+    'https://2130706433/cv.pdf',
+    'https://0x7f000001/cv.pdf',
+    'https://127.1/cv.pdf',
+    // A public literal is still a literal: no resume is served from one, and allowing the
+    // shape is what forces the fragile question of which addresses are private.
+    'https://8.8.8.8/cv.pdf',
+    'https://metadata.aws.internal/latest/meta-data/'
   ]) {
     assert.equal(screenUrl(blocked), null, blocked);
   }
   assert.equal(screenUrl('https://example.com/cv.pdf'), 'https://example.com/cv.pdf');
+  assert.equal(screenUrl('https://drive.google.com/file/d/abc/view'), 'https://drive.google.com/file/d/abc/view');
 });
 
 test('neutralize strips what a human spot-check would miss', () => {
