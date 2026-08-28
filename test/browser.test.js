@@ -188,7 +188,9 @@ test(
       expect(await textContent(cdp, 'label[for="search"]')).toBe('Search everything');
       expect(await attribute(cdp, '#search', 'placeholder')).toBe('Search all fields — name, role, location, school, company, skill…');
       expect(await attribute(cdp, '#search', 'aria-describedby')).toBe('search-hint');
-      expect(await textContent(cdp, '#search-hint')).toBe('One box, every field: name, role, location, university, companies, skills, and summary.');
+      expect(await textContent(cdp, '#search-hint')).toBe(
+        'One box, every field: name, HN handle, role, location, university, companies, skills, and summary.'
+      );
 
       const searchCases = [
         ['aDa rIVERA', ['Ada Rivera']],
@@ -680,6 +682,38 @@ test(
           });
         `
       }
+    );
+  },
+  30_000
+);
+
+test(
+  'a candidate whose comment never named them is headed by their handle, and is still findable by it',
+  async () => {
+    const NAMELESS = [
+      { ...PUBLIC_CANDIDATES[0], id: 'nameless-one', name: '', hnUsername: 'vladimirberman' },
+      { ...PUBLIC_CANDIDATES[1], id: 'nameless-two', name: '', hnUsername: '' }
+    ];
+    await withPage(
+      async (cdp) => {
+        const cardOf = (id) => `document.querySelector('[data-view="${id}"]').closest('.candidate-card')`;
+
+        // An empty heading is the failure this guards: the extractor stopped writing the author into
+        // `name`, and every one of those rows rendered a blank 16px span where the identity goes.
+        expect(await evaluate(cdp, `${cardOf('nameless-one')}.querySelector('.candidate-name').textContent`)).toBe('@vladimirberman');
+        // ...and the handle must not then appear twice, which is the same rule the named rows follow.
+        expect(await evaluate(cdp, `${cardOf('nameless-one')}.querySelector('.candidate-handle')`)).toBe(null);
+        expect(await evaluate(cdp, `${cardOf('nameless-two')}.querySelector('.candidate-name').textContent`)).toBe('Unnamed candidate');
+
+        await click(cdp, '[data-view="nameless-one"]');
+        expect(await textContent(cdp, '#dialog-content h2')).toBe('@vladimirberman');
+        await click(cdp, '#candidate-dialog [data-close-dialog]');
+
+        // Searching a handle worked only because the handle used to be stored as the name.
+        await setControl(cdp, 'search', 'vladimirBERMAN');
+        expect(await candidateNames(cdp)).toEqual(['@vladimirberman']);
+      },
+      { candidates: NAMELESS, ready: `document.querySelector('.candidate-name')?.textContent === '@vladimirberman'` }
     );
   },
   30_000
