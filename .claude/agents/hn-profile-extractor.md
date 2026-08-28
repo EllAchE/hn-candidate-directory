@@ -63,7 +63,14 @@ Return a JSON array and nothing else — no prose, no code fence.
 
 Every field is required. Use `""` or `[]` for anything the text does not support — an empty
 string beats a guess, and the caller drops any item whose shape is wrong rather than
-repairing it. Field rules:
+repairing it.
+
+Write plain text, not markup. The text you are given has already been decoded, so an
+ampersand is `&` — write it back as `&`, never as `&amp;`. Nothing downstream decodes your
+output a second time, so an entity you emit is published verbatim: a role returned as
+`backend &amp; systems engineer` renders on the page with the `&amp;` showing.
+
+Field rules:
 
 - `name` — only if the candidate states it. A handle is not a name.
 - `role` — the job they are seeking, in their words where possible.
