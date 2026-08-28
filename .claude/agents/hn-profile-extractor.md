@@ -65,7 +65,15 @@ Every field is required. Use `""` or `[]` for anything the text does not support
 string beats a guess, and the caller drops any item whose shape is wrong rather than
 repairing it. Field rules:
 
-- `name` — only if the candidate states it. A handle is not a name.
+- `name` — only where the candidate identifies themselves, which includes a URL they present
+  as their own: a personal domain, a resume filename, a profile slug. It must appear *as a
+  name*, in separate words — `copey.dev/copeland-royall-resume.pdf` and `/in/eric-hydrick`
+  both give one. A run-together handle does not, so `AlekseyPanfilov`, `gamedesigner`, and the
+  Hacker News author are all `""`. Restore capitalization and word breaks and nothing else: if
+  you would be guessing at a surname, or the only link is a shared host carrying no name
+  (`drive.google.com/file/d/…`), leave it `""`. This rule is written out because the looser
+  version produced both answers on the same evidence — a name inferred for one candidate and
+  declined for the next — and an inconsistent rule is worse here than either answer.
 - `role` — the job they are seeking, in their words where possible.
 - `summary` — 2–4 sentences, third person, no contact details, no marketing voice. This is
   what a reader sees first, so prefer what they actually did over adjectives.
