@@ -53,9 +53,11 @@ files: `batch-N.json`, which a model may see, and `batch-N.map.json`, which hold
 
 ## 3. Extract
 
-Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent holds no tool
-that reaches a shell, a file, or the network, so paste the batch's items into the prompt
-inline — it cannot read the file itself, and that is the point.
+Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent's only tool is
+`Glob`: it enumerates paths and cannot read file contents, write, execute, or reach the
+network. So paste the batch's items into the prompt inline — it cannot open the file itself,
+and that is the point. Never substitute another `subagent_type`, and never widen that agent's
+tools to make a step work; see `references/isolation.md` control 1.
 
 Frame each item with the batch's `delimiter`:
 
