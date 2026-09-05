@@ -7,9 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { resolveFetchTarget } from './hn-fetch-endpoint.mjs';
 import { RESUME_CAP, htmlToText, neutralize, screenUrl } from './hn-untrusted.mjs';
-
-const UNBLOCKER = process.env.UNBLOCKER_URL || 'http://localhost:7654';
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -48,14 +47,22 @@ function directDownload(url) {
   return url;
 }
 
+// Every failure is reported as a miss rather than thrown. An unreachable endpoint used to
+// reject out of the top-level await and take the whole run down with it, which is what made a
+// shim that was simply not running look like 18 unreadable resumes.
 async function fetchBody(url) {
-  const response = await fetch(`${UNBLOCKER}/fetch`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url, method: 'GET', format: 'raw' })
-  });
-  if (!response.ok) return null;
-  return response.text();
+  const { endpoint, headers } = resolveFetchTarget();
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url, method: 'GET', format: 'raw' })
+    });
+    if (!response.ok) return { text: null, reason: `fetch_failed_${response.status}` };
+    return { text: await response.text(), reason: null };
+  } catch {
+    return { text: null, reason: 'fetch_unreachable' };
+  }
 }
 
 // The unblocker hands binaries back as a data URI, and Drive labels everything
@@ -97,10 +104,10 @@ if (!chosen) miss('no_such_link');
 const screened = screenUrl(directDownload(chosen.url));
 if (!screened) miss('blocked_url', chosen.url);
 
-const body = await fetchBody(screened);
-if (body === null) miss('fetch_failed', screened);
+const fetched = await fetchBody(screened);
+if (fetched.text === null) miss(fetched.reason, screened);
 
-const { bytes } = decodeBody(body);
+const { bytes } = decodeBody(fetched.text);
 const magic = bytes.subarray(0, 5).toString('latin1');
 
 let text;
