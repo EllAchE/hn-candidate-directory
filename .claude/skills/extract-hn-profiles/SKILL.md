@@ -120,6 +120,30 @@ Outcomes worth surfacing rather than swallowing: `blocked_by_status` (a human ed
 profile), `skipped_suppressed` (removed on purpose — leave it), `invalid_draft` and
 `invalid_comment` (a harness bug, not a candidate problem).
 
+## Running step 3 elsewhere
+
+Extraction is the slow part and it is the only part that needs no credential, so it splits off
+cleanly onto another machine — the dev box, for a corpus-sized backfill:
+
+```bash
+# operator's machine: gate, prep, and ship the sealed batches only
+./scripts/extract-hn-profiles/hn-prepare-batch.mjs --pending <run>/pending.json --out <run> --batch 5
+tar czf batches.tgz $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
+# remote: one subagent per batch, four at a time
+seq 1 19 | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}
+# operator's machine again: assemble against the map, then push
+```
+
+What must not travel: `batch-N.map.json` and `HNCD_INGEST_TOKEN`. The remote holds sealed text
+and returns drafts keyed by nonce; identity is re-attached at home by a map that never left, and
+the push stays where the credential is. Keep the remote run directory outside any checkout —
+`[assets] directory = "."` in this repo means a data file at the root is served publicly.
+
+Two things that do not survive the move. `remaining` is only monotonic with a single writer, so
+parallel lanes must take disjoint batch ranges and the count is checked once at the end rather
+than per batch. And the pending endpoint has no cursor by design — a page is only released by
+pushing the previous one — so a remote run is bounded by one page until a push turns the crank.
+
 ## Credential
 
 `hncd-api.mjs` is the only script that touches the token, and it is never in a context with
