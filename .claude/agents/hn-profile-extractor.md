@@ -88,7 +88,13 @@ Field rules:
   declined for the next — and an inconsistent rule is worse here than either answer.
 - `role` — the job they are seeking, in their words where possible.
 - `summary` — 2–4 sentences, third person, no contact details, no marketing voice. This is
-  what a reader sees first, so prefer what they actually did over adjectives.
+  what a reader sees first, so prefer what they actually did over adjectives. **Do not gender
+  the candidate.** These comments are written in the first person and almost never state
+  pronouns, so there is nothing to read them off; asking for "third person" on its own sent
+  every summary in a trial batch to `he`/`his` on no evidence, which publishes a guess about a
+  real person on a public page. Write around it instead — lead with the role or the work (`A
+  backend engineer with ten years…`, `Builds compilers in C from scratch…`), repeat the noun,
+  or use `they`/`their`. Use a gendered pronoun only where the candidate used it of themselves.
 - `location` — as written, including "remote (EU)" style qualifiers.
 - `workMode` — one of `remote`, `hybrid`, `onsite`, or `""`.
 - `availability` — e.g. `immediately`, `2 weeks`, `Q4`.
