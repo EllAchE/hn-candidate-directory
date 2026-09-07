@@ -134,6 +134,26 @@ test('Codex extraction never installs malformed output', () => {
   }
 });
 
+test('Codex extraction rejects a delimiter embedded in a supplied link', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hncd-codex-test-'));
+  const batchPath = join(dir, 'batch-1.json');
+  const outPath = join(dir, 'drafts-1.json');
+  const batch = structuredClone(sealedBatch);
+  batch.items[0].links[0].url = `https://example.com/${batch.delimiter}`;
+  writeFileSync(batchPath, JSON.stringify(batch));
+
+  let spawned = false;
+  try {
+    assert.throws(
+      () => extractBatch({ batchPath, outPath, spawn: () => (spawned = true) }),
+      /contains its own delimiter/
+    );
+    assert.equal(spawned, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Codex result validation rejects a link index the wrapper did not supply', () => {
   assert.throws(
     () => validateResult(JSON.stringify([{ ...extractedProfile, resumeLinkIndex: 2 }]), sealedBatch),

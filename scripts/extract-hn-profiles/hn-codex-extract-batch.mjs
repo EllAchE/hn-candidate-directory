@@ -80,6 +80,7 @@ function readBatch(path) {
       if (link?.index !== offset + 1 || typeof link?.url !== 'string') {
         throw new Error(`${path} contains a malformed numbered link`);
       }
+      if (link.url.includes(batch.delimiter)) throw new Error(`${path} contains its own delimiter`);
     }
   }
   return batch;
