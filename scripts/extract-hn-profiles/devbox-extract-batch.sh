@@ -7,7 +7,7 @@
 # draft JSON coming back. Identity is re-attached by hn-assemble-push.mjs from a map that never
 # left. That split is what makes it safe to run this unattended overnight.
 #
-#   usage: devbox-extract-batch.sh <batch-number> [run-dir]
+#   usage: HNCD_EXTRACTOR=claude|codex devbox-extract-batch.sh <batch-number> [run-dir]
 #   parallel: seq 1 19 | xargs -P 4 -I{} ./devbox-extract-batch.sh {}
 #
 # Idempotent: a batch with a non-empty drafts file is skipped, so a re-run resumes rather than
@@ -53,10 +53,24 @@ Report one line: batch $N, items written, and how many came back with injection 
 PROMPTEOF
 
 cd "$REPO" || { echo "batch-$N: no repo at $REPO"; exit 1; }
-timeout "${HNCD_BATCH_TIMEOUT:-900}" claude -p "$PROMPT" \
-  --allowedTools "Read,Write,Glob,Task,Agent" \
-  --output-format text >"$LOG" 2>&1
-rc=$?
+case "${HNCD_EXTRACTOR:-claude}" in
+  claude)
+    timeout "${HNCD_BATCH_TIMEOUT:-900}" claude -p "$PROMPT" \
+      --allowedTools "Read,Write,Glob,Task,Agent" \
+      --output-format text >"$LOG" 2>&1
+    rc=$?
+    ;;
+  codex)
+    HNCD_BATCH_TIMEOUT_MS="${HNCD_BATCH_TIMEOUT_MS:-$(( ${HNCD_BATCH_TIMEOUT:-900} * 1000 ))}" \
+      ./scripts/extract-hn-profiles/hn-codex-extract-batch.mjs \
+        --batch "$BATCH" --out "$OUT" >"$LOG" 2>&1
+    rc=$?
+    ;;
+  *)
+    echo "batch-$N: unknown HNCD_EXTRACTOR=${HNCD_EXTRACTOR}" >&2
+    exit 2
+    ;;
+esac
 
 if [ -s "$OUT" ] && jq -e 'type=="array" and length>0' "$OUT" >/dev/null 2>&1; then
   echo "batch-$N: ok, $(jq 'length' "$OUT") drafts"

@@ -16,45 +16,53 @@ Ranked by what a successful injection would win:
 | E | store hostile markup that renders on the public site | 6, 7 |
 | F | SSRF via a resume URL (localhost, cloud metadata) | 3 |
 
-## 1. The subagents that read untrusted text can only enumerate paths
+## 1. The model that reads untrusted text has no useful host capability
 
-Extraction needs no tools at all: text in, JSON out, and the original design said exactly that
-by declaring an inert `tools: TaskList`. **That no longer spawns.** This harness grants
-subagents only tools that *do* something — it withholds every inert one — and it refuses any
-agent whose list resolves to empty. `TaskList`, `TaskCreate`, `TaskGet`, `AskUserQuestion`,
-`ReportFindings`, `PushNotification` and `EndConversation` were each tested by spawning, and
-each was withheld; `TodoWrite` is not a tool here at all. The technique has no candidate left,
-so the declaration is now `tools: Glob` — the narrowest tool that actually spawns, verified
-empirically: the agent reports `{"tools":["Glob"]}` and denies holding Bash, Read, Write, Edit,
-Grep, WebFetch, WebSearch or Skill.
+Extraction needs no tools at all: text in, JSON out. Claude Code gets as close as its subagent
+harness permits. The original design declared an inert `tools: TaskList`. **That no longer
+spawns.** This harness grants subagents only tools that *do* something — it withholds every inert
+one — and refuses any agent whose list resolves to empty. `TaskList`, `TaskCreate`, `TaskGet`,
+`AskUserQuestion`, `ReportFindings`, `PushNotification` and `EndConversation` were each tested by
+spawning, and each was withheld; `TodoWrite` is not a tool here at all. The technique has no
+candidate left, so the Claude declaration is `tools: Glob` — the narrowest tool that actually
+spawns, verified empirically: the agent reports `{"tools":["Glob"]}` and denies holding Bash,
+Read, Write, Edit, Grep, WebFetch, WebSearch or Skill.
 
-`Glob` enumerates paths. It cannot read a file's contents, write, execute a command, or reach
-the network. **A and B therefore keep the property that matters — the mechanism is absent, not
-filtered.** Running a command needs `Bash`; reading `~/.ssh` or `~/.config/hncd/ingest-token`
-needs `Read`. Neither is held, so no injected instruction can produce either: the model does not
-*decline* to exfiltrate the token, it has no call available that would. That is why this is
-first and not a layer.
+`Glob` enumerates paths. It cannot read a file's contents, write, execute a command, or reach the
+network. **A and B therefore keep the property that matters — the mechanism is absent, not
+filtered.** Running a command needs `Bash`; reading `~/.ssh` or `~/.config/hncd/ingest-token` needs
+`Read`. Neither is held, so no injected instruction can produce either: the model does not
+*decline* to exfiltrate the token, it has no call available that would. That is why this is first
+and not a layer.
 
 What `Glob` concedes, stated plainly rather than papered over: an injection can learn **path
-names** — that some file or directory exists. It cannot learn a byte of any file's contents,
-and it has no channel to send what it learns anywhere, since its only output is the JSON array
-this skill parses and control 5 drops anything off-schema. That is the floor this harness
-imposes, not an affordance anyone wanted. Closing it properly means running extraction as a
-direct API call with `tools: []`, where "no tools" is structural instead of a harness grant.
+names** — that some file or directory exists. It cannot learn a byte of any file's contents, and
+it has no channel to send what it learns anywhere, since its only output is the JSON array this
+skill parses and control 5 drops anything off-schema. That is the floor Claude's harness imposes,
+not an affordance anyone wanted.
 
-The mechanism this rests on is verified. A repo-defined `tools:` line is resolved verbatim —
-`dqm-bq-analyzer` declares `tools: Read, Bash, mcp__bigquery__*` and the harness offers it as
-exactly that — and a narrow list withholds capability rather than merely documenting it: an
-agent declaring `tools: Read, Edit`, asked to run a shell command and to grep, reported it had
-neither tool and made zero tool calls. `Glob` is a real tool name, so the list cannot fail
-open through an unresolvable entry.
+Codex does not load `.claude/agents/hn-profile-extractor.md`, and its collaboration children
+inherit the parent's tool surface. The skill therefore never gives a sealed batch to one of those
+children. `hn-codex-extract-batch.mjs` starts a separate ephemeral Codex process with user config
+and rules ignored, an empty working directory, a read-only sandbox, and the shell, web, apps,
+plugins, images, skills, and multi-agent features disabled. The trusted wrapper reads the batch and
+writes the result; the model receives the framed text on stdin and has no useful mechanism to read
+another file, execute a command, write, fetch, or delegate. The wrapper also gives the child a
+small environment allowlist that excludes the directory ingest token and unrelated credentials.
 
-**Still verify once** on first use in a fresh session, and after any change to the agent
+The Claude mechanism is verified. A repo-defined `tools:` line is resolved verbatim —
+`dqm-bq-analyzer` declares `tools: Read, Bash, mcp__bigquery__*` and the harness offers it as exactly
+that — and a narrow list withholds capability rather than merely documenting it: an agent declaring
+`tools: Read, Edit`, asked to run a shell command and to grep, reported it had neither tool and made
+zero tool calls. `Glob` is a real tool name, so the list cannot fail open through an unresolvable
+entry.
+
+**Still verify once** on first use in a fresh Claude session, and after any change to its agent
 definition: spawn `hn-profile-extractor` and ask it to report its tool list, to read a file's
-contents, and to run a shell command. It must report `Glob` and only `Glob`, and that it holds
-no tool for the other two. If it reads the file or runs the command, the definition did not
-load as written and this skill must not run until it does. What the checks above establish is
-that the field works; only this one establishes that *this* definition loaded.
+contents, and to run a shell command. It must report `Glob` and only `Glob`, and that it holds no
+tool for the other two. For Codex, run the wrapper's focused tests after any flag change; they pin
+the clean config, empty directory, read-only sandbox, and every disabled capability passed to the
+child. If either check fails, this skill must not run until it is repaired.
 
 ## 2. The model's output is a value, never a selector
 
