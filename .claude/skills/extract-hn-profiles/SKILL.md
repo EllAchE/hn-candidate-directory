@@ -38,6 +38,27 @@ Then establish there is work, before any other read:
 - `503 ingest_not_configured` — `HN_INGEST_TOKEN` is unset on the Worker. Stop.
 - `remaining: 0` — nothing to do. Say so and stop.
 
+`remaining` counts rows, not reachable work. Save the page and check how much of it can still
+be read:
+
+```bash
+./scripts/extract-hn-profiles/hncd-api.mjs pending --host https://<worker-host> > <run>/pending.json
+./scripts/extract-hn-profiles/hn-check-sources.mjs --pending <run>/pending.json
+```
+
+A comment its author has deleted is a permanent hole in the queue. Algolia stops serving it, so
+it can never be extracted; and `draft: null` cannot retire it either, because the push endpoint
+identifies an item by re-supplying its comment text and deletion is exactly the state where that
+text is gone. The row keeps its rank and comes back on the first page of every run. On
+2026-09-07 that was 28 of the first 100 pending rows against `remaining: 822`, so plan a page
+against `reachable`, not `remaining`, and expect the gap to widen as each run leaves its own
+deleted items behind.
+
+Clearing them is not this skill's call to make. Archiving the published profile through
+`POST /api/candidates/<id>/removal` works on the deployed Worker and needs no credential, but it
+unpublishes someone, and whether an author deleting their comment should mean that is a question
+for the operator.
+
 Run every script as `./scripts/extract-hn-profiles/...` from this repository's root.
 
 ## 2. Prepare sealed batches
@@ -119,6 +140,10 @@ and continuing wastes a full corpus run.
 Outcomes worth surfacing rather than swallowing: `blocked_by_status` (a human edited that
 profile), `skipped_suppressed` (removed on purpose — leave it), `invalid_draft` and
 `invalid_comment` (a harness bug, not a candidate problem).
+
+`retired` is narrower than it sounds: it bumps `extractor_rank` on the ingest row and writes no
+profile statement, so it takes the item out of the queue and leaves anything already published
+exactly where it is. Retiring is not unpublishing — that is the removal route.
 
 ## Running step 3 elsewhere
 
