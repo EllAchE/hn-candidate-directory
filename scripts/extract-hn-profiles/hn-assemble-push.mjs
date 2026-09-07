@@ -16,7 +16,9 @@ import { dirname, join } from 'node:path';
 const TEXT_LIMITS = { name: 200, role: 300, summary: 2_000, location: 300, workMode: 100, availability: 100 };
 const LIST_FIELDS = ['universities', 'companies', 'skills', 'dateRanges'];
 const LIST_ITEM_LIMIT = 200;
-const LIST_LIMIT = 50;
+// Mirrors DRAFT_FIELD_LIMITS.list in worker.js. The Worker still rejects anything above it, so this
+// side trims to the bound and never hands the push endpoint a list it will refuse.
+const LIST_LIMIT = 150;
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -32,7 +34,7 @@ function parseArgs(argv) {
 // safe when a general entity decode here would not be.
 const decodeAmp = (text) => text.replace(/&amp;/g, '&');
 
-function validateDraft(value) {
+function validateDraft(value, trimmed_lists) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const draft = {};
   for (const [field, limit] of Object.entries(TEXT_LIMITS)) {
@@ -44,10 +46,18 @@ function validateDraft(value) {
   }
   for (const field of LIST_FIELDS) {
     const list = value[field];
-    if (!Array.isArray(list) || list.length > LIST_LIMIT) return null;
+    if (!Array.isArray(list)) return null;
     const items = list.map((entry) => (typeof entry === 'string' ? decodeAmp(entry.trim()) : null));
     if (items.some((entry) => entry === null || entry.length > LIST_ITEM_LIMIT)) return null;
-    draft[field] = [...new Set(items.filter(Boolean))];
+    const deduped = [...new Set(items.filter(Boolean))];
+    // The one place this file trims rather than drops. Everything else here is malformed input,
+    // where a repair would invent data; an over-long list is well-formed and merely longer than the
+    // column bound, and rejecting it costs that person their name, role, summary and every other
+    // facet to save a tail of skills. Dedupe first so a repeated entry never spends a slot, then
+    // keep the head and report what went -- the count is in the run report, so it is a visible
+    // trim and not a silent one.
+    if (deduped.length > LIST_LIMIT) trimmed_lists.push({ field, kept: LIST_LIMIT, dropped: deduped.length - LIST_LIMIT });
+    draft[field] = deduped.slice(0, LIST_LIMIT);
   }
   return draft;
 }
@@ -66,6 +76,7 @@ const resumeDir = dirname(batchPath);
 
 const profiles = [];
 const rejected = [];
+const trimmed = [];
 const claimed = new Set();
 
 for (const entry of entries) {
@@ -83,11 +94,13 @@ for (const entry of entries) {
     continue;
   }
 
-  const draft = validateDraft(entry.draft);
+  const lists = [];
+  const draft = validateDraft(entry.draft, lists);
   if (!draft) {
     rejected.push({ nonce: id, reason: 'invalid_draft' });
     continue;
   }
+  for (const list of lists) trimmed.push({ nonce: id, ...list });
 
   const profile = { comment: identities[id], draft };
   const resumePath = join(resumeDir, `resume-${id}.json`);
@@ -107,7 +120,7 @@ if (profiles.length) {
 // The report prints on both paths: a batch where everything was rejected is the case an
 // operator most needs the reasons for, and exiting silently hides them.
 process.stdout.write(
-  `${JSON.stringify({ out: profiles.length ? args.out : null, profiles: profiles.length, rejected, skipped }, null, 2)}\n`
+  `${JSON.stringify({ out: profiles.length ? args.out : null, profiles: profiles.length, rejected, trimmed, skipped }, null, 2)}\n`
 );
 if (!profiles.length) {
   console.error(`no valid profiles in ${args.drafts}; nothing written`);

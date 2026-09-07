@@ -101,6 +101,25 @@ describe('pushing externally-extracted HN profiles', () => {
     expect(env.DB.hnIngests.size).toBe(0);
   });
 
+  // A resume lists far more skills than a comment does. The bound that used to sit here was 50,
+  // inherited from the self-serve submission validator, and it was rejecting whole resume-derived
+  // profiles over the tail of a skills list. It still rejects -- the endpoint takes untrusted
+  // payloads -- but above the length real resumes reach, not through it.
+  test('accepts a resume-length skills list and still rejects one past the bound', async () => {
+    const env = configured();
+    const skills = (count) => Array.from({ length: count }, (_, index) => `skill-${index}`);
+
+    const accepted = await push(env, [item(PROSE_COMMENT, { skills: skills(67) })], TOKEN);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).results[0].outcome).toBe('created');
+
+    const stored = [...env.DB.revisions.values()].at(-1);
+    expect(JSON.parse(stored.skills_json)).toHaveLength(67);
+
+    const overBound = await push(env, [item(PROSE_COMMENT, { skills: skills(151) })], TOKEN);
+    expect((await overBound.json()).results[0].outcome).toBe('invalid_draft');
+  });
+
   test('creates a profile for a comment the cron has never seen, and derives its permalink', async () => {
     const env = configured();
 

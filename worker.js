@@ -142,7 +142,13 @@ const DRAFT_FIELD_LIMITS = Object.freeze({
   availability: 100,
   hnUsername: 32,
   url: 2_048,
-  listItem: 200
+  listItem: 200,
+  // Sized for what a resume actually lists, not for what a form should accept. The 50 this replaces
+  // arrived with the first self-serve submission validator as a payload-abuse bound; it was never a
+  // claim about how many skills a person has, and once drafts started coming from resume text it
+  // began rejecting whole profiles over a tail of skills. Still a hard bound -- the submission
+  // endpoint is unauthenticated -- just one set above the real data instead of through it.
+  list: 150
 });
 const RATE_LIMITS = Object.freeze({
   submissionBurst: { limit: 10, windowSeconds: 60 },
@@ -2256,7 +2262,7 @@ function validateDraft(value) {
     return normalized.length <= maxLength ? normalized : null;
   };
   const list = (key) => {
-    if (!Array.isArray(value[key]) || value[key].length > 50) return null;
+    if (!Array.isArray(value[key]) || value[key].length > DRAFT_FIELD_LIMITS.list) return null;
     const items = value[key].map((item) => (typeof item === 'string' ? normalizeStoredText(item) : '')).filter(Boolean);
     return items.every((item) => item.length <= DRAFT_FIELD_LIMITS.listItem) ? unique(items) : null;
   };
@@ -2330,7 +2336,7 @@ function boundedDraft(draft) {
 }
 
 function boundedList(items) {
-  return unique(items.map((item) => normalizeStoredText(item, DRAFT_FIELD_LIMITS.listItem)).filter(Boolean)).slice(0, 50);
+  return unique(items.map((item) => normalizeStoredText(item, DRAFT_FIELD_LIMITS.listItem)).filter(Boolean)).slice(0, DRAFT_FIELD_LIMITS.list);
 }
 
 function toReviewDraft(row) {
