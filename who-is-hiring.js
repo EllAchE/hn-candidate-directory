@@ -98,8 +98,11 @@ function distinctFacetValues(key) {
   return new Set(candidates.flatMap((candidate) => facetValues(facet, candidate).map((value) => facetKeyFor(facet, value)))).size;
 }
 
+// `hnUsername` is listed explicitly because searching for a handle used to work only by accident:
+// the old extractor wrote the handle into `name`, so it landed in this haystack as a side effect.
+// Rows whose `name` is now correctly empty would otherwise stop matching their own author.
 function searchableText(candidate) {
-  return [candidate.name, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
+  return [candidate.name, candidate.hnUsername, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
     .filter(isProvided)
     .join(' ')
     .toLowerCase();
@@ -313,15 +316,29 @@ function card(candidate) {
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
-  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(candidate.name)}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
 }
 
-// Most rows still carry the handle as the name, because the extractor falls back to the comment's
-// author when nothing in it names a person. Printing `patio11 @patio11` reads as a bug rather than as
-// provenance, so the handle shows only where it says something the name does not.
+// An extractor that only accepts a name the comment actually states leaves `name` empty for most
+// rows, so the handle is the only identity left to head a card with. It is rendered as the heading
+// rather than stored back into `name`, which would undo the split `hn_username` exists for: what the
+// comment claimed and what we display are different questions, and only the first belongs in the
+// column. The `@` is what keeps a bare heading legible as a handle rather than as someone's name.
+function displayName(candidate) {
+  const name = String(candidate.name || '').trim();
+  if (name) return name;
+  const handle = String(candidate.hnUsername || '').trim();
+  return handle ? `@${handle}` : 'Unnamed candidate';
+}
+
+// Printing `patio11 @patio11` reads as a bug rather than as provenance, so the handle links only
+// where it says something the heading does not — which now covers both the legacy rows that stored
+// the handle as the name and the new ones where the heading *is* the handle.
 function handleLink(candidate) {
   const handle = String(candidate.hnUsername || '').trim();
-  if (!handle || handle.toLowerCase() === String(candidate.name || '').trim().toLowerCase()) return '';
+  if (!handle) return '';
+  if (displayName(candidate).toLowerCase() === `@${handle}`.toLowerCase()) return '';
+  if (handle.toLowerCase() === String(candidate.name || '').trim().toLowerCase()) return '';
   return `<a class="candidate-handle" href="https://news.ycombinator.com/user?id=${escapeHtml(encodeURIComponent(handle))}" target="_blank" rel="noopener noreferrer">@${escapeHtml(handle)}</a>`;
 }
 
@@ -450,7 +467,7 @@ document.addEventListener('click', (event) => {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
     const background = profileBackground(candidate);
     const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(candidate.name)}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(displayName(candidate))}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
@@ -802,7 +819,7 @@ function renderReviewDraft(draft) {
 function renderPublicationResult(result) {
   const candidate = result.candidate;
   const publishedAt = new Date(result.publishedAt).toLocaleString();
-  el('import-result').innerHTML = `${managementTokenPanel()}<div class="decision-result published"><span class="decision-icon">✓</span><div><div class="review-heading"><strong>Profile published</strong><span class="published-badge">Searchable</span></div><p><strong>${escapeHtml(candidate.name)}</strong> · ${escapeHtml(candidate.role)}</p><p>The exact revision you approved is now in public search. Published ${escapeHtml(publishedAt)}.</p><div class="decision-actions"><span class="review-save-state" id="review-save-state">You remain in control</span><button class="button button-danger" type="button" data-review-decision="refuse">Withdraw from directory</button></div></div></div>`;
+  el('import-result').innerHTML = `${managementTokenPanel()}<div class="decision-result published"><span class="decision-icon">✓</span><div><div class="review-heading"><strong>Profile published</strong><span class="published-badge">Searchable</span></div><p><strong>${escapeHtml(displayName(candidate))}</strong> · ${escapeHtml(candidate.role)}</p><p>The exact revision you approved is now in public search. Published ${escapeHtml(publishedAt)}.</p><div class="decision-actions"><span class="review-save-state" id="review-save-state">You remain in control</span><button class="button button-danger" type="button" data-review-decision="refuse">Withdraw from directory</button></div></div></div>`;
 }
 
 function renderRefusalResult(wasPublished) {
@@ -828,7 +845,7 @@ function refreshManagementCandidates(preferredCandidateId = '') {
   const select = el('request-candidate');
   if (!select) return;
   const selected = preferredCandidateId || select.value;
-  select.innerHTML = `<option value="">Choose your published profile</option>${candidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.name)} · ${escapeHtml(candidate.role)}</option>`).join('')}`;
+  select.innerHTML = `<option value="">Choose your published profile</option>${candidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(displayName(candidate))} · ${escapeHtml(candidate.role)}</option>`).join('')}`;
   if (candidates.some((candidate) => candidate.id === selected)) select.value = selected;
 }
 
