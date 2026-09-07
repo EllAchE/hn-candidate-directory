@@ -112,9 +112,14 @@ live (`GET /api/candidates`) and show the operator the change before pushing. Th
 ./scripts/extract-hn-profiles/hncd-api.mjs push --file /tmp/claude/hncd/<run>/push-N.json --host https://<worker-host>
 ```
 
-The response gives a per-item `outcome` and a new `remaining`. Report both. `remaining` must
-fall monotonically across batches; if it does not, stop — a push is being rejected silently
-and continuing wastes a full corpus run.
+The response gives a per-item `outcome` and a new count. Report both. That count must fall
+monotonically across batches; if it does not, stop — a push is being rejected silently and
+continuing wastes a full corpus run.
+
+Mind the field name: the pending endpoint calls that count `remaining` and the push response
+calls it `pending`. They are the same number from the same query, but a check written against
+the wrong one reads `undefined`, and `undefined` compares false against every threshold — so
+the monotonicity check passes silently for the entire run and tells you nothing.
 
 Outcomes worth surfacing rather than swallowing: `blocked_by_status` (a human edited that
 profile), `skipped_suppressed` (removed on purpose — leave it), `invalid_draft` and
