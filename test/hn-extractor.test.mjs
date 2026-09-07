@@ -3,7 +3,7 @@
 // character stripping, and nonce-keyed identity re-attachment.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,6 +153,30 @@ test('an over-limit field drops the item instead of being truncated', () => {
   assert.equal(report.rejected[0].reason, 'invalid_draft');
   assert.equal(report.out, null);
   assert.equal(status, 1);
+});
+
+test('an ampersand the model re-encoded is decoded, and only the ampersand', () => {
+  // htmlToText decodes on the way in, the model re-encodes in its own output, and nothing
+  // else decodes again — so without this the page shows a literal "&amp;". Left encoded:
+  // `&lt;`/`&gt;`, because decoding those is what would turn an escaped payload into markup.
+  const { report, out } = assembleFixture([
+    {
+      nonce: 'aaa',
+      draft: {
+        ...validDraft,
+        role: 'Backend &amp; systems engineer',
+        summary: 'Wrote &amp;lt;script&amp;gt; handling and R&amp;D tooling.',
+        skills: ['CI/CD &amp; release', 'A&amp;B testing']
+      }
+    }
+  ]);
+  assert.equal(report.profiles, 1);
+  const [profile] = JSON.parse(readFileSync(out, 'utf8')).profiles;
+  assert.equal(profile.draft.role, 'Backend & systems engineer');
+  assert.deepEqual(profile.draft.skills, ['CI/CD & release', 'A&B testing']);
+  // One pass, so the inner entity survives as inert text rather than becoming a tag.
+  assert.equal(profile.draft.summary, 'Wrote &lt;script&gt; handling and R&D tooling.');
+  assert.ok(!profile.draft.summary.includes('<script>'), 'a decode chain produced markup');
 });
 
 test('a missing field drops the item rather than defaulting', () => {
