@@ -59,17 +59,22 @@ gcloud compute scp --tunnel-through-iap --project="$PROJECT" --zone="$ZONE" \
   "$VM:/tmp/d-$PAGE.tgz" "$RUN/d.tgz" >/dev/null || exit 1
 tar xzf "$RUN/d.tgz" -C "$RUN" || exit 1
 
+# Screen before assembling, not after: a summary that genders a candidate the source never
+# gendered is dropped here, while the nonce still links it to its own text. Counting the leaks
+# after the push would only tell you which real people you had already published a guess about.
 for n in $(seq 1 "$nb"); do
   [ -s "$RUN/drafts-$n.json" ] || { echo "$PAGE: batch $n produced no drafts" >&2; continue; }
-  node "$HERE/hn-assemble-push.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" \
+  node "$HERE/hn-screen-pronouns.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" \
+    --out "$RUN/screened-$n.json" | jq -c --arg n "$n" '{batch:$n} + {dropped}' | grep -v '"dropped":\[\]' || true
+done
+screened=$(for n in $(seq 1 "$nb"); do [ -s "$RUN/screened-$n.json" ] && jq '[.[] | select(.draft.summary != null)] | length' "$RUN/screened-$n.json"; done | jq -s add)
+echo "$PAGE: summaries surviving the pronoun screen = ${screened:-0}"
+
+for n in $(seq 1 "$nb"); do
+  [ -s "$RUN/screened-$n.json" ] || continue
+  node "$HERE/hn-assemble-push.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/screened-$n.json" \
     --out "$RUN/push-$n.json" 2>/dev/null | jq -c '{p:.profiles, r:(.rejected|length), t:(.trimmed|length), s:(.skipped|length)}'
 done | jq -s -c '{assembled:([.[].p]|add), rejected:([.[].r]|add), trimmed:([.[].t]|add), skipped:([.[].s]|add)}'
-
-# The extractor was told not to gender a candidate it has no evidence about; a non-zero count
-# here means that rule stopped holding and the page should not be published as-is.
-leaks=$(jq -s -r '[.[].profiles[] | select(.draft!=null) | .draft.summary] | join(" ")' "$RUN"/push-*.json 2>/dev/null \
-  | { grep -ioE '\b(he|his|him|she|her|hers)\b' || true; } | wc -l | tr -d ' ')
-echo "$PAGE: gendered pronouns in summaries = $leaks"
 
 for n in $(seq 1 "$nb"); do
   [ -f "$RUN/push-$n.json" ] || continue
