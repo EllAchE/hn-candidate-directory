@@ -8,7 +8,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { resolveFetchTarget } from './hn-fetch-endpoint.mjs';
+import { needsOcr, renderStructured } from './hn-pdf-text.mjs';
 import { RESUME_CAP, htmlToText, neutralize, screenUrl } from './hn-untrusted.mjs';
+
+// A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of chrome,
+// and a scanned page renders to about as little. One threshold decides both "prefer pdftotext to
+// this markdown" and "call the whole document a miss".
+const MIN_USEFUL = 400;
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -77,13 +83,21 @@ function decodeBody(body) {
   };
 }
 
-function renderPdf(bytes, out) {
+// Structure first, characters second. `pdftotext` stays as the fallback for a checkout without
+// the native binding, and as the second opinion when the markdown comes back thin.
+async function renderPdf(bytes, out) {
+  const structured = await renderStructured(bytes);
+  if (structured.text && structured.text.length >= MIN_USEFUL) {
+    return { text: structured.text, source: 'markdown', structured };
+  }
+
   const pdfPath = join(out, 'resume.pdf');
   writeFileSync(pdfPath, bytes);
   try {
-    return execFileSync('pdftotext', ['-q', '-enc', 'UTF-8', pdfPath, '-'], { encoding: 'utf8', maxBuffer: 32 << 20 });
+    const text = execFileSync('pdftotext', ['-q', '-enc', 'UTF-8', pdfPath, '-'], { encoding: 'utf8', maxBuffer: 32 << 20 });
+    return { text, source: 'pdftotext', structured };
   } catch {
-    return null;
+    return { text: structured.text, source: structured.text ? 'markdown' : null, structured };
   }
 }
 
@@ -111,9 +125,17 @@ const { bytes } = decodeBody(fetched.text);
 const magic = bytes.subarray(0, 5).toString('latin1');
 
 let text;
+let documentType = null;
 if (magic.startsWith('%PDF-')) {
   mkdirSync(args.out, { recursive: true });
-  text = renderPdf(bytes, args.out);
+  const rendered = await renderPdf(bytes, args.out);
+  documentType = rendered.structured.documentType;
+  text = rendered.text;
+  // A document with no usable text layer will not read on a retry, so it gets its own reason
+  // rather than the `too_thin` a permission wall also produces.
+  if (needsOcr(documentType, rendered.structured.pagesNeedingOcr, rendered.structured.pageCount)) {
+    if (!text || text.length < MIN_USEFUL) miss('scanned_needs_ocr', screened);
+  }
   if (text === null) miss('pdftotext_unavailable_or_failed', screened);
 } else if (magic.startsWith('PK')) {
   miss('office_document_unsupported', screened);
@@ -124,14 +146,18 @@ if (magic.startsWith('%PDF-')) {
 const rendered = neutralize(text, RESUME_CAP);
 // A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of
 // chrome. Treat a thin body as a miss so comment-only extraction wins instead.
-if (rendered.length < 400) miss('too_thin', screened);
+if (rendered.length < MIN_USEFUL) miss('too_thin', screened);
 
 mkdirSync(args.out, { recursive: true });
 const textPath = join(args.out, `resume-${args.nonce}.txt`);
 writeFileSync(textPath, rendered);
 writeFileSync(
   join(args.out, `resume-${args.nonce}.json`),
-  JSON.stringify({ resumeUrl: chosen.url, resumeFetchedAt: new Date().toISOString(), chars: rendered.length }, null, 2)
+  JSON.stringify(
+    { resumeUrl: chosen.url, resumeFetchedAt: new Date().toISOString(), chars: rendered.length, documentType },
+    null,
+    2
+  )
 );
 
 process.stdout.write(`${JSON.stringify({ ok: true, url: chosen.url, path: textPath, chars: rendered.length })}\n`);

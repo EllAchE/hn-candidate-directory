@@ -1,6 +1,7 @@
 .*
 node_modules/**
 package.json
+bun.lock
 OPERATIONS.md
 scripts/**
 test/**

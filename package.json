@@ -7,5 +7,8 @@
     "check": "bun test && node --check worker.js && node --check who-is-hiring.js && node --check scripts/staging-smoke.js && node --check scripts/ingest-hn.js",
     "smoke:staging": "node scripts/staging-smoke.js",
     "preview:hn": "node scripts/ingest-hn.js"
+  },
+  "dependencies": {
+    "@firecrawl/pdf-inspector": "1.15.0"
   }
 }

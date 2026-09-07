@@ -1,0 +1,27 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "hn-candidate-directory",
+      "dependencies": {
+        "@firecrawl/pdf-inspector": "1.15.0",
+      },
+    },
+  },
+  "packages": {
+    "@firecrawl/pdf-inspector": ["@firecrawl/pdf-inspector@1.15.0", "", { "optionalDependencies": { "@firecrawl/pdf-inspector-darwin-arm64": "1.15.0", "@firecrawl/pdf-inspector-linux-arm64-gnu": "1.15.0", "@firecrawl/pdf-inspector-linux-arm64-musl": "1.15.0", "@firecrawl/pdf-inspector-linux-x64-gnu": "1.15.0", "@firecrawl/pdf-inspector-linux-x64-musl": "1.15.0", "@firecrawl/pdf-inspector-win32-x64-msvc": "1.15.0" }, "bin": { "pdf-inspector": "bin/pdf-inspector.mjs" } }, "sha512-Mcz3sxvlTrBR9PMRAR7NJqz5nhONJy/1KGIdabFzgpDdEXgPvc7Lb6yD9fgLkZ9CxTWSuino2QH5H+JlUR4d5A=="],
+
+    "@firecrawl/pdf-inspector-darwin-arm64": ["@firecrawl/pdf-inspector-darwin-arm64@1.15.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-G1E7rTvvQT/m6dfTgTr+0XaPCsqrabp2VVaE/dcfTFayufLv+VI0ciR2pC8zee2wp2bQ/mbMAZ6GEfEPqESxbQ=="],
+
+    "@firecrawl/pdf-inspector-linux-arm64-gnu": ["@firecrawl/pdf-inspector-linux-arm64-gnu@1.15.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-xLrPQFYkpG0ZaDiv6+d/ivfGek4aiTbqUcIEkYKC93Y0RjjP9MZY4M+CHzs486uLWVzMyOnxJ65kk76PaJpoEw=="],
+
+    "@firecrawl/pdf-inspector-linux-arm64-musl": ["@firecrawl/pdf-inspector-linux-arm64-musl@1.15.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-vDU10xoHcufB9+5vU2v+DWhT7D9BvCRrSFCIfV46jGGu1FI0j5FSV31Hy//zncoAWBsUDdTKTrFXDqxTLfcvzg=="],
+
+    "@firecrawl/pdf-inspector-linux-x64-gnu": ["@firecrawl/pdf-inspector-linux-x64-gnu@1.15.0", "", { "os": "linux", "cpu": "x64" }, "sha512-xe3wbk6U+EJw2bLSd+6o9usbAlVLUHOQBIAJi0rzjP6u2Tz+g0enpkxnOPDkCcWzY+Qiw4YR4N4UZaEsvlbWiw=="],
+
+    "@firecrawl/pdf-inspector-linux-x64-musl": ["@firecrawl/pdf-inspector-linux-x64-musl@1.15.0", "", { "os": "linux", "cpu": "x64" }, "sha512-Mni3UCqKmrH/wCKw0g8o+JusL0oX+AxOnBM5jLp3Y1tvU5xPytSH815PcFojcDBtJHkFzDmKsBnYaghPe2OXTw=="],
+
+    "@firecrawl/pdf-inspector-win32-x64-msvc": ["@firecrawl/pdf-inspector-win32-x64-msvc@1.15.0", "", { "os": "win32", "cpu": "x64" }, "sha512-EhQC7DdDTirpsjG8PvzLACyEze4Uxdkzrc1vQw0NyTqvejW6d3nFLFd6xu8l/44wiJW8Rez9J6K96ggdBtnXEw=="],
+  }
+}
