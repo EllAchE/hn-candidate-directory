@@ -23,7 +23,7 @@ const assemble = join(here, 'hn-assemble-push.mjs');
 
 const sealedBatch = {
   batch: 1,
-  delimiter: 'HNCD-A1B2C3D4E5F6',
+  delimiter: 'HNCD-FIXCE69751D',
   items: [
     {
       nonce: '0123456789abcdef01',
@@ -53,10 +53,10 @@ const extractedProfile = {
 
 test('Codex prompt seals every item and treats links as numbered values', () => {
   const prompt = renderPrompt(sealedBatch);
-  assert.match(prompt, /HNCD-A1B2C3D4E5F6\nnonce: 0123456789abcdef01/);
+  assert.match(prompt, /HNCD-FIXCE69751D\nnonce: 0123456789abcdef01/);
   assert.match(prompt, /links: 1\. https:\/\/example\.com\/resume\.pdf/);
   assert.match(prompt, /COMMENT:\nLOCATION: Remote/);
-  assert.equal(prompt.match(/HNCD-A1B2C3D4E5F6/g)?.length, 2);
+  assert.equal(prompt.match(/HNCD-FIXCE69751D/g)?.length, 2);
 });
 
 test('Codex invocation removes every useful host capability', () => {

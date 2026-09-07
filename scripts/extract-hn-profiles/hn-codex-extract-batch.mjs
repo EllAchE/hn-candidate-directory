@@ -60,7 +60,11 @@ function readBatch(path) {
   if (!batch.items.length || batch.items.length > MAX_BATCH_ITEMS) {
     throw new Error(`${path} must contain between 1 and ${MAX_BATCH_ITEMS} items`);
   }
-  if (!/^HNCD-[A-F0-9]{12}$/.test(batch.delimiter)) throw new Error(`${path} has an invalid delimiter`);
+  // Prepared batches normally use twelve hex digits. Repair runs may prefix that random
+  // suffix with an uppercase run marker (for example, `FIX`). Keep the framing shape strict
+  // while accepting those already-sealed batches; the per-item check below still rejects a
+  // delimiter that appears in attacker-controlled text.
+  if (!/^HNCD-[A-Z0-9]{8,64}$/.test(batch.delimiter)) throw new Error(`${path} has an invalid delimiter`);
 
   const nonces = new Set();
   for (const item of batch.items) {
