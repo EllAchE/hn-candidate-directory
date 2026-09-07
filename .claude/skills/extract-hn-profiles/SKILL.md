@@ -126,11 +126,20 @@ Extraction is the slow part and it is the only part that needs no credential, so
 cleanly onto another machine — the dev box, for a corpus-sized backfill:
 
 ```bash
+HNCD_HOST=https://<worker-host> ./scripts/extract-hn-profiles/devbox-run-page.sh <page-tag>
+```
+
+That runs one whole page: gate, prepare, ship the sealed batches, extract on the box, pull the
+drafts back, assemble against the map and push. It prints the assembled/rejected/trimmed counts,
+a count of gendered pronouns in the summaries, and the push tally. Run it once per page; the tag
+only has to be unique per run. The steps it wraps, if you need them by hand:
+
+```bash
 # operator's machine: gate, prep, and ship the sealed batches only
 ./scripts/extract-hn-profiles/hn-prepare-batch.mjs --pending <run>/pending.json --out <run> --batch 5
 tar czf batches.tgz $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
-# remote: one subagent per batch, four at a time
-seq 1 19 | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}
+# remote: one subagent per batch, four at a time, under tmux so it outlives the ssh channel
+tmux new-session -d -s hncd-<tag> 'seq 1 <n> | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}'
 # operator's machine again: assemble against the map, then push
 ```
 
@@ -138,6 +147,12 @@ What must not travel: `batch-N.map.json` and `HNCD_INGEST_TOKEN`. The remote hol
 and returns drafts keyed by nonce; identity is re-attached at home by a map that never left, and
 the push stays where the credential is. Keep the remote run directory outside any checkout —
 `[assets] directory = "."` in this repo means a data file at the root is served publicly.
+
+Run one page at a time and let the pool drain before starting another. Two `xargs` pools over the
+same run directory race on batch numbers — `devbox-extract-batch.sh` checks for an existing draft
+only at start, so both lanes extract the same items and throughput halves for no gain. Watch the
+pool, not the draft count: four lanes between batches look identical to a dead pool in `ps`, and
+the count alone will not tell you which you have.
 
 Two things that do not survive the move. `remaining` is only monotonic with a single writer, so
 parallel lanes must take disjoint batch ranges and the count is checked once at the end rather
