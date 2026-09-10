@@ -382,7 +382,9 @@ describe('pushing externally-extracted HN profiles', () => {
     await push(env, [{ ...item(PROSE_COMMENT, { companies: ['Stripe'] }), resumeUrl: 'https://example.com/ada.pdf' }]);
 
     const response = await worker.fetch(apiRequest('/api/candidates'), env);
-    const payload = JSON.stringify(await response.json());
+    const body = await response.json();
+    expect(body.candidates[0].processed).toBe(true);
+    const payload = JSON.stringify(body);
     for (const leak of ['resume_url', 'resumeUrl', 'extractor', 'extractor_rank', 'ada.pdf']) {
       expect(payload).not.toContain(leak);
     }
