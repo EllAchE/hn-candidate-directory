@@ -619,7 +619,10 @@ test(
       // Evelyn's source URL is a javascript: scheme, so the disclosure must still name the source
       // without ever becoming a link -- the removal offer and the hostile href are independent.
       await click(cdp, '[data-view="evelyn-stone"]');
-      expect(await textContent(cdp, '#dialog-content [data-remove-for]')).toBe('This is me — remove my listing');
+      expect(await textContent(cdp, '#dialog-content [data-remove-for]')).toBe('Remove my details');
+      expect(await evaluate(cdp, `document.querySelector('#dialog-content [data-remove-for]').tagName`)).toBe('A');
+      expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content [data-remove-for]')).fontSize`)).toBe('9px');
+      expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content .profile-removal')).textAlign`)).toBe('right');
       expect(await textContent(cdp, '#dialog-content .privacy-note')).toBe(
         'This profile was compiled from a public HN · July 2026. Removal takes effect immediately and the comment will not be collected again.'
       );

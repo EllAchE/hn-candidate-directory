@@ -467,7 +467,10 @@ document.addEventListener('click', (event) => {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
     const background = profileBackground(candidate);
     const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(displayName(candidate))}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    const controls = candidate.sourceUrl
+      ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p><p class="profile-removal"><a href="#" data-remove-for="${escapeHtml(candidate.id)}">Remove my details</a></p>`
+      : `<div class="dialog-actions"><button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button></div>`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(displayName(candidate))}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
@@ -660,16 +663,17 @@ loadDirectoryTotals();
 loadPublishedCandidates();
 
 // Two-step rather than window.confirm so the confirmation renders inside the open dialog.
-async function handleRemovalClick(button) {
-  const candidateId = button.dataset.removeFor;
-  if (button.dataset.confirming !== 'true') {
-    button.dataset.confirming = 'true';
-    button.textContent = 'Confirm removal';
+async function handleRemovalClick(control) {
+  if (control.getAttribute('aria-disabled') === 'true') return;
+  const candidateId = control.dataset.removeFor;
+  if (control.dataset.confirming !== 'true') {
+    control.dataset.confirming = 'true';
+    control.textContent = 'Confirm removal';
     return;
   }
 
-  button.disabled = true;
-  button.textContent = 'Removing…';
+  control.setAttribute('aria-disabled', 'true');
+  control.textContent = 'Removing…';
   try {
     const response = await fetch(apiPath(`/api/candidates/${encodeURIComponent(candidateId)}/removal`), { method: 'POST' });
     if (!response.ok) throw new Error('removal_failed');
@@ -678,8 +682,8 @@ async function handleRemovalClick(button) {
     render();
     closeDialogs();
   } catch {
-    button.disabled = false;
-    button.textContent = 'Removal failed — try again';
+    control.removeAttribute('aria-disabled');
+    control.textContent = 'Removal failed — try again';
   }
 }
 
