@@ -954,7 +954,21 @@ describe('directory summary', () => {
 
     const stats = await worker.fetch(apiRequest('/api/candidates/stats'), env);
     expect(stats.status).toBe(200);
-    expect(await stats.json()).toEqual({ candidates: total, locations: 1, universities: 0 });
+    expect(await stats.json()).toEqual({
+      candidates: total,
+      processed: total,
+      locations: 1,
+      universities: 0,
+      facets: {
+        processed: total,
+        availability: total,
+        mode: total,
+        location: total,
+        university: 0,
+        company: 0,
+        skill: 0
+      }
+    });
   });
 
   test('groups summary values exactly as the browser groups its filters', async () => {
@@ -973,7 +987,13 @@ describe('directory summary', () => {
     seedPublishedCandidate(env, 6, { universities_json: JSON.stringify(['mit', 'Stanford University']) });
 
     const stats = await worker.fetch(apiRequest('/api/candidates/stats'), env);
-    expect(await stats.json()).toEqual({ candidates: 7, locations: 3, universities: 2 });
+    expect(await stats.json()).toEqual({
+      candidates: 7,
+      processed: 7,
+      locations: 3,
+      universities: 2,
+      facets: { processed: 7, availability: 7, mode: 7, location: 6, university: 2, company: 0, skill: 0 }
+    });
   });
 
   test('rejects a non-GET summary and reports an unconfigured service', async () => {

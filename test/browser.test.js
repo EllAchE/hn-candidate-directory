@@ -20,6 +20,7 @@ const HN_SHAPED_CANDIDATES = [
     companies: [],
     skills: ['Rust', 'Go'],
     summary: 'Ships small well-scoped backend work.',
+    processed: true,
     source: 'HN · August 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=49156682',
     posted: 1,
@@ -36,6 +37,7 @@ const HN_SHAPED_CANDIDATES = [
     companies: [],
     skills: ['Python', 'FastAPI'],
     summary: 'Two years building retrieval systems.',
+    processed: false,
     source: 'HN · August 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=49156683',
     posted: 2,
@@ -55,6 +57,7 @@ const PUBLIC_CANDIDATES = [
     companies: ['Google'],
     skills: ['Rust', 'Kubernetes', 'Go'],
     summary: 'Builds reliable storage systems for high-throughput products.',
+    processed: true,
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601001',
     posted: 4,
@@ -71,6 +74,7 @@ const PUBLIC_CANDIDATES = [
     companies: ['Microsoft'],
     skills: ['Python', 'PyTorch', 'Experimentation'],
     summary: 'Evaluates trustworthy climate models with product and research teams.',
+    processed: true,
     source: 'HN · July 2026',
     sourceUrl: 'http://news.ycombinator.com/item?id=44601002',
     posted: 1,
@@ -87,6 +91,7 @@ const PUBLIC_CANDIDATES = [
     companies: ['Meta'],
     skills: ['React', 'Design systems', 'Accessibility'],
     summary: 'Leads accessible platform migrations and web performance programs.',
+    processed: true,
     source: 'HN · June 2026',
     posted: 9,
     publishedAt: '2026-07-20T12:00:00.000Z'
@@ -102,6 +107,7 @@ const PUBLIC_CANDIDATES = [
     companies: ['Stripe'],
     skills: ['Rust', 'PostgreSQL', 'SaaS'],
     summary: 'Scales payment systems for async software teams.',
+    processed: true,
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601004',
     posted: 2,
@@ -118,6 +124,7 @@ const PUBLIC_CANDIDATES = [
     companies: ['Basecamp'],
     skills: ['Go', 'Security', 'Cloud'],
     summary: 'Builds practical fintech security controls for early-stage teams.',
+    processed: false,
     source: 'HN · July 2026',
     sourceUrl: 'javascript:alert(document.domain)',
     posted: 7,
@@ -134,6 +141,7 @@ const PUBLIC_CANDIDATES = [
     companies: [],
     skills: ['TypeScript', 'Product', 'Node.js'],
     summary: 'Ships education products from customer discovery through launch.',
+    processed: false,
     source: 'HN · July 2026',
     sourceUrl: 'https://news.ycombinator.com/item?id=44601006&x="><script>alert(1)</script>',
     posted: 3,
@@ -183,7 +191,16 @@ test(
     await withPage(async (cdp) => {
       expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
       expect(await textContent(cdp, '#candidate-count')).toBe('6');
+      expect(await textContent(cdp, '#processed-count')).toBe('4');
       expect(await textContent(cdp, '#result-count')).toBe('6');
+      expect(await evaluate(cdp, `[...document.querySelectorAll('.candidate-card .processing-status')].map((status) => status.textContent)`)).toEqual([
+        'Processed',
+        'Processed',
+        'Processed',
+        'Processed',
+        'Not processed',
+        'Not processed'
+      ]);
 
       expect(await textContent(cdp, 'label[for="search"]')).toBe('Search everything');
       expect(await attribute(cdp, '#search', 'placeholder')).toBe('Search all fields — name, role, location, school, company, skill…');
@@ -267,7 +284,7 @@ test(
       await clearFilters(cdp);
       expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
       expect(await visible(cdp, '#empty-state')).toBe(false);
-      expect(await filterState(cdp)).toEqual({ search: '', availability: [], mode: [], location: [], university: [], company: [], skill: [] });
+      expect(await filterState(cdp)).toEqual({ search: '', processed: [], availability: [], mode: [], location: [], university: [], company: [], skill: [] });
     });
   },
   30_000
@@ -277,6 +294,10 @@ test(
   'facet options are derived from the loaded candidates and drive an accessible combobox',
   async () => {
     await withPage(async (cdp) => {
+      expect(await facetOptions(cdp, 'processed')).toEqual([
+        { label: 'Processed', count: 4, selected: false },
+        { label: 'Not processed', count: 2, selected: false }
+      ]);
       expect(await facetOptions(cdp, 'availability')).toEqual([
         { label: '1 month', count: 2, selected: false },
         { label: '3 months', count: 2, selected: false },
@@ -306,11 +327,19 @@ test(
         { label: 'Remote · LATAM', count: 1, selected: false },
         { label: 'Toronto, Canada', count: 1, selected: false }
       ]);
+      expect(await textContent(cdp, '#facet-processed-total')).toBe('6 of 6');
+      expect(await textContent(cdp, '#facet-university-total')).toBe('6 of 6');
+      expect(await textContent(cdp, '#facet-company-total')).toBe('5 of 6');
+
+      await selectFacetOption(cdp, 'processed', 'Not processed');
+      expect(await candidateNames(cdp)).toEqual(['Evelyn Stone', 'Fatima Noor']);
+      await clearFilters(cdp);
 
       const everyLabel = (await Promise.all(['availability', 'mode', 'location', 'university', 'company', 'skill'].map((facet) => facetOptions(cdp, facet)))).flat().map(({ label }) => label);
       for (const retired of RETIRED_HARDCODED_OPTIONS) expect(everyLabel).not.toContain(retired);
 
       await selectFacetOption(cdp, 'mode', 'Remote');
+      expect(await textContent(cdp, '#facet-university-total')).toBe('6 of 6');
       expect(await facetOptions(cdp, 'university')).toEqual([
         { label: 'University of Waterloo', count: 2, selected: false },
         { label: 'Carnegie Mellon University', count: 1, selected: false }
@@ -497,6 +526,7 @@ test(
 
       expect(await evaluate(cdp, `[...document.querySelectorAll('.stats div:not([hidden])')].map((stat) => [stat.querySelector('strong').textContent, stat.querySelector('span').textContent])`)).toEqual([
         ['6', 'candidate profiles'],
+        ['4', 'profiles processed'],
         ['4', 'locations represented'],
         ['4', 'universities represented']
       ]);
@@ -565,6 +595,7 @@ test(
           )
         ).toEqual([
           ['2', 'candidate profiles'],
+          ['1', 'profiles processed'],
           ['2', 'locations represented']
         ]);
 
@@ -653,8 +684,10 @@ test(
       async (cdp) => {
         // The listing is still in flight here, so these totals can only have come from the summary endpoint.
         expect(await evaluate(cdp, `document.querySelectorAll('.candidate-name').length`)).toBe(0);
+        expect(await textContent(cdp, '#processed-count')).toBe('917');
         expect(await textContent(cdp, '#location-count')).toBe('87');
         expect(await textContent(cdp, '#university-count')).toBe('42');
+        expect(await textContent(cdp, '#facet-university-total')).toBe('126 of 1,204');
 
         await waitFor(cdp, `document.getElementById('candidate-count').textContent === '6'`);
         expect(await candidateNames(cdp)).toEqual(EXPECTED_DEFAULT_NAMES);
@@ -667,7 +700,16 @@ test(
       },
       {
         motion: true,
-        fixture: { stats: { candidates: 1204, locations: 87, universities: 42 }, listingDelayMs: 2500 },
+        fixture: {
+          stats: {
+            candidates: 1204,
+            processed: 917,
+            locations: 87,
+            universities: 42,
+            facets: { processed: 1204, availability: 804, mode: 1160, location: 1102, university: 126, company: 411, skill: 1178 }
+          },
+          listingDelayMs: 2500
+        },
         ready: `document.getElementById('candidate-count').textContent === '1,204'`,
         onNewDocument: `
           window.__countSamples = [];
@@ -1244,6 +1286,7 @@ async function filterState(cdp) {
       const selected = (facet) => [...document.querySelectorAll('#facet-' + facet + '-selected [data-facet-remove], #facet-' + facet + '-options [aria-pressed="true"]')].map((pill) => pill.dataset.value);
       return {
         search: document.getElementById('search').value,
+        processed: selected('processed'),
         availability: selected('availability'),
         mode: selected('mode'),
         location: selected('location'),

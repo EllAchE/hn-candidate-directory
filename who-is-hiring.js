@@ -8,6 +8,7 @@ const el = (id) => document.getElementById(id);
 const UNKNOWN_VALUE = 'not specified';
 
 const FACETS = [
+  { key: 'processed', label: 'Processing status', kind: 'toggle', values: (candidate) => [processingLabel(candidate)] },
   { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
   { key: 'mode', label: 'Work mode', kind: 'toggle', values: (candidate) => [candidate.mode] },
   { key: 'location', label: 'Location', kind: 'combobox', placeholder: 'Type a city, region, or “remote”', values: (candidate) => [candidate.location] },
@@ -17,6 +18,7 @@ const FACETS = [
 ];
 const STAT_TILES = [
   { id: 'candidate-count', key: 'candidates', count: () => candidates.length },
+  { id: 'processed-count', key: 'processed', count: () => candidates.filter(isProcessed).length, hideAtZero: false },
   { id: 'location-count', key: 'locations', count: () => distinctFacetValues('location') },
   { id: 'university-count', key: 'universities', count: () => distinctFacetValues('university') }
 ];
@@ -40,8 +42,9 @@ function render() {
   syncFilterDrawer();
 }
 
-// A tile reading zero states nothing about the directory; it reports a field the cohort was never
-// asked for. Hidden at zero for the same reason the matching facet is withheld.
+// A zero location or university total only says that the cohort was never asked for that field, so
+// those tiles stay hidden with their matching facets. Processing is the exception: zero processed
+// profiles is useful audit information and must remain visible.
 //
 // The server's summary covers the whole cohort, so it is what a partly-paginated listing shows;
 // once every page has arrived the browser's own count is authoritative and takes over. Until one of
@@ -54,7 +57,7 @@ function renderStats() {
     const node = el(tile.id);
     if (!node) return;
     const count = totals[tile.key];
-    if (node.parentElement) node.parentElement.hidden = count === 0;
+    if (node.parentElement) node.parentElement.hidden = tile.hideAtZero !== false && count === 0;
     animateCount(node, count);
   });
 }
@@ -137,6 +140,28 @@ function facetHasData(facet) {
   return candidates.some((candidate) => facetValues(facet, candidate).length > 0);
 }
 
+function isProcessed(candidate) {
+  return candidate.processed === true;
+}
+
+function processingLabel(candidate) {
+  return isProcessed(candidate) ? 'Processed' : 'Not processed';
+}
+
+function facetCoverage(facet) {
+  return candidates.filter((candidate) => facetValues(facet, candidate).length > 0).length;
+}
+
+function renderFacetTotal(facet) {
+  const node = el(`facet-${facet.key}-total`);
+  if (!node) return;
+  const completeCoverage = facetCoverage(facet);
+  const coverage = listingComplete ? completeCoverage : directoryTotals?.facets?.[facet.key] ?? completeCoverage;
+  const total = listingComplete ? candidates.length : directoryTotals?.candidates ?? candidates.length;
+  node.textContent = total ? `${coverage.toLocaleString()} of ${total.toLocaleString()}` : '—';
+  node.title = total ? `${coverage.toLocaleString()} of ${total.toLocaleString()} profiles have data for this filter` : '';
+}
+
 function facetKeyFor(facet, value) {
   const grouped = facet.key === 'location' ? value.replace(/[·|/–—]+/g, ',') : value;
   return grouped.toLowerCase().replace(/\s*,\s*/g, ', ').replace(/\s+/g, ' ').replace(/[.,]+$/, '').trim();
@@ -177,6 +202,7 @@ function renderFacet(facet, query) {
   // holding a selection always stays, so a filter can never become unreachable to clear.
   const container = el(`facet-${facet.key}`);
   if (container) container.hidden = !facetHasData(facet) && selected.size === 0;
+  renderFacetTotal(facet);
 
   if (facet.kind === 'toggle') {
     el(`facet-${facet.key}-options`).innerHTML = options.map((option) => togglePill(facet, option, selected.has(option.key))).join('');
@@ -232,10 +258,11 @@ function activeChip(facet, key) {
 function buildFacets() {
   el('filters-body').innerHTML = FACETS.map((facet) => {
     const labelId = `facet-${facet.key}-label`;
+    const label = `<span>${escapeHtml(facet.label)}</span><span class="facet-total" id="facet-${facet.key}-total">—</span>`;
     if (facet.kind === 'toggle') {
-      return `<div class="facet" id="facet-${facet.key}"><div class="field-label" id="${labelId}">${escapeHtml(facet.label)}</div><div class="pill-row" role="group" aria-labelledby="${labelId}" id="facet-${facet.key}-options"></div></div>`;
+      return `<div class="facet" id="facet-${facet.key}"><div class="field-label" id="${labelId}">${label}</div><div class="pill-row" role="group" aria-labelledby="${labelId}" id="facet-${facet.key}-options"></div></div>`;
     }
-    return `<div class="facet" id="facet-${facet.key}"><label class="field-label" id="${labelId}" for="facet-${facet.key}-input">${escapeHtml(facet.label)}</label><div class="combobox"><input class="combo-input" id="facet-${facet.key}-input" data-combo="${facet.key}" type="text" role="combobox" aria-expanded="false" aria-controls="facet-${facet.key}-listbox" aria-haspopup="listbox" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(facet.placeholder)}" /><button class="combo-toggle" type="button" tabindex="-1" data-combo-toggle="${facet.key}" aria-label="Show all ${escapeHtml(facet.label.toLowerCase())} options">▾</button><ul class="combo-list" id="facet-${facet.key}-listbox" role="listbox" aria-multiselectable="true" aria-labelledby="${labelId}" hidden></ul></div><div class="pill-row" id="facet-${facet.key}-selected"></div></div>`;
+    return `<div class="facet" id="facet-${facet.key}"><label class="field-label" id="${labelId}" for="facet-${facet.key}-input">${label}</label><div class="combobox"><input class="combo-input" id="facet-${facet.key}-input" data-combo="${facet.key}" type="text" role="combobox" aria-expanded="false" aria-controls="facet-${facet.key}-listbox" aria-haspopup="listbox" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(facet.placeholder)}" /><button class="combo-toggle" type="button" tabindex="-1" data-combo-toggle="${facet.key}" aria-label="Show all ${escapeHtml(facet.label.toLowerCase())} options">▾</button><ul class="combo-list" id="facet-${facet.key}-listbox" role="listbox" aria-multiselectable="true" aria-labelledby="${labelId}" hidden></ul></div><div class="pill-row" id="facet-${facet.key}-selected"></div></div>`;
   }).join('');
 }
 
@@ -307,6 +334,7 @@ function card(candidate) {
     ? `<span class="chip chip-more" title="${escapeHtml(overflowSkills.join(', '))}">+${overflowSkills.length}</span>`
     : '';
   const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
+  const processing = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
   const metadata = [candidate.location, candidate.mode, candidate.university]
     .filter(isProvided)
     .map((value) => `<span>${escapeHtml(value)}</span>`)
@@ -316,7 +344,7 @@ function card(candidate) {
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
-  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div><div class="card-statuses">${processing}${availability}</div></div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
 }
 
 // An extractor that only accepts a name the comment actually states leaves `name` empty for most
@@ -467,7 +495,9 @@ document.addEventListener('click', (event) => {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
     const background = profileBackground(candidate);
     const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h2>${escapeHtml(displayName(candidate))}</h2>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    const status = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
+    const controls = `<div class="dialog-actions">${candidate.sourceUrl ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>` : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`}</div>${candidate.sourceUrl ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>` : ''}`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2>${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
