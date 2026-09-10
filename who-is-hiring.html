@@ -9,16 +9,24 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="./">Who wants<span> to be hired</span></a>
+      <a class="brand" href="/">Who wants<span> to be hired</span></a>
       <nav aria-label="Main navigation">
-        <a href="#directory">Directory</a>
-        <a href="#about">About</a>
+        <a href="/#directory">Directory</a>
+        <a href="/#about">About</a>
         <button class="text-link" data-open-request>Manage your listing</button>
       </nav>
     </header>
 
     <main>
-      <section class="hero">
+      <section class="profile-page" id="profile-page" aria-live="polite" hidden>
+        <a class="profile-back" href="/#directory">← Back to the directory</a>
+        <div id="profile-content">
+          <div class="section-kicker">Candidate profile</div>
+          <h1 class="profile-loading">Loading profile…</h1>
+        </div>
+      </section>
+
+      <section class="hero directory-view">
         <div class="eyebrow"><span class="pulse"></span> Open candidate index</div>
         <h1>Find the people behind the HN posts.</h1>
         <p class="hero-copy">A structured, searchable directory of candidates from Hacker News' “Who wants to be hired?” threads — every profile links back to the comment it came from.</p>
@@ -28,13 +36,13 @@
         </div>
       </section>
 
-      <section class="stats" aria-label="Directory summary">
+      <section class="stats directory-view" aria-label="Directory summary">
         <div><strong id="candidate-count">—</strong><span>candidate profiles</span></div>
         <div><strong id="location-count">—</strong><span>locations represented</span></div>
         <div><strong id="university-count">—</strong><span>universities represented</span></div>
       </section>
 
-      <section class="workspace" id="directory">
+      <section class="workspace directory-view" id="directory">
         <aside class="filters-panel" id="filters-panel">
           <div class="panel-heading"><span>Filter directory</span><button class="clear-button" type="button" id="clear-filters" data-clear-filters>Clear all</button></div>
           <label class="field-label" for="search">Search everything</label>
@@ -55,7 +63,7 @@
         </section>
       </section>
 
-      <section class="about-section" id="about">
+      <section class="about-section directory-view" id="about">
         <div class="section-kicker">How profiles get here</div>
         <h2>Public posts, made searchable.</h2>
         <p class="section-copy">Listings are read from Hacker News “Who wants to be hired?” threads and normalized into companies, universities, skills, dates, and locations. Each card links back to the comment it came from.</p>
@@ -65,7 +73,7 @@
       </section>
     </main>
 
-    <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="#about">How this works</a><button class="text-link" data-open-feedback>Send feedback</button></footer>
+    <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="/#about">How this works</a><button class="text-link" data-open-feedback>Send feedback</button></footer>
 
     <dialog id="feedback-dialog" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>

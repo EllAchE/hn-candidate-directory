@@ -249,6 +249,22 @@ describe('response hygiene', () => {
     expect(response.headers.get('access-control-allow-origin')).toBeNull();
   });
 
+  test('serves the directory shell at a valid HN username path', async () => {
+    const env = createEnvironment();
+    let assetPath = '';
+    env.ASSETS = {
+      fetch: async (request) => {
+        assetPath = new URL(request.url).pathname;
+        return new Response('<html></html>', { headers: { 'content-type': 'text/html' } });
+      }
+    };
+
+    const response = await worker.fetch(new Request(`${ORIGIN}/yellowapple`), env);
+
+    expect(response.status).toBe(200);
+    expect(assetPath).toBe('/who-is-hiring.html');
+  });
+
   test('sets the security header set on api and asset responses', async () => {
     const env = createEnvironment();
     env.ASSETS = { fetch: async () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } }) };
