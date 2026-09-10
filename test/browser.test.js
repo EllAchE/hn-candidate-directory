@@ -688,10 +688,10 @@ test(
 );
 
 test(
-  'a candidate whose comment never named them is headed by their handle, and is still findable by it',
+  'yellowapple is findable by handle and opens at a stable username path',
   async () => {
     const NAMELESS = [
-      { ...PUBLIC_CANDIDATES[0], id: 'nameless-one', name: '', hnUsername: 'vladimirberman' },
+      { ...PUBLIC_CANDIDATES[0], id: 'nameless-one', name: '', hnUsername: 'yellowapple' },
       { ...PUBLIC_CANDIDATES[1], id: 'nameless-two', name: '', hnUsername: '' }
     ];
     await withPage(
@@ -700,20 +700,39 @@ test(
 
         // An empty heading is the failure this guards: the extractor stopped writing the author into
         // `name`, and every one of those rows rendered a blank 16px span where the identity goes.
-        expect(await evaluate(cdp, `${cardOf('nameless-one')}.querySelector('.candidate-name').textContent`)).toBe('@vladimirberman');
+        expect(await evaluate(cdp, `${cardOf('nameless-one')}.querySelector('.candidate-name').textContent`)).toBe('@yellowapple');
         // ...and the handle must not then appear twice, which is the same rule the named rows follow.
         expect(await evaluate(cdp, `${cardOf('nameless-one')}.querySelector('.candidate-handle')`)).toBe(null);
         expect(await evaluate(cdp, `${cardOf('nameless-two')}.querySelector('.candidate-name').textContent`)).toBe('Unnamed candidate');
 
-        await click(cdp, '[data-view="nameless-one"]');
-        expect(await textContent(cdp, '#dialog-content h2')).toBe('@vladimirberman');
-        await click(cdp, '#candidate-dialog [data-close-dialog]');
+        await setControl(cdp, 'search', 'YellowApple');
+        expect(await candidateNames(cdp)).toEqual(['@yellowapple']);
+        expect(await attribute(cdp, '[data-view="nameless-one"]', 'href')).toBe('/yellowapple');
 
-        // Searching a handle worked only because the handle used to be stored as the name.
-        await setControl(cdp, 'search', 'vladimirBERMAN');
-        expect(await candidateNames(cdp)).toEqual(['@vladimirberman']);
+        await click(cdp, '[data-view="nameless-one"]');
+        await waitFor(cdp, `location.pathname === '/yellowapple' && document.querySelector('#profile-content h1')?.textContent === '@yellowapple'`);
+        expect(await textContent(cdp, '#profile-content h1')).toBe('@yellowapple');
       },
-      { candidates: NAMELESS, ready: `document.querySelector('.candidate-name')?.textContent === '@vladimirberman'` }
+      { candidates: NAMELESS, ready: `document.querySelector('.candidate-name')?.textContent === '@yellowapple'` }
+    );
+  },
+  30_000
+);
+
+test(
+  'a username route never renders a different profile when the server ignores its filter',
+  async () => {
+    await withPage(
+      async (cdp) => {
+        expect(await textContent(cdp, '#profile-content h1')).toBe('Profile not found');
+        expect(await evaluate(cdp, `document.getElementById('profile-content').textContent.includes('Ada Rivera')`)).toBe(false);
+      },
+      {
+        candidates: [PUBLIC_CANDIDATES[0]],
+        fixture: { ignoreUsernameFilter: true },
+        route: '/yellowapple',
+        ready: `document.querySelector('#profile-content h1')?.textContent === 'Profile not found'`
+      }
     );
   },
   30_000
@@ -780,13 +799,14 @@ test(
         expect(await evaluate(cdp, `Math.round(${cardOf('ada-rivera')}.getBoundingClientRect().height)`)).toBeLessThan(180);
         expect(await evaluate(cdp, `document.documentElement.scrollWidth - document.documentElement.clientWidth`)).toBe(0);
 
-        // The dialog is where the summary went, so it has to carry it in full — along with the links,
-        // since the reader who opened the detail view is the one most likely to follow them.
+        // The profile page is where the summary went, so it has to carry it in full — along with the
+        // links, since the reader who opened the detail view is the one most likely to follow them.
         await click(cdp, '[data-view="ada-rivera"]');
-        expect(await textContent(cdp, '#dialog-content .dialog-copy')).toBe(LONG_SUMMARY);
-        expect(await evaluate(cdp, `document.querySelectorAll('#dialog-content .chip').length`)).toBe(10);
-        expect(await evaluate(cdp, `[...document.querySelectorAll('#dialog-content .dialog-links a')].map((link) => link.textContent)`)).toEqual([
-          '@adar',
+        await waitFor(cdp, `location.pathname === '/adar' && document.querySelector('.profile-summary')`);
+        expect(await textContent(cdp, '#profile-content .profile-summary')).toBe(LONG_SUMMARY);
+        expect(await textContent(cdp, '#profile-content .profile-section')).toContain('Rust · Go · PostgreSQL · Kubernetes · Terraform · gRPC · Kafka · Python · TypeScript · React');
+        expect(await evaluate(cdp, `[...document.querySelectorAll('#profile-content .profile-links a')].map((link) => link.textContent)`)).toEqual([
+          '@adar on HN',
           'LinkedIn',
           'GitHub'
         ]);
@@ -819,7 +839,7 @@ async function withPage(run, options = {}) {
     });
     if (options.onNewDocument) await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: options.onNewDocument });
     await setViewport(cdp, 1280, 900, false);
-    await navigate(cdp, `http://127.0.0.1:${server.port}/`);
+    await navigate(cdp, `http://127.0.0.1:${server.port}${options.route || '/'}`);
     await waitFor(cdp, options.ready ?? `document.querySelector('.candidate-name')?.textContent === ${JSON.stringify(dataset[0].name)}`);
 
     await run(cdp);
@@ -849,13 +869,18 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES, fixture = {}) {
     hostname: '127.0.0.1',
     port: 0,
     fetch(request) {
-      const { pathname } = new URL(request.url);
+      const url = new URL(request.url);
+      const { pathname } = url;
       if (pathname === '/api/candidates/stats') {
         if (!fixture.stats) return new Response('Not found', { status: 404 });
         return Response.json(fixture.stats, { headers: { 'cache-control': 'no-store' } });
       }
       if (pathname === '/api/candidates') {
-        const listing = Response.json({ candidates }, { headers: { 'cache-control': 'no-store' } });
+        const username = url.searchParams.get('hnUsername');
+        const listedCandidates = username && !fixture.ignoreUsernameFilter
+          ? candidates.filter((candidate) => String(candidate.hnUsername || '').toLowerCase() === username.toLowerCase())
+          : candidates;
+        const listing = Response.json({ candidates: listedCandidates, nextOffset: null, truncated: false }, { headers: { 'cache-control': 'no-store' } });
         return fixture.listingDelayMs ? Bun.sleep(fixture.listingDelayMs).then(() => listing) : listing;
       }
       const removal = pathname.match(/^\/api\/candidates\/([^/]+)\/removal$/);
@@ -863,7 +888,7 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES, fixture = {}) {
         removalRequests.push(decodeURIComponent(removal[1]));
         return Response.json({ removed: true }, { headers: { 'cache-control': 'no-store' } });
       }
-      const asset = assets.get(pathname);
+      const asset = assets.get(pathname) || (/^\/[A-Za-z0-9_-]{2,32}$/.test(pathname) ? assets.get('/') : null);
       if (!asset) return new Response('Not found', { status: 404 });
       return new Response(Bun.file(join(REPO_ROOT, asset[0])), {
         headers: { 'cache-control': 'no-store', 'content-type': asset[1] }

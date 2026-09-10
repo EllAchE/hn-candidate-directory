@@ -6,6 +6,7 @@ let listingTruncated = false;
 let activeReview = null;
 const el = (id) => document.getElementById(id);
 const UNKNOWN_VALUE = 'not specified';
+const activeProfileUsername = profileUsernameFromPath(window.location.pathname);
 
 const FACETS = [
   { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
@@ -316,7 +317,27 @@ function card(candidate) {
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
-  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions"><button data-view="${escapeHtml(candidate.id)}">View profile</button><a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  const path = candidateProfilePath(candidate);
+  const view = path
+    ? `<a href="${escapeHtml(path)}" data-view="${escapeHtml(candidate.id)}" data-profile-route>View profile</a>`
+    : `<button data-view="${escapeHtml(candidate.id)}">View profile</button>`;
+  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div>${availability}</div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions">${view}<a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+}
+
+function candidateProfilePath(candidate) {
+  const handle = String(candidate.hnUsername || '').trim();
+  return /^[A-Za-z0-9_-]{2,32}$/.test(handle) ? `/${encodeURIComponent(handle)}` : '';
+}
+
+function profileUsernameFromPath(pathname) {
+  const match = /^\/([^/]+)$/.exec(pathname);
+  if (!match) return '';
+  try {
+    const username = decodeURIComponent(match[1]);
+    return /^[A-Za-z0-9_-]{2,32}$/.test(username) ? username : '';
+  } catch {
+    return '';
+  }
 }
 
 // An extractor that only accepts a name the comment actually states leaves `name` empty for most
@@ -357,6 +378,58 @@ function profileBackground(candidate) {
     isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${escapeHtml(candidate.companies.join(', '))}</strong>` : ''
   ].filter(Boolean);
   return facts.length ? `<p class="dialog-copy" style="margin-top:20px">${facts.join(' · ')}</p>` : '';
+}
+
+function profileFact(label, value) {
+  return isProvided(value) ? `<div class="profile-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>` : '';
+}
+
+function profileSection(label, values) {
+  const supplied = (Array.isArray(values) ? values : [values]).filter(isProvided);
+  return supplied.length ? `<section class="profile-section"><h2>${escapeHtml(label)}</h2><p>${supplied.map((value) => escapeHtml(value)).join(' · ')}</p></section>` : '';
+}
+
+function profilePageContent(candidate) {
+  const handle = String(candidate.hnUsername || '').trim();
+  const account = handle
+    ? `<a class="candidate-handle" href="https://news.ycombinator.com/user?id=${escapeHtml(encodeURIComponent(handle))}" target="_blank" rel="noopener noreferrer">@${escapeHtml(handle)} on HN</a>`
+    : '';
+  const links = `${account}${profileLinks(candidate)}`;
+  const facts = [
+    profileFact('Location', candidate.location),
+    profileFact('Work mode', candidate.mode),
+    profileFact('Availability', candidate.availability)
+  ].join('');
+  const sections = [
+    profileSection('Skills', candidate.skills || []),
+    profileSection('Previously at', candidate.companies || []),
+    profileSection('Education', candidate.universities || []),
+    profileSection('Experience dates', candidate.dateRanges || [])
+  ].join('');
+  const controls = candidate.sourceUrl
+    ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>`
+    : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`;
+  const provenance = candidate.sourceUrl
+    ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>`
+    : '';
+  return `<div class="section-kicker">Candidate profile</div><h1>${escapeHtml(displayName(candidate))}</h1>${isProvided(candidate.role) ? `<p class="profile-role">${escapeHtml(candidate.role)}</p>` : ''}${isProvided(candidate.summary) ? `<p class="profile-summary">${escapeHtml(candidate.summary)}</p>` : ''}${facts ? `<div class="profile-facts">${facts}</div>` : ''}${links ? `<div class="profile-links">${links}</div>` : ''}${sections ? `<div class="profile-sections">${sections}</div>` : ''}<div class="dialog-actions">${controls}</div>${provenance}`;
+}
+
+async function loadProfilePage(username) {
+  try {
+    const response = await fetch(apiPath(`/api/candidates?hnUsername=${encodeURIComponent(username)}`));
+    const payload = response.ok ? await response.json() : null;
+    const candidate = payload?.candidates?.find((item) => String(item.hnUsername || '').toLowerCase() === username.toLowerCase());
+    if (!candidate) {
+      el('profile-content').innerHTML = `<div class="section-kicker">Candidate profile</div><h1>Profile not found</h1><p class="profile-not-found">There is no published profile for @${escapeHtml(username)}.</p>`;
+      return;
+    }
+    candidates = [candidate];
+    document.title = `${displayName(candidate)} · Candidate directory`;
+    el('profile-content').innerHTML = profilePageContent(candidate);
+  } catch {
+    el('profile-content').innerHTML = '<div class="section-kicker">Candidate profile</div><h1>Profile unavailable</h1><p class="profile-not-found">This profile could not be loaded. Try again in a moment.</p>';
+  }
 }
 
 function sourceLink(candidate) {
@@ -463,7 +536,7 @@ document.querySelectorAll('[data-open-feedback]').forEach((button) => button.add
 document.addEventListener('click', (event) => {
   if (event.target.matches('[data-close-dialog]')) closeDialogs();
   const view = event.target.closest('[data-view]');
-  if (view) {
+  if (view && !view.matches('[data-profile-route]')) {
     const candidate = candidates.find((item) => item.id === view.dataset.view);
     const background = profileBackground(candidate);
     const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
@@ -655,9 +728,15 @@ el('feedback-form').addEventListener('submit', async (event) => {
   }
 });
 buildFacets();
-render();
-loadDirectoryTotals();
-loadPublishedCandidates();
+if (activeProfileUsername) {
+  document.body.classList.add('profile-route');
+  el('profile-page').hidden = false;
+  loadProfilePage(activeProfileUsername);
+} else {
+  render();
+  loadDirectoryTotals();
+  loadPublishedCandidates();
+}
 
 // Two-step rather than window.confirm so the confirmation renders inside the open dialog.
 async function handleRemovalClick(button) {
@@ -674,6 +753,10 @@ async function handleRemovalClick(button) {
     const response = await fetch(apiPath(`/api/candidates/${encodeURIComponent(candidateId)}/removal`), { method: 'POST' });
     if (!response.ok) throw new Error('removal_failed');
     candidates = candidates.filter((candidate) => candidate.id !== candidateId);
+    if (activeProfileUsername) {
+      el('profile-content').innerHTML = '<div class="section-kicker">Candidate profile</div><h1>Profile removed</h1><p class="profile-not-found">This listing no longer appears in the public directory.</p>';
+      return;
+    }
     buildFacets();
     render();
     closeDialogs();

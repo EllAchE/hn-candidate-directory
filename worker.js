@@ -319,6 +319,11 @@ async function routeRequest(request, env) {
     return withSecurityHeaders(await env.ASSETS.fetch(new Request(url, request)));
   }
 
+  if (hnUsernameFromPath(url.pathname)) {
+    url.pathname = '/who-is-hiring.html';
+    return withSecurityHeaders(await env.ASSETS.fetch(new Request(url, request)));
+  }
+
   return withSecurityHeaders(await env.ASSETS.fetch(request));
 }
 
@@ -1137,12 +1142,18 @@ async function listPublishedCandidates(request, env) {
   const edge = await consumeEdgeQuota(env, `candidates:${await clientKey(env, request)}`);
   if (edge) return edge;
 
-  const offset = clampCandidateOffset(new URL(request.url).searchParams.get('offset'));
+  const parameters = new URL(request.url).searchParams;
+  const requestedHnUsername = parameters.get('hnUsername');
+  const hnUsername = requestedHnUsername === null ? '' : hnAuthor(requestedHnUsername);
+  if (requestedHnUsername !== null && !hnUsername) return json({ error: 'invalid_hn_username' }, 400);
+  const offset = clampCandidateOffset(parameters.get('offset'));
   const limit = Math.min(CANDIDATES_PAGE_SIZE, MAX_PUBLIC_CANDIDATES - offset);
   if (limit <= 0) return json({ candidates: [], nextOffset: null, truncated: true });
 
   let result;
   try {
+    const hnUsernameFilter = hnUsername ? 'AND r.hn_username = ? COLLATE NOCASE' : '';
+    const bindings = hnUsername ? [hnUsername, limit, offset] : [limit, offset];
     result = await env.DB.prepare(
       `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
               r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
@@ -1151,9 +1162,10 @@ async function listPublishedCandidates(request, env) {
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.status = 'published' AND i.suppressed_at IS NULL
+          ${hnUsernameFilter}
         ORDER BY r.published_at DESC, r.id
         LIMIT ? OFFSET ?`
-    ).bind(limit, offset).all();
+    ).bind(...bindings).all();
   } catch {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
@@ -1170,6 +1182,16 @@ function clampCandidateOffset(raw) {
   const parsed = Number.parseInt(raw ?? '', 10);
   if (!Number.isInteger(parsed) || parsed < 0) return 0;
   return Math.min(parsed, MAX_PUBLIC_CANDIDATES);
+}
+
+function hnUsernameFromPath(pathname) {
+  const match = /^\/([^/]+)$/.exec(pathname);
+  if (!match) return '';
+  try {
+    return hnAuthor(decodeURIComponent(match[1]));
+  } catch {
+    return '';
+  }
 }
 
 // Both mirror who-is-hiring.js. HN_UNKNOWN is the extractor's marker for a field the source comment

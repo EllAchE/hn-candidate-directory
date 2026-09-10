@@ -890,6 +890,27 @@ describe('published candidate management', () => {
 });
 
 describe('candidate listing pagination', () => {
+  test('finds a published candidate by HN username without loading every page', async () => {
+    const env = createEnvironment();
+    seedPublishedCandidate(env, 0, { name: '', hnUsername: 'yellowapple' });
+    seedPublishedCandidate(env, 1, { hnUsername: 'someoneelse' });
+
+    const response = await worker.fetch(apiRequest('/api/candidates?hnUsername=YellowApple'), env);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]).toMatchObject({ name: '', hnUsername: 'yellowapple' });
+    expect(body.nextOffset).toBeNull();
+  });
+
+  test('rejects an invalid HN username filter', async () => {
+    const response = await worker.fetch(apiRequest('/api/candidates?hnUsername=not%20a%20handle'), createEnvironment());
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'invalid_hn_username' });
+  });
+
   test('pages the public listing instead of returning every candidate at once', async () => {
     const env = createEnvironment();
     const total = CANDIDATES_PAGE_SIZE + 2;
@@ -993,12 +1014,13 @@ function seedPublishedCandidate(env, index, overrides = {}) {
     id: `seed-candidate-${index}`,
     submission_id: submissionId,
     status: 'published',
-    name: `Candidate ${index}`,
+    name: overrides.name ?? `Candidate ${index}`,
     role: `Engineer ${index}`,
     summary: `Summary for candidate ${index}.`,
     location: overrides.location ?? 'Remote',
     work_mode: 'Remote',
     availability: 'Immediate',
+    hn_username: overrides.hnUsername ?? '',
     universities_json: overrides.universities_json ?? '[]',
     companies_json: '[]',
     skills_json: '[]',
