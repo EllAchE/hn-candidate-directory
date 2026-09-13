@@ -352,6 +352,7 @@ describe('Hacker News ingestion', () => {
     const candidates = await publicCandidates(env);
     expect(candidates.map((candidate) => candidate.name).sort()).toEqual(['adacandidate', 'contactposter', 'proseposter']);
     expect(candidates.every((candidate) => candidate.source === 'HN · August 2026')).toBe(true);
+    expect(candidates.every((candidate) => candidate.processed === false)).toBe(true);
     expect(candidates.map((candidate) => candidate.sourceUrl).sort()).toEqual([
       'https://news.ycombinator.com/item?id=44444501',
       'https://news.ycombinator.com/item?id=44444502',
@@ -362,6 +363,9 @@ describe('Hacker News ingestion', () => {
       '2026-08-03T17:40:00.000Z',
       '2026-08-03T16:12:00.000Z'
     ]);
+
+    const stats = await worker.fetch(apiRequest('/api/candidates/stats'), env);
+    expect((await stats.json()).processed).toBe(0);
   });
 
   test('never publishes contact details harvested from a comment', async () => {

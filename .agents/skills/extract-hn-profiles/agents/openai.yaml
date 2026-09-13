@@ -1,0 +1,4 @@
+interface:
+  display_name: "Extract HN Profiles"
+  short_description: "Safely extract sealed HN candidate profiles"
+  default_prompt: "Use $extract-hn-profiles to re-extract pending Hacker News candidate profiles safely."
