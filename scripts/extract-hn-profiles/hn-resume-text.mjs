@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Fetches one resume and renders it to plain text. The model chose an index, never a URL,
-// and this script re-screens the URL it resolves that index to before any request. It also
+// Fetches one resume and renders it to plain text. The caller chose an index, never a URL,
+// and this module re-screens the URL it resolves that index to before any request. It also
 // converts PDFs itself, so the subagent that reads resume prose needs no filesystem tool.
+// `resumeText` is the function; the CLI below wraps it for a hand-run of a single item.
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -26,10 +27,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function miss(reason, url = '') {
-  process.stdout.write(`${JSON.stringify({ ok: false, reason, url })}\n`);
-  process.exit(0);
-}
+const miss = (reason, url = '') => ({ ok: false, reason, url });
 
 // Share links render a viewer page, not the document. Rewriting to the download surface is
 // what makes ~30% of the corpus reachable at all.
@@ -101,63 +99,72 @@ async function renderPdf(bytes, out) {
   }
 }
 
-const args = parseArgs(process.argv.slice(2));
-if (!args.batch || !args.nonce || !args.out) {
-  console.error('usage: hn-resume-text.mjs --batch <batch.json> --nonce <nonce> --link <index> --out <dir>');
-  process.exit(2);
-}
+// Resolves one item's chosen link index against the sealed batch, fetches it, renders it, and
+// writes resume-<nonce>.txt plus a .json provenance sidecar into `out`. Returns the rendered text
+// on a hit and `{ ok: false, reason }` on every kind of miss; it never throws for a bad document.
+export async function resumeText({ batch, nonce, link, out }) {
+  const item = (batch.items || []).find((entry) => entry.nonce === nonce);
+  if (!item) return miss('unknown_nonce');
 
-const batch = JSON.parse(readFileSync(args.batch, 'utf8'));
-const item = (batch.items || []).find((entry) => entry.nonce === args.nonce);
-if (!item) miss('unknown_nonce');
+  const index = Number(link);
+  const chosen = (item.links || []).find((candidate) => candidate.index === index);
+  if (!chosen) return miss('no_such_link');
 
-const index = Number(args.link);
-const chosen = item.links.find((link) => link.index === index);
-if (!chosen) miss('no_such_link');
+  const screened = screenUrl(directDownload(chosen.url));
+  if (!screened) return miss('blocked_url', chosen.url);
 
-const screened = screenUrl(directDownload(chosen.url));
-if (!screened) miss('blocked_url', chosen.url);
+  const fetched = await fetchBody(screened);
+  if (fetched.text === null) return miss(fetched.reason, screened);
 
-const fetched = await fetchBody(screened);
-if (fetched.text === null) miss(fetched.reason, screened);
+  const { bytes } = decodeBody(fetched.text);
+  const magic = bytes.subarray(0, 5).toString('latin1');
 
-const { bytes } = decodeBody(fetched.text);
-const magic = bytes.subarray(0, 5).toString('latin1');
-
-let text;
-let documentType = null;
-if (magic.startsWith('%PDF-')) {
-  mkdirSync(args.out, { recursive: true });
-  const rendered = await renderPdf(bytes, args.out);
-  documentType = rendered.structured.documentType;
-  text = rendered.text;
-  // A document with no usable text layer will not read on a retry, so it gets its own reason
-  // rather than the `too_thin` a permission wall also produces.
-  if (needsOcr(documentType, rendered.structured.pagesNeedingOcr, rendered.structured.pageCount)) {
-    if (!text || text.length < MIN_USEFUL) miss('scanned_needs_ocr', screened);
+  let text;
+  let documentType = null;
+  if (magic.startsWith('%PDF-')) {
+    mkdirSync(out, { recursive: true });
+    const rendered = await renderPdf(bytes, out);
+    documentType = rendered.structured.documentType;
+    text = rendered.text;
+    // A document with no usable text layer will not read on a retry, so it gets its own reason
+    // rather than the `too_thin` a permission wall also produces.
+    if (needsOcr(documentType, rendered.structured.pagesNeedingOcr, rendered.structured.pageCount)) {
+      if (!text || text.length < MIN_USEFUL) return miss('scanned_needs_ocr', screened);
+    }
+    if (text === null) return miss('pdftotext_unavailable_or_failed', screened);
+  } else if (magic.startsWith('PK')) {
+    return miss('office_document_unsupported', screened);
+  } else {
+    text = htmlToText(bytes.toString('utf8'));
   }
-  if (text === null) miss('pdftotext_unavailable_or_failed', screened);
-} else if (magic.startsWith('PK')) {
-  miss('office_document_unsupported', screened);
-} else {
-  text = htmlToText(bytes.toString('utf8'));
+
+  const rendered = neutralize(text, RESUME_CAP);
+  // A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of
+  // chrome. Treat a thin body as a miss so comment-only extraction wins instead.
+  if (rendered.length < MIN_USEFUL) return miss('too_thin', screened);
+
+  mkdirSync(out, { recursive: true });
+  const textPath = join(out, `resume-${nonce}.txt`);
+  writeFileSync(textPath, rendered);
+  writeFileSync(
+    join(out, `resume-${nonce}.json`),
+    JSON.stringify(
+      { resumeUrl: chosen.url, resumeFetchedAt: new Date().toISOString(), chars: rendered.length, documentType },
+      null,
+      2
+    )
+  );
+
+  return { ok: true, url: chosen.url, path: textPath, chars: rendered.length, text: rendered };
 }
 
-const rendered = neutralize(text, RESUME_CAP);
-// A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of
-// chrome. Treat a thin body as a miss so comment-only extraction wins instead.
-if (rendered.length < MIN_USEFUL) miss('too_thin', screened);
-
-mkdirSync(args.out, { recursive: true });
-const textPath = join(args.out, `resume-${args.nonce}.txt`);
-writeFileSync(textPath, rendered);
-writeFileSync(
-  join(args.out, `resume-${args.nonce}.json`),
-  JSON.stringify(
-    { resumeUrl: chosen.url, resumeFetchedAt: new Date().toISOString(), chars: rendered.length, documentType },
-    null,
-    2
-  )
-);
-
-process.stdout.write(`${JSON.stringify({ ok: true, url: chosen.url, path: textPath, chars: rendered.length })}\n`);
+if (import.meta.main) {
+  const args = parseArgs(process.argv.slice(2));
+  if (!args.batch || !args.nonce || !args.out) {
+    console.error('usage: hn-resume-text.mjs --batch <batch.json> --nonce <nonce> --link <index> --out <dir>');
+    process.exit(2);
+  }
+  const batch = JSON.parse(readFileSync(args.batch, 'utf8'));
+  const { text: _text, ...report } = await resumeText({ batch, nonce: args.nonce, link: args.link, out: args.out });
+  process.stdout.write(`${JSON.stringify(report)}\n`);
+}

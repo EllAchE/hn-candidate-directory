@@ -77,23 +77,55 @@ subagent's JSON array to `/tmp/claude/hncd/<run>/drafts-N.json` with `Write`.
 
 ## 4. Resumes
 
-The model returns a `resumeLinkIndex` into the numbered list it was given — never a URL.
-Resolve it with the harness, which re-screens before it fetches:
+Fetch resumes **before** the first extraction, not after: most comments carry a `Résumé/CV:`
+line, and `hn-prepare-batch.mjs` records that link's index as `resumeHint`. Attach it with the
+harness, which re-screens the URL before it fetches and seals the rendered text into the batch
+in place as `resume`:
 
 ```bash
-./scripts/extract-hn-profiles/hn-resume-text.mjs \
-  --batch /tmp/claude/hncd/<run>/batch-N.json --nonce <nonce> --link <index> --out /tmp/claude/hncd/<run>
+./scripts/extract-hn-profiles/hn-attach-resumes.mjs \
+  --batch /tmp/claude/hncd/<run>/batch-N.json --out /tmp/claude/hncd/<run>
 ```
 
-It prints `{"ok": false, "reason": ...}` rather than failing the run. A miss is normal —
-degrade to comment-only extraction and move on. `references/resumes.md` covers the reachable
-share, the Drive/Docs rewrites, and why the content type comes from magic bytes.
+Then run step 3 with the `RESUME:` block present. The model also returns a `resumeLinkIndex`
+into the numbered list it was given — never a URL — for the items where the label missed. A
+second, targeted attach reads that index from the drafts and the miss report (step 5) and
+writes a subset batch of only the items worth a second pass:
 
-On a hit, re-run the extractor for that one item with the `RESUME:` block appended. Resume
-text may enrich `summary` as well as the structured facets; the Worker redacts contact
-details server-side either way.
+```bash
+./scripts/extract-hn-profiles/hn-check-drafts.mjs --batch <run>/batch-N.json --drafts <run>/drafts-N.json --out <run>/check-N.json
+./scripts/extract-hn-profiles/hn-attach-resumes.mjs --batch <run>/batch-N.json --out <run> \
+  --drafts <run>/drafts-N.json --retry <run>/check-N.json --write <run>/pass2/batch-N.json
+./scripts/extract-hn-profiles/hn-merge-drafts.mjs --base <run>/drafts-N.json --over <run>/pass2/drafts-N.json --out <run>/drafts-N.json
+```
 
-## 5. Assemble, review, push
+A miss is reported by reason (`too_thin`, `scanned_needs_ocr`, `fetch_failed_403`, ...)
+rather than failing the run; a LinkedIn link is never a hint. `references/resumes.md` covers
+the reachable share, the Drive/Docs rewrites, and why the content type comes from magic bytes.
+`hn-resume-text.mjs` is the one-item form of the same fetch, for a hand-run.
+
+Fetches go through the unblocker: the hosted API when `UNBLOCKER_ORG_API_KEY` is set, else
+the local shim on port 7654 (`bun skills/unblocker/scripts/ensure-unblocker.ts` from the dsrc
+root starts it). An unreachable endpoint shows up as `fetch_unreachable` on every item, which
+is a harness problem to fix before extracting, not a corpus fact.
+
+## 5. Check for misses
+
+An empty field where the source has the answer is an extraction miss, not an absence:
+
+```bash
+./scripts/extract-hn-profiles/hn-check-drafts.mjs \
+  --batch <run>/batch-N.json --drafts <run>/drafts-N.json --out <run>/check-N.json
+```
+
+`role` and `summary` are always expected; `location` and `workMode` when the comment has a
+`Location:` or `Remote:` line; `name` and `companies` whenever a resume was attached. The
+report lists each flagged nonce with its missing fields, and marks `retry` on the ones a
+second pass with the resume should fix. Read `missing` before pushing: a page where most
+resume items lack a name means the extractor did not read the `RESUME:` block, which is a
+framing bug, not thirty shy candidates.
+
+## 6. Assemble, review, push
 
 ```bash
 ./scripts/extract-hn-profiles/hn-assemble-push.mjs \
@@ -129,24 +161,31 @@ cleanly onto another machine — the dev box, for a corpus-sized backfill:
 HNCD_HOST=https://<worker-host> ./scripts/extract-hn-profiles/devbox-run-page.sh <page-tag>
 ```
 
-That runs one whole page: gate, prepare, ship the sealed batches, extract on the box, pull the
-drafts back, assemble against the map and push. It prints the assembled/rejected/trimmed counts,
-a count of gendered pronouns in the summaries, and the push tally. Run it once per page; the tag
+That runs one whole page: gate, prepare, attach the labelled resumes, ship the sealed batches
+with the batch script, extract on the box, pull the drafts back, run the targeted second pass
+(model-chosen links plus resume items missing a name or employer), merge, check for misses,
+assemble against the map and push. It prints the resume tallies per pass, the miss summary
+(and writes `misses-<tag>.json`), the assembled/rejected/trimmed counts, the pronoun-screen
+count, and the push tally. `HNCD_HOLD_MISSES=1` keeps flagged items out of the push instead of
+pushing and reporting; `HNCD_PASSES=1` skips the second pass. Run it once per page; the tag
 only has to be unique per run. The steps it wraps, if you need them by hand:
 
 ```bash
-# operator's machine: gate, prep, and ship the sealed batches only
+# operator's machine: gate, prep, attach resumes, and ship the sealed batches only
 ./scripts/extract-hn-profiles/hn-prepare-batch.mjs --pending <run>/pending.json --out <run> --batch 5
-tar czf batches.tgz $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
-# remote: one subagent per batch, four at a time, under tmux so it outlives the ssh channel
-tmux new-session -d -s hncd-<tag> 'seq 1 <n> | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}'
-# operator's machine again: assemble against the map, then push
+for n in ...; do ./scripts/extract-hn-profiles/hn-attach-resumes.mjs --batch <run>/batch-$n.json --out <run>; done
+tar czf batches.tgz devbox-extract-batch.sh $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
+# remote: one subagent per batch, four at a time, under tmux so it outlives the ssh channel;
+# the shipped batch script runs from the run dir, and cds into the box's clone only for the agent file
+tmux new-session -d -s hncd-<tag> 'seq 1 <n> | xargs -P 4 -I{} bash $HNCD_RUN_DIR/devbox-extract-batch.sh {}'
+# operator's machine again: check, second pass, merge, assemble against the map, then push
 ```
 
 What must not travel: `batch-N.map.json` and `HNCD_INGEST_TOKEN`. The remote holds sealed text
-and returns drafts keyed by nonce; identity is re-attached at home by a map that never left, and
-the push stays where the credential is. Keep the remote run directory outside any checkout —
-`[assets] directory = "."` in this repo means a data file at the root is served publicly.
+(comment and resume) and returns drafts keyed by nonce; identity is re-attached at home by a map
+that never left, the push stays where the credential is, and nothing on the box fetches a URL.
+Keep the remote run directory outside any checkout — `[assets] directory = "."` in this repo
+means a data file at the root is served publicly.
 
 Run one page at a time and let the pool drain before starting another. Two `xargs` pools over the
 same run directory race on batch numbers — `devbox-extract-batch.sh` checks for an existing draft

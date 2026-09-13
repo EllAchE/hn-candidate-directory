@@ -103,6 +103,37 @@ export function screenedLinks(html, limit = 12) {
   return links;
 }
 
+// The "Who wants to be hired?" template carries a `Résumé/CV:` line, and the link on it is the
+// candidate's own answer to "where is your resume". Reading it here lets the harness fetch before
+// the first extraction pass, so most items reach the extractor with the resume already inline
+// instead of waiting a whole round trip for the model to pick an index. HN elides the anchor text
+// of a long URL, so the text on the line is matched by prefix against the screened hrefs, the
+// same reconciliation screenedLinks does. LinkedIn is skipped: it cannot be fetched.
+//
+// HN opens paragraphs with a bare `<p>` and never closes them, so the rendered text runs the
+// template's lines together; the link has to be the first one after the label and before the
+// next `Label:`, or an `Email:` line's URL would be taken for the resume.
+const RESUME_LABEL = /(r[ée]sum[ée]|\bcv)\s*(\/\s*cv)?\s*:/i;
+const NEXT_LABEL = /\n|\b[A-Z][\w /]{1,30}:\s/;
+
+export function labelledResumeIndex(html, links) {
+  const text = htmlToText(html);
+  const at = text.search(RESUME_LABEL);
+  if (at < 0) return null;
+  const after = text.slice(at).replace(RESUME_LABEL, '');
+  const end = after.search(NEXT_LABEL);
+  const raw = (end >= 0 ? after.slice(0, end) : after).match(LINK_PATTERN)?.[0];
+  if (!raw) return null;
+  const screened = screenUrl(raw.replace(/\.{2,}$/, '').replace(/[.,;:]+$/, ''));
+  if (!screened) return null;
+  const hit = (links || []).find(
+    (link) => link.url === screened || link.url.startsWith(screened) || screened.startsWith(link.url)
+  );
+  if (!hit) return null;
+  if (/(^|\.)linkedin\.com$/i.test(new URL(hit.url).hostname)) return null;
+  return hit.index;
+}
+
 export const nonce = () => randomBytes(9).toString('hex');
 
 // A per-run delimiter the payload cannot forge, so untrusted bytes cannot close their own
