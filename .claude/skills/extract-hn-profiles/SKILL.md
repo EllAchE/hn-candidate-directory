@@ -53,11 +53,27 @@ files: `batch-N.json`, which a model may see, and `batch-N.map.json`, which hold
 
 ## 3. Extract
 
-Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent's only tool is
-`Glob`: it enumerates paths and cannot read file contents, write, execute, or reach the
-network. So paste the batch's items into the prompt inline — it cannot open the file itself,
-and that is the point. Never substitute another `subagent_type`, and never widen that agent's
-tools to make a step work; see `references/isolation.md` control 1.
+Choose the path for the harness running this skill:
+
+- **Claude Code:** Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent's
+  only tool is `Glob`: it enumerates paths and cannot read file contents, write, execute, or reach
+  the network. Paste the batch's items into its prompt inline. Never substitute another
+  `subagent_type` or widen its tools.
+- **Codex:** Do not paste the batch into the current agent or a collaboration subagent; those
+  children inherit the parent's tool surface. Run the isolated wrapper instead:
+
+  ```bash
+  ./scripts/extract-hn-profiles/hn-codex-extract-batch.mjs \
+    --batch /tmp/claude/hncd/<run>/batch-N.json \
+    --out /tmp/claude/hncd/<run>/drafts-N.json
+  ```
+
+  The wrapper alone reads the batch. It starts an ephemeral Codex process in an empty directory
+  with user configuration and rules ignored, read-only sandboxing, and shell, web, apps, plugins,
+  images, skills, and further delegation disabled. It validates the returned array and moves its
+  bytes into place without rewriting them.
+
+Both paths preserve control 1 in `references/isolation.md`.
 
 Frame each item with the batch's `delimiter`:
 
@@ -129,7 +145,8 @@ cleanly onto another machine — the dev box, for a corpus-sized backfill:
 # operator's machine: gate, prep, and ship the sealed batches only
 ./scripts/extract-hn-profiles/hn-prepare-batch.mjs --pending <run>/pending.json --out <run> --batch 5
 tar czf batches.tgz $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
-# remote: one subagent per batch, four at a time
+# remote: one isolated extraction process per batch, four at a time
+export HNCD_EXTRACTOR=codex # omit this line to use Claude Code
 seq 1 19 | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}
 # operator's machine again: assemble against the map, then push
 ```
