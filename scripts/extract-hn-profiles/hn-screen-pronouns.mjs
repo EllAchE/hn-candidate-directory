@@ -40,7 +40,8 @@ if (import.meta.main) {
   }
 
   const batch = JSON.parse(readFileSync(args.batch, 'utf8'));
-  const source = new Map((batch.items || []).map((item) => [item.nonce, item.text || '']));
+  // A resume is the one place a candidate states pronouns, so it counts as evidence too.
+  const source = new Map((batch.items || []).map((item) => [item.nonce, `${item.text || ''}\n${item.resume || ''}`]));
   const drafts = JSON.parse(readFileSync(args.drafts, 'utf8'));
   const entries = Array.isArray(drafts) ? drafts : drafts.profiles || [];
 

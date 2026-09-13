@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { delimiter, htmlToText, neutralize, nonce, screenedLinks } from './hn-untrusted.mjs';
+import { delimiter, htmlToText, labelledResumeIndex, neutralize, nonce, screenedLinks } from './hn-untrusted.mjs';
 
 const ALGOLIA_THREAD = 'https://hn.algolia.com/api/v1/search';
 const PAGE_SIZE = 100;
@@ -74,10 +74,12 @@ for (const item of items) {
     missing.push(item.hnItemId);
     continue;
   }
+  const links = screenedLinks(hit.comment_text);
   prepared.push({
     nonce: nonce(),
     text,
-    links: screenedLinks(hit.comment_text),
+    links,
+    resumeHint: labelledResumeIndex(hit.comment_text, links),
     comment: {
       objectID: String(hit.objectID),
       author: hit.author,
@@ -101,7 +103,7 @@ for (let start = 0, batch = 1; start < prepared.length; start += size, batch += 
       {
         batch,
         delimiter: delimiter(),
-        items: slice.map(({ nonce: id, text, links }) => ({ nonce: id, text, links }))
+        items: slice.map(({ nonce: id, text, links, resumeHint }) => ({ nonce: id, text, links, resumeHint }))
       },
       null,
       2
