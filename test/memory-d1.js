@@ -612,6 +612,7 @@ function hnJoinColumns(ingest) {
   return {
     hn_permalink: ingest?.hn_permalink ?? null,
     thread_month: ingest?.thread_month ?? null,
+    extractor_rank: ingest?.extractor_rank ?? null,
     suppressed_at: ingest?.suppressed_at ?? null
   };
 }

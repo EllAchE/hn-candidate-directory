@@ -51,6 +51,7 @@ const HN_EXTRACTION_VERSION = 2;
 // extractor at least as good as the one that produced it. Rank 0 is the deterministic pass and is
 // deliberately not pushable -- the push endpoint exists to improve on it, never to replay it.
 const HN_EXTRACTORS = Object.freeze({ 'deterministic-labels-v1': 0, 'claude-skill-v1': 1 });
+const HN_PROCESSED_RANK = Math.max(...Object.values(HN_EXTRACTORS));
 const HN_PUSH_LIMITS = Object.freeze({ batch: 25, pendingPage: 100 });
 // A pushed item carries the whole comment as well as its draft, so the body cap is derived from the
 // largest comment the ingest will ever hold rather than picked as a round number.
@@ -1147,7 +1148,7 @@ async function listPublishedCandidates(request, env) {
       `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
               r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
               r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
-              i.hn_permalink, i.thread_month
+              i.hn_permalink, i.thread_month, i.extractor_rank
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.status = 'published' AND i.suppressed_at IS NULL
@@ -1194,7 +1195,9 @@ async function summarizePublishedCandidates(request, env) {
   let result;
   try {
     result = await env.DB.prepare(
-      `SELECT r.location, r.universities_json
+      `SELECT r.location, r.work_mode, r.availability,
+              r.universities_json, r.companies_json, r.skills_json,
+              i.hn_permalink, i.extractor_rank
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.status = 'published' AND i.suppressed_at IS NULL
@@ -1206,6 +1209,8 @@ async function summarizePublishedCandidates(request, env) {
 
   const locations = new Set();
   const universities = new Set();
+  const facets = { processed: 0, availability: 0, mode: 0, location: 0, university: 0, company: 0, skill: 0 };
+  let processed = 0;
   for (const row of result.results) {
     // The listing publishes sanitized values, so the summary has to count the sanitized forms or a
     // redaction would split one location into two.
@@ -1214,20 +1219,29 @@ async function summarizePublishedCandidates(request, env) {
       role: '',
       summary: '',
       location: row.location,
-      workMode: '',
-      availability: '',
+      workMode: row.work_mode,
+      availability: row.availability,
       universities: parseList(row.universities_json),
-      companies: [],
-      skills: [],
+      companies: parseList(row.companies_json),
+      skills: parseList(row.skills_json),
       dateRanges: []
     });
+    const profileProcessed = isProcessedCandidateRow(row);
+    if (profileProcessed) processed += 1;
+    facets.processed += 1;
+    facets.availability += Number(isProvidedFacetValue(draft.availability));
+    facets.mode += Number(isProvidedFacetValue(draft.workMode));
+    facets.location += Number(isProvidedFacetValue(draft.location));
+    facets.university += Number(draft.universities.some(isProvidedFacetValue));
+    facets.company += Number(draft.companies.some(isProvidedFacetValue));
+    facets.skill += Number(draft.skills.some(isProvidedFacetValue));
     if (isProvidedFacetValue(draft.location)) locations.add(facetGroupKey('location', draft.location));
     for (const university of draft.universities) {
       if (isProvidedFacetValue(university)) universities.add(facetGroupKey('university', university));
     }
   }
 
-  return json({ candidates: result.results.length, locations: locations.size, universities: universities.size });
+  return json({ candidates: result.results.length, processed, locations: locations.size, universities: universities.size, facets });
 }
 
 // Deliberately unauthenticated. A profile built from a Hacker News comment is published without
@@ -2371,9 +2385,14 @@ function toPublicCandidate(row) {
     dateRanges: sanitized.dateRanges,
     source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
     sourceUrl: fromHackerNews ? row.hn_permalink : '',
+    processed: isProcessedCandidateRow(row),
     posted: daysSince(row.published_at),
     publishedAt: row.published_at
   };
+}
+
+function isProcessedCandidateRow(row) {
+  return !row.hn_permalink || Number(row.extractor_rank || 0) >= HN_PROCESSED_RANK;
 }
 
 function monthLabel(threadMonth) {
