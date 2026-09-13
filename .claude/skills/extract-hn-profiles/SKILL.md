@@ -38,6 +38,27 @@ Then establish there is work, before any other read:
 - `503 ingest_not_configured` — `HN_INGEST_TOKEN` is unset on the Worker. Stop.
 - `remaining: 0` — nothing to do. Say so and stop.
 
+`remaining` counts rows, not reachable work. Save the page and check how much of it can still
+be read:
+
+```bash
+./scripts/extract-hn-profiles/hncd-api.mjs pending --host https://<worker-host> > <run>/pending.json
+./scripts/extract-hn-profiles/hn-check-sources.mjs --pending <run>/pending.json
+```
+
+A comment its author has deleted is a permanent hole in the queue. Algolia stops serving it, so
+it can never be extracted; and `draft: null` cannot retire it either, because the push endpoint
+identifies an item by re-supplying its comment text and deletion is exactly the state where that
+text is gone. The row keeps its rank and comes back on the first page of every run. On
+2026-09-07 that was 28 of the first 100 pending rows against `remaining: 822`, so plan a page
+against `reachable`, not `remaining`, and expect the gap to widen as each run leaves its own
+deleted items behind.
+
+Clearing them is not this skill's call to make. Archiving the published profile through
+`POST /api/candidates/<id>/removal` works on the deployed Worker and needs no credential, but it
+unpublishes someone, and whether an author deleting their comment should mean that is a question
+for the operator.
+
 Run every script as `./scripts/extract-hn-profiles/...` from this repository's root.
 
 ## 2. Prepare sealed batches
@@ -53,11 +74,27 @@ files: `batch-N.json`, which a model may see, and `batch-N.map.json`, which hold
 
 ## 3. Extract
 
-Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent's only tool is
-`Glob`: it enumerates paths and cannot read file contents, write, execute, or reach the
-network. So paste the batch's items into the prompt inline — it cannot open the file itself,
-and that is the point. Never substitute another `subagent_type`, and never widen that agent's
-tools to make a step work; see `references/isolation.md` control 1.
+Choose the path for the harness running this skill:
+
+- **Claude Code:** Spawn one `hn-profile-extractor` subagent per batch, in parallel. That agent's
+  only tool is `Glob`: it enumerates paths and cannot read file contents, write, execute, or reach
+  the network. Paste the batch's items into its prompt inline. Never substitute another
+  `subagent_type` or widen its tools.
+- **Codex:** Do not paste the batch into the current agent or a collaboration subagent; those
+  children inherit the parent's tool surface. Run the isolated wrapper instead:
+
+  ```bash
+  ./scripts/extract-hn-profiles/hn-codex-extract-batch.mjs \
+    --batch /tmp/claude/hncd/<run>/batch-N.json \
+    --out /tmp/claude/hncd/<run>/drafts-N.json
+  ```
+
+  The wrapper alone reads the batch. It starts an ephemeral Codex process in an empty directory
+  with user configuration and rules ignored, read-only sandboxing, and shell, web, apps, plugins,
+  images, skills, and further delegation disabled. It validates the returned array and moves its
+  bytes into place without rewriting them.
+
+Both paths preserve control 1 in `references/isolation.md`.
 
 Frame each item with the batch's `delimiter`:
 
@@ -112,13 +149,22 @@ live (`GET /api/candidates`) and show the operator the change before pushing. Th
 ./scripts/extract-hn-profiles/hncd-api.mjs push --file /tmp/claude/hncd/<run>/push-N.json --host https://<worker-host>
 ```
 
-The response gives a per-item `outcome` and a new `remaining`. Report both. `remaining` must
-fall monotonically across batches; if it does not, stop — a push is being rejected silently
-and continuing wastes a full corpus run.
+The response gives a per-item `outcome` and a new count. Report both. That count must fall
+monotonically across batches; if it does not, stop — a push is being rejected silently and
+continuing wastes a full corpus run.
+
+Mind the field name: the pending endpoint calls that count `remaining` and the push response
+calls it `pending`. They are the same number from the same query, but a check written against
+the wrong one reads `undefined`, and `undefined` compares false against every threshold — so
+the monotonicity check passes silently for the entire run and tells you nothing.
 
 Outcomes worth surfacing rather than swallowing: `blocked_by_status` (a human edited that
 profile), `skipped_suppressed` (removed on purpose — leave it), `invalid_draft` and
 `invalid_comment` (a harness bug, not a candidate problem).
+
+`retired` is narrower than it sounds: it bumps `extractor_rank` on the ingest row and writes no
+profile statement, so it takes the item out of the queue and leaves anything already published
+exactly where it is. Retiring is not unpublishing — that is the removal route.
 
 ## Running step 3 elsewhere
 
@@ -129,7 +175,8 @@ cleanly onto another machine — the dev box, for a corpus-sized backfill:
 # operator's machine: gate, prep, and ship the sealed batches only
 ./scripts/extract-hn-profiles/hn-prepare-batch.mjs --pending <run>/pending.json --out <run> --batch 5
 tar czf batches.tgz $(ls <run>/batch-*.json | grep -v '\.map\.')   # maps stay behind
-# remote: one subagent per batch, four at a time
+# remote: one isolated extraction process per batch, four at a time
+export HNCD_EXTRACTOR=codex # omit this line to use Claude Code
 seq 1 19 | xargs -P 4 -I{} ./scripts/extract-hn-profiles/devbox-extract-batch.sh {}
 # operator's machine again: assemble against the map, then push
 ```
