@@ -136,6 +136,12 @@ writes a subset batch of only the items worth a second pass:
 ./scripts/extract-hn-profiles/hn-merge-drafts.mjs --base <run>/drafts-N.json --over <run>/pass2/drafts-N.json --out <run>/drafts-N.json
 ```
 
+A resume link that lands on something other than the resume is followed one hop: a personal
+site's index of downloadable versions (the anchor described as the general or comprehensive
+one wins) or a shortener's preview page (the destination decides, miss included). The sidecar
+records the followed `documentUrl` next to the comment's `resumeUrl`. A GitHub or GitLab
+profile page is a `profile_page` miss without a fetch.
+
 A miss is reported by reason (`too_thin`, `scanned_needs_ocr`, `fetch_failed_403`, ...)
 rather than failing the run; a LinkedIn link is never a hint. `references/resumes.md` covers
 the reachable share, the Drive/Docs rewrites, and why the content type comes from magic bytes.

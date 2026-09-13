@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import { resolveFetchTarget } from './hn-fetch-endpoint.mjs';
 import { needsOcr, renderStructured } from './hn-pdf-text.mjs';
-import { RESUME_CAP, htmlToText, neutralize, screenUrl } from './hn-untrusted.mjs';
+import { RESUME_CAP, decodeEntities, htmlToText, neutralize, screenUrl } from './hn-untrusted.mjs';
 
 // A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of chrome,
 // and a scanned page renders to about as little. One threshold decides both "prefer pdftotext to
@@ -28,6 +28,58 @@ function parseArgs(argv) {
 }
 
 const miss = (reason, url = '') => ({ ok: false, reason, url });
+
+const DOCUMENT_HREF = /\.pdf(?:[?#]|$)|drive\.google\.com\/(?:uc|file|open)|docs\.google\.com\/(?:document|presentation)\/|dropbox\.com\//i;
+const SHORTENER_HOST = /^(?:www\.)?(?:bit\.ly|bitly\.com|tinyurl\.com|t\.co|rb\.gy|shorturl\.at|cutt\.ly|tiny\.cc|is\.gd)$/i;
+const SOCIAL_HOST = /(?:^|\.)(?:x\.com|twitter\.com|instagram\.com|facebook\.com|linkedin\.com|youtube\.com)$/i;
+const ANCHOR = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a>/gi;
+
+const strip = (html) => decodeEntities(html.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+// A resume link often lands on something that is not the resume: a personal site's index of
+// several downloadable versions, or a shortener's preview page. One hop from there reaches the
+// document; the page's own anchors say where. Anchors are ranked by the words around them, so
+// "General CV — comprehensive" beats a role-specific variant listed above it.
+export function documentToFollow(html, pageUrl) {
+  const page = new URL(pageUrl);
+  const links = [];
+  // The words that describe a link sit between it and the previous anchor: a heading and a
+  // blurb for this document, not the tail of the previous one's.
+  let previousEnd = 0;
+  for (const match of html.matchAll(ANCHOR)) {
+    const context = strip(html.slice(previousEnd, match.index));
+    previousEnd = match.index + match[0].length;
+    let url;
+    try {
+      url = new URL(decodeEntities(match[1] ?? match[2]), pageUrl);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+    links.push({ url: url.href, host: url.hostname, label: strip(match[3]), context });
+  }
+
+  if (SHORTENER_HOST.test(page.hostname)) {
+    const destination = links.find((link) => !SHORTENER_HOST.test(link.host) && !SOCIAL_HOST.test(link.host) && link.host !== page.hostname);
+    return destination?.url ?? null;
+  }
+
+  const documents = links.filter((link) => DOCUMENT_HREF.test(link.url));
+  if (!documents.length) return null;
+  const score = (link) => {
+    const words = `${link.context} ${link.label}`;
+    return (/general|comprehensive|complete|full/i.test(words) ? 2 : 0) + (/\bcv\b|r[eé]sum[eé]|curriculum/i.test(words) ? 1 : 0);
+  };
+  documents.sort((a, b) => score(b) - score(a));
+  return documents[0].url;
+}
+
+// A code-hosting profile is a landing page too, but one with nothing to follow: the model
+// picked it because the comment offered nothing better, and the comment alone wins.
+function isProfilePage(url) {
+  const parsed = new URL(url);
+  return /^(?:www\.)?(?:github|gitlab)\.com$/i.test(parsed.hostname) && parsed.pathname.split('/').filter(Boolean).length <= 1;
+}
 
 // Share links render a viewer page, not the document. Rewriting to the download surface is
 // what makes ~30% of the corpus reachable at all.
@@ -99,6 +151,31 @@ async function renderPdf(bytes, out) {
   }
 }
 
+// Fetches one URL and renders it to text; `html` is kept for a landing page's anchors.
+async function readDocument(url, out) {
+  const fetched = await fetchBody(url);
+  if (fetched.text === null) return miss(fetched.reason, url);
+
+  const { bytes } = decodeBody(fetched.text);
+  const magic = bytes.subarray(0, 5).toString('latin1');
+
+  if (magic.startsWith('%PDF-')) {
+    mkdirSync(out, { recursive: true });
+    const rendered = await renderPdf(bytes, out);
+    const documentType = rendered.structured.documentType;
+    // A document with no usable text layer will not read on a retry, so it gets its own reason
+    // rather than the `too_thin` a permission wall also produces.
+    if (needsOcr(documentType, rendered.structured.pagesNeedingOcr, rendered.structured.pageCount)) {
+      if (!rendered.text || rendered.text.length < MIN_USEFUL) return miss('scanned_needs_ocr', url);
+    }
+    if (rendered.text === null) return miss('pdftotext_unavailable_or_failed', url);
+    return { ok: true, text: neutralize(rendered.text, RESUME_CAP), documentType, html: null };
+  }
+  if (magic.startsWith('PK')) return miss('office_document_unsupported', url);
+  const html = bytes.toString('utf8');
+  return { ok: true, text: neutralize(htmlToText(html), RESUME_CAP), documentType: null, html };
+}
+
 // Resolves one item's chosen link index against the sealed batch, fetches it, renders it, and
 // writes resume-<nonce>.txt plus a .json provenance sidecar into `out`. Returns the rendered text
 // on a hit and `{ ok: false, reason }` on every kind of miss; it never throws for a bad document.
@@ -112,36 +189,33 @@ export async function resumeText({ batch, nonce, link, out }) {
 
   const screened = screenUrl(directDownload(chosen.url));
   if (!screened) return miss('blocked_url', chosen.url);
+  if (isProfilePage(screened)) return miss('profile_page', screened);
 
-  const fetched = await fetchBody(screened);
-  if (fetched.text === null) return miss(fetched.reason, screened);
+  let read = await readDocument(screened, out);
+  if (!read.ok) return read;
+  let documentUrl = null;
 
-  const { bytes } = decodeBody(fetched.text);
-  const magic = bytes.subarray(0, 5).toString('latin1');
-
-  let text;
-  let documentType = null;
-  if (magic.startsWith('%PDF-')) {
-    mkdirSync(out, { recursive: true });
-    const rendered = await renderPdf(bytes, out);
-    documentType = rendered.structured.documentType;
-    text = rendered.text;
-    // A document with no usable text layer will not read on a retry, so it gets its own reason
-    // rather than the `too_thin` a permission wall also produces.
-    if (needsOcr(documentType, rendered.structured.pagesNeedingOcr, rendered.structured.pageCount)) {
-      if (!text || text.length < MIN_USEFUL) return miss('scanned_needs_ocr', screened);
+  // One hop only. The linked document wins when it reads as a usable resume and says at least
+  // as much as the page that pointed at it; otherwise the page stands as it was. A shortener's
+  // preview page is never the resume, so there the destination's result stands, miss included.
+  const next = read.html ? documentToFollow(read.html, screened) : null;
+  const target = next ? screenUrl(directDownload(next)) : null;
+  if (target && target !== screened) {
+    const followed = await readDocument(target, out);
+    if (SHORTENER_HOST.test(new URL(screened).hostname)) {
+      if (!followed.ok) return followed;
+      read = followed;
+      documentUrl = next;
+    } else if (followed.ok && followed.text.length >= MIN_USEFUL && followed.text.length >= read.text.length) {
+      read = followed;
+      documentUrl = next;
     }
-    if (text === null) return miss('pdftotext_unavailable_or_failed', screened);
-  } else if (magic.startsWith('PK')) {
-    return miss('office_document_unsupported', screened);
-  } else {
-    text = htmlToText(bytes.toString('utf8'));
   }
 
-  const rendered = neutralize(text, RESUME_CAP);
+  const rendered = read.text;
   // A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of
   // chrome. Treat a thin body as a miss so comment-only extraction wins instead.
-  if (rendered.length < MIN_USEFUL) return miss('too_thin', screened);
+  if (rendered.length < MIN_USEFUL) return miss('too_thin', documentUrl || screened);
 
   mkdirSync(out, { recursive: true });
   const textPath = join(out, `resume-${nonce}.txt`);
@@ -149,13 +223,13 @@ export async function resumeText({ batch, nonce, link, out }) {
   writeFileSync(
     join(out, `resume-${nonce}.json`),
     JSON.stringify(
-      { resumeUrl: chosen.url, resumeFetchedAt: new Date().toISOString(), chars: rendered.length, documentType },
+      { resumeUrl: chosen.url, documentUrl, resumeFetchedAt: new Date().toISOString(), chars: rendered.length, documentType: read.documentType },
       null,
       2
     )
   );
 
-  return { ok: true, url: chosen.url, path: textPath, chars: rendered.length, text: rendered };
+  return { ok: true, url: chosen.url, documentUrl, path: textPath, chars: rendered.length, text: rendered };
 }
 
 if (import.meta.main) {

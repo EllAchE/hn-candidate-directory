@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { attachResumes, chooseIndex } from '../scripts/extract-hn-profiles/hn-attach-resumes.mjs';
+import { documentToFollow, resumeText } from '../scripts/extract-hn-profiles/hn-resume-text.mjs';
 import { checkDrafts, expectedFields } from '../scripts/extract-hn-profiles/hn-check-drafts.mjs';
 import { mergeDrafts } from '../scripts/extract-hn-profiles/hn-merge-drafts.mjs';
 import { labelledResumeIndex, screenedLinks } from '../scripts/extract-hn-profiles/hn-untrusted.mjs';
@@ -178,6 +179,105 @@ test('a fetch miss is counted by reason and never throws', async () => {
     assert.equal(result.attached, 0);
     assert.deepEqual(result.misses, { fetch_unreachable: 1 });
     assert.equal(batch.items[0].resume, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.UNBLOCKER_URL;
+    else process.env.UNBLOCKER_URL = previous;
+  }
+});
+
+const BLURB = '<p>Built things.</p>'.repeat(40);
+
+test('a landing page names the document to follow, ranked by the words around each link', () => {
+  const index = `<h1>Emmanuel</h1><p>My resumes for the role you are hiring for.</p>
+    <h2>Technical Support Resume</h2><p>For support roles.</p>
+    <a href="https://drive.google.com/uc?export=download&amp;id=AAA">Download</a>
+    <a href="https://drive.google.com/file/d/AAA/view?usp=sharing">Open in Drive</a>
+    <h2>General CV</h2><p>Comprehensive CV covering all professional experience.</p>
+    <a href="https://drive.google.com/uc?export=download&amp;id=GEN">Download</a>
+    <a href="https://drive.google.com/file/d/GEN/view?usp=sharing">Open in Drive</a>`;
+  assert.equal(documentToFollow(index, 'https://me.example.org/resume'), 'https://drive.google.com/uc?export=download&id=GEN');
+  assert.equal(documentToFollow('<a href="/projects">Projects</a><p>Jane Doe, engineer.</p>', 'https://me.example.org/'), null);
+  const interstitial = `<a href="http://bitly.com/?utm_source=Bitly"></a><p>Here's a preview of your destination</p>
+    <a href="https://pax.example.org/">pax.example.org/</a><a href="https://x.com/bitly"></a>`;
+  assert.equal(documentToFollow(interstitial, 'https://bit.ly/abc'), 'https://pax.example.org/');
+});
+
+// A small site: a landing page listing two documents, the documents themselves, and a
+// shortener-style preview page pointing at a page that renders empty.
+async function withSite(fn) {
+  const pages = {
+    '/resume': `<h2>Support Resume</h2><a href="/support.pdf">Download</a><h2>General CV</h2><p>Comprehensive CV.</p><a href="/general.pdf">Download</a>`,
+    '/support.pdf': `<html><body><h1>Jane Doe</h1><p>Support engineer at Acme Corp.</p>${BLURB}</body></html>`,
+    '/general.pdf': `<html><body><h1>Jane Doe</h1><p>Engineer at Acme Corp, 2019-2023.</p><p>Education: MIT, BSc 2018.</p>${BLURB}${BLURB}</body></html>`,
+    '/preview': `<p>Here's a preview of your destination</p><a href="https://bit.ly/x">bitly</a><a href="https://dest.example.org/empty">dest.example.org/</a>`,
+    '/empty': `<html><body><div id="root"></div></body></html>`,
+    '/full': `<html><body><h1>Jane Doe</h1><p>Engineer at Acme Corp.</p>${BLURB}<a href="/general.pdf">Download PDF</a></body></html>`
+  };
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const url = new URL(JSON.parse(body).url);
+      const page = pages[url.pathname];
+      if (!page) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(page.replaceAll('__SELF__', `https://${url.hostname}`));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const previous = process.env.UNBLOCKER_URL;
+  process.env.UNBLOCKER_URL = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fn();
+  } finally {
+    if (previous === undefined) delete process.env.UNBLOCKER_URL;
+    else process.env.UNBLOCKER_URL = previous;
+    server.close();
+  }
+}
+
+const itemFor = (url) => ({ nonce: 'n', text: '', links: [{ index: 1, url }], resumeHint: 1 });
+
+test('a resume link that lands on an index page reads the document it points at', async () => {
+  await withSite(async () => {
+    const out = mkdtempSync(join(tmpdir(), 'hncd-follow-'));
+    const result = await resumeText({ batch: { items: [itemFor('https://me.example.org/resume')] }, nonce: 'n', link: 1, out });
+    assert.equal(result.ok, true);
+    assert.match(result.text, /Education: MIT/);
+    assert.equal(result.url, 'https://me.example.org/resume');
+    assert.equal(result.documentUrl, 'https://me.example.org/general.pdf');
+    assert.equal(JSON.parse(readFileSync(join(out, 'resume-n.json'), 'utf8')).documentUrl, 'https://me.example.org/general.pdf');
+  });
+});
+
+test('a page that already reads as a resume keeps its own text unless the document says more', async () => {
+  await withSite(async () => {
+    const out = mkdtempSync(join(tmpdir(), 'hncd-follow-full-'));
+    const result = await resumeText({ batch: { items: [itemFor('https://me.example.org/full')] }, nonce: 'n', link: 1, out });
+    assert.equal(result.ok, true);
+    assert.equal(result.documentUrl, 'https://me.example.org/general.pdf');
+    assert.match(result.text, /Education: MIT/);
+  });
+});
+
+test('a shortener preview page is never the resume: the destination decides, miss included', async () => {
+  await withSite(async () => {
+    const out = mkdtempSync(join(tmpdir(), 'hncd-follow-short-'));
+    const result = await resumeText({ batch: { items: [itemFor('https://bit.ly/preview')] }, nonce: 'n', link: 1, out });
+    assert.deepEqual(result, { ok: false, reason: 'too_thin', url: 'https://dest.example.org/empty' });
+    assert.equal(existsSync(join(out, 'resume-n.txt')), false);
+  });
+});
+
+test('a code-hosting profile is a miss of its own kind, without a fetch', async () => {
+  const previous = process.env.UNBLOCKER_URL;
+  process.env.UNBLOCKER_URL = 'http://127.0.0.1:9';
+  try {
+    const out = mkdtempSync(join(tmpdir(), 'hncd-profile-'));
+    const result = await resumeText({ batch: { items: [itemFor('https://github.com/asciimoo')] }, nonce: 'n', link: 1, out });
+    assert.deepEqual(result, { ok: false, reason: 'profile_page', url: 'https://github.com/asciimoo' });
+    const repo = await resumeText({ batch: { items: [itemFor('https://github.com/asciimoo/resume')] }, nonce: 'n', link: 1, out });
+    assert.equal(repo.reason, 'fetch_unreachable');
   } finally {
     if (previous === undefined) delete process.env.UNBLOCKER_URL;
     else process.env.UNBLOCKER_URL = previous;
