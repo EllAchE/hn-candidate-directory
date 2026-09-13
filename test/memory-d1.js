@@ -182,12 +182,16 @@ class MemoryStatement {
     }
     if (this.sql.includes("WHERE r.status = 'published'")) {
       const ingestsBySubmission = new Map([...this.database.hnIngests.values()].map((ingest) => [ingest.submission_id, ingest]));
-      const rows = [...this.database.revisions.values()]
+      let rows = [...this.database.revisions.values()]
         .filter((revision) => revision.status === 'published')
         .map((revision) => ({ ...revision, ...hnJoinColumns(ingestsBySubmission.get(revision.submission_id)) }))
-        .filter((revision) => revision.suppressed_at === null)
-        .sort((left, right) => right.published_at.localeCompare(left.published_at) || left.id.localeCompare(right.id));
-      const [limit, offset] = this.values;
+        .filter((revision) => revision.suppressed_at === null);
+      if (this.sql.includes('AND r.hn_username = ? COLLATE NOCASE')) {
+        const username = String(this.values[0]).toLowerCase();
+        rows = rows.filter((revision) => String(revision.hn_username || '').toLowerCase() === username);
+      }
+      rows.sort((left, right) => right.published_at.localeCompare(left.published_at) || left.id.localeCompare(right.id));
+      const [limit, offset] = this.values.slice(-2);
       const results = this.sql.includes('LIMIT ? OFFSET ?') ? rows.slice(offset, offset + limit) : rows;
       return { results };
     }
