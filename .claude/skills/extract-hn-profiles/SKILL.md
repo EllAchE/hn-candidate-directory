@@ -138,9 +138,10 @@ writes a subset batch of only the items worth a second pass:
 
 A resume link that lands on something other than the resume is followed one hop: a personal
 site's index of downloadable versions (the anchor described as the general or comprehensive
-one wins) or a shortener's preview page (the destination decides, miss included). The sidecar
-records the followed `documentUrl` next to the comment's `resumeUrl`. A GitHub or GitLab
-profile page is a `profile_page` miss without a fetch.
+one wins) or a shortener's preview page (its first off-site anchor). The hop can only add: the
+document replaces the page when it reads as a usable resume and says at least as much, and
+otherwise the page stands, since even a preview or a profile page carries the person's name.
+The sidecar records the followed `documentUrl` next to the comment's `resumeUrl`.
 
 A miss is reported by reason (`too_thin`, `scanned_needs_ocr`, `fetch_failed_403`, ...)
 rather than failing the run; a LinkedIn link is never a hint. `references/resumes.md` covers

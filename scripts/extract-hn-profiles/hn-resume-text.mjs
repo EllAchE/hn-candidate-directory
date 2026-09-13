@@ -74,13 +74,6 @@ export function documentToFollow(html, pageUrl) {
   return documents[0].url;
 }
 
-// A code-hosting profile is a landing page too, but one with nothing to follow: the model
-// picked it because the comment offered nothing better, and the comment alone wins.
-function isProfilePage(url) {
-  const parsed = new URL(url);
-  return /^(?:www\.)?(?:github|gitlab)\.com$/i.test(parsed.hostname) && parsed.pathname.split('/').filter(Boolean).length <= 1;
-}
-
 // Share links render a viewer page, not the document. Rewriting to the download surface is
 // what makes ~30% of the corpus reachable at all.
 function directDownload(url) {
@@ -189,24 +182,20 @@ export async function resumeText({ batch, nonce, link, out }) {
 
   const screened = screenUrl(directDownload(chosen.url));
   if (!screened) return miss('blocked_url', chosen.url);
-  if (isProfilePage(screened)) return miss('profile_page', screened);
 
   let read = await readDocument(screened, out);
   if (!read.ok) return read;
   let documentUrl = null;
 
-  // One hop only. The linked document wins when it reads as a usable resume and says at least
-  // as much as the page that pointed at it; otherwise the page stands as it was. A shortener's
-  // preview page is never the resume, so there the destination's result stands, miss included.
+  // One hop only, and it can only add: the linked document replaces the page when it reads as a
+  // usable resume and says at least as much. Otherwise the page stands, whatever it is. A
+  // shortener's preview or a code-hosting profile still carries the person's name in its
+  // title or header, which is more than the comment alone gives the extractor.
   const next = read.html ? documentToFollow(read.html, screened) : null;
   const target = next ? screenUrl(directDownload(next)) : null;
   if (target && target !== screened) {
     const followed = await readDocument(target, out);
-    if (SHORTENER_HOST.test(new URL(screened).hostname)) {
-      if (!followed.ok) return followed;
-      read = followed;
-      documentUrl = next;
-    } else if (followed.ok && followed.text.length >= MIN_USEFUL && followed.text.length >= read.text.length) {
+    if (followed.ok && followed.text.length >= MIN_USEFUL && followed.text.length >= read.text.length) {
       read = followed;
       documentUrl = next;
     }
@@ -215,7 +204,7 @@ export async function resumeText({ batch, nonce, link, out }) {
   const rendered = read.text;
   // A permission wall or virus-scan interstitial returns 200 with a few hundred bytes of
   // chrome. Treat a thin body as a miss so comment-only extraction wins instead.
-  if (rendered.length < MIN_USEFUL) return miss('too_thin', documentUrl || screened);
+  if (rendered.length < MIN_USEFUL) return miss('too_thin', screened);
 
   mkdirSync(out, { recursive: true });
   const textPath = join(out, `resume-${nonce}.txt`);

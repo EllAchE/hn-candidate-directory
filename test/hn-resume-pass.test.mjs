@@ -209,7 +209,7 @@ async function withSite(fn) {
     '/resume': `<h2>Support Resume</h2><a href="/support.pdf">Download</a><h2>General CV</h2><p>Comprehensive CV.</p><a href="/general.pdf">Download</a>`,
     '/support.pdf': `<html><body><h1>Jane Doe</h1><p>Support engineer at Acme Corp.</p>${BLURB}</body></html>`,
     '/general.pdf': `<html><body><h1>Jane Doe</h1><p>Engineer at Acme Corp, 2019-2023.</p><p>Education: MIT, BSc 2018.</p>${BLURB}${BLURB}</body></html>`,
-    '/preview': `<p>Here's a preview of your destination</p><a href="https://bit.ly/x">bitly</a><a href="https://dest.example.org/empty">dest.example.org/</a>`,
+    '/preview': `<title>Jane Doe - Resume</title><p>Here's a preview of your destination</p><a href="https://bit.ly/x">bitly</a><a href="https://dest.example.org/empty">dest.example.org/</a>${BLURB}`,
     '/empty': `<html><body><div id="root"></div></body></html>`,
     '/full': `<html><body><h1>Jane Doe</h1><p>Engineer at Acme Corp.</p>${BLURB}<a href="/general.pdf">Download PDF</a></body></html>`
   };
@@ -260,26 +260,12 @@ test('a page that already reads as a resume keeps its own text unless the docume
   });
 });
 
-test('a shortener preview page is never the resume: the destination decides, miss included', async () => {
+test('a shortener preview page stands when its destination renders empty', async () => {
   await withSite(async () => {
     const out = mkdtempSync(join(tmpdir(), 'hncd-follow-short-'));
     const result = await resumeText({ batch: { items: [itemFor('https://bit.ly/preview')] }, nonce: 'n', link: 1, out });
-    assert.deepEqual(result, { ok: false, reason: 'too_thin', url: 'https://dest.example.org/empty' });
-    assert.equal(existsSync(join(out, 'resume-n.txt')), false);
+    assert.equal(result.ok, true);
+    assert.equal(result.documentUrl, null);
+    assert.match(result.text, /Jane Doe - Resume/);
   });
-});
-
-test('a code-hosting profile is a miss of its own kind, without a fetch', async () => {
-  const previous = process.env.UNBLOCKER_URL;
-  process.env.UNBLOCKER_URL = 'http://127.0.0.1:9';
-  try {
-    const out = mkdtempSync(join(tmpdir(), 'hncd-profile-'));
-    const result = await resumeText({ batch: { items: [itemFor('https://github.com/asciimoo')] }, nonce: 'n', link: 1, out });
-    assert.deepEqual(result, { ok: false, reason: 'profile_page', url: 'https://github.com/asciimoo' });
-    const repo = await resumeText({ batch: { items: [itemFor('https://github.com/asciimoo/resume')] }, nonce: 'n', link: 1, out });
-    assert.equal(repo.reason, 'fetch_unreachable');
-  } finally {
-    if (previous === undefined) delete process.env.UNBLOCKER_URL;
-    else process.env.UNBLOCKER_URL = previous;
-  }
 });
