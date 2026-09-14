@@ -248,6 +248,24 @@ test('an href with an encoded query is decoded before screening', () => {
   assert.deepEqual(links, [{ index: 1, url: 'https://ex.test/cv?a=1&b=2' }]);
 });
 
+test('a link written without a scheme is still a link', () => {
+  // The shape that lost a candidate's resume: no `https://`, so the old pattern found no link at
+  // all and the item reached the extractor looking like it had never offered one.
+  assert.deepEqual(screenedLinks('Resume: jmuconto.github.io/resume and www.janedoe.com'), [
+    { index: 1, url: 'https://jmuconto.github.io/resume' },
+    { index: 2, url: 'https://www.janedoe.com/' }
+  ]);
+});
+
+test('host-shaped prose is not promoted to a link', () => {
+  assert.deepEqual(screenedLinks('I wrote src/main.rs/ and README.md/ and I read node.js/docs'), []);
+  assert.deepEqual(screenedLinks('mail jane@jane.dev/x, bumped v1.2/beta, my site is jane.dev'), []);
+});
+
+test('a schemeless link is screened for SSRF exactly like any other', () => {
+  assert.deepEqual(screenedLinks('metadata.google.internal/x and foo.localhost/x and 127.0.0.1/x'), []);
+});
+
 function assembleFixture(drafts) {
   const dir = mkdtempSync(join(tmpdir(), 'hncd-test-'));
   const batch = join(dir, 'batch-1.json');

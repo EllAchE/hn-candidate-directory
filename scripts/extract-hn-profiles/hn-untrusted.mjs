@@ -69,14 +69,39 @@ export function screenUrl(value) {
   if (parsed.href.length > 2_048) return null;
 
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // `https:///cv` parses, and its empty host would otherwise screen clean and reach the fetcher.
+  if (!host) return null;
   if (BLOCKED_HOST.test(host)) return null;
   if (IPV4_LITERAL.test(host)) return null;
   if (host.includes(':')) return null;
   return parsed.href;
 }
 
-const LINK_PATTERN = /https?:\/\/[^\s<>"')\]]+/g;
+// Candidates write the link with no scheme at all, and demanding one meant a comment reading
+// `jmuconto.github.io/resume` yielded no link whatsoever -- the resume was dropped in silence
+// rather than reported missing, and the extractor cannot ask for a link it was never shown.
+// Prose is dense with host-shaped tokens, so the schemeless branch is narrow on purpose: `www.`
+// stands on its own, and every other host must carry both an alphabetic TLD that is not a
+// source-file suffix and a path. That keeps `main.rs` and `README.md` filenames, at the price of
+// a bare `jane.dev` and of a genuine `.sh` or `.rs` host -- neither of which matched before
+// either, so the narrow branch is never worse than no branch.
+//
+// An explicit scheme is still matched exactly as it was, so `http://` reaches screenUrl and is
+// refused there; nothing here upgrades a downgrade.
+const FILE_SUFFIX =
+  'js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|sh|md|json|ya?ml|toml|txt|html?|css|scss|php|java|cpp?|hpp?' +
+  '|sql|xml|csv|pdf|png|jpe?g|gif|svg|zip|tar|gz|lock|log|env|cfg|ini|conf|exe|dll|swift|kt';
+const LABEL = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
+const TAIL = '[^\\s<>"\')\\]]';
+const BARE_HOST =
+  `www\\.${LABEL}(?:\\.${LABEL})*` +
+  `|${LABEL}(?:\\.${LABEL})*\\.(?!(?:${FILE_SUFFIX})(?![a-z0-9]))[a-z]{2,24}(?=/)`;
+const LINK_PATTERN = new RegExp(`https?://${TAIL}+|(?<![\\w@./-])(?:${BARE_HOST})${TAIL}*`, 'gi');
 const HREF_PATTERN = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+
+// Only ever handed a LINK_PATTERN match, which is either http/https or a bare host. An href is
+// not routed through it: a relative `/item?id=1` would become `https:///item?id=1`.
+const withHttps = (value) => (/^https?:\/\//i.test(value) ? value : `https://${value}`);
 
 // Takes the raw comment HTML, not the rendered text: HN elides a long URL in the anchor text
 // it displays, so a Google Drive share link read from the text is truncated and unfetchable.
@@ -87,7 +112,8 @@ export function screenedLinks(html, limit = 12) {
 
   const add = (raw, isHref) => {
     if (links.length >= limit) return;
-    const screened = screenUrl(String(raw ?? '').replace(/[.,;:]+$/, ''));
+    const trimmed = String(raw ?? '').replace(/[.,;:]+$/, '');
+    const screened = screenUrl(isHref ? trimmed : withHttps(trimmed));
     if (!screened || seen.has(screened)) return;
     // A bare-text match that is a prefix of a collected href is that link with its display
     // elided, not a second destination.
@@ -124,7 +150,7 @@ export function labelledResumeIndex(html, links) {
   const end = after.search(NEXT_LABEL);
   const raw = (end >= 0 ? after.slice(0, end) : after).match(LINK_PATTERN)?.[0];
   if (!raw) return null;
-  const screened = screenUrl(raw.replace(/\.{2,}$/, '').replace(/[.,;:]+$/, ''));
+  const screened = screenUrl(withHttps(raw.replace(/\.{2,}$/, '').replace(/[.,;:]+$/, '')));
   if (!screened) return null;
   const hit = (links || []).find(
     (link) => link.url === screened || link.url.startsWith(screened) || screened.startsWith(link.url)
