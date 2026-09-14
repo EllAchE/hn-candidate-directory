@@ -269,3 +269,10 @@ test('a shortener preview page stands when its destination renders empty', async
     assert.match(result.text, /Jane Doe - Resume/);
   });
 });
+
+test('a Résumé line whose link has no scheme still names that link', () => {
+  const html = comment('Résumé/CV: jmuconto.github.io/resume');
+  const links = screenedLinks(html);
+  assert.deepEqual(links.map((l) => l.url), ['https://example.com/me', 'https://jmuconto.github.io/resume']);
+  assert.equal(labelledResumeIndex(html, links), 2);
+});
