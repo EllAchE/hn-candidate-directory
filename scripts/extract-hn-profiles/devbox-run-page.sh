@@ -42,8 +42,12 @@ echo "$PAGE: pending before = $before"
 [ "$before" = "0" ] && { echo "$PAGE: nothing to do"; exit 0; }
 
 # --- prepare sealed batches -------------------------------------------------
+# The prepare step already names every pending item Algolia returned no text for -- usually a comment
+# its author later deleted -- and reducing its output to batches and items threw that list away, so a
+# page that went in with 100 and came out with 99 read as a clean run and the lost candidate was found
+# only by counting map entries by hand. An empty `dropped` prints too: it is what says nothing was lost.
 node "$HERE/hn-prepare-batch.mjs" --pending "$RUN/pending.json" --out "$RUN" --batch 5 \
-  | jq -c '{batches:(.batches|length), items:([.batches[].items]|add)}' || exit 1
+  | jq -c '{batches:(.batches|length), items:([.batches[].items]|add), dropped:.missing}' || exit 1
 nb=$(cd "$RUN" && ls batch-*.json 2>/dev/null | grep -vc '\.map\.')
 [ "${nb:-0}" -gt 0 ] || { echo "$PAGE: no batches prepared"; exit 1; }
 
