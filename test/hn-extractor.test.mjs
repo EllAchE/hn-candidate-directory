@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -136,7 +136,10 @@ test('Codex extraction writes the validated response without rewriting its bytes
     assert.equal(readFileSync(outPath, 'utf8'), returned);
     assert.equal(invocation.binary, '/fake/codex');
     assert.equal(invocation.options.input, renderPrompt(sealedBatch));
-    assert.match(invocation.options.cwd, /^\/tmp\/hncd-codex-extractor-/);
+    // The property is a fresh scratch dir outside the checkout, not the literal `/tmp`: the source
+    // uses `tmpdir()`, which honours $TMPDIR and is `/var/folders/...` on a stock Mac.
+    assert.equal(dirname(invocation.options.cwd), tmpdir());
+    assert.match(basename(invocation.options.cwd), /^hncd-codex-extractor-/);
     assert.equal(invocation.options.env.HNCD_INGEST_TOKEN, undefined);
     assert.equal(invocation.options.env.OPENAI_API_KEY, undefined);
   } finally {
