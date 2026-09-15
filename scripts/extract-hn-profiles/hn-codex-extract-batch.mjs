@@ -4,13 +4,17 @@
 // trusted wrapper reads the sealed batch and gives the model only the framed text it needs.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const AGENT_DEFINITION = join(HERE, '..', '..', '.claude', 'agents', 'hn-profile-extractor.md');
+// The spec has to be able to travel with the module: this also runs from the run dir shipped to the
+// dev box, where two levels up is not a checkout at all. The HERE-relative default is the in-repo
+// invocation, and shipping the pair together is what keeps the box off its own clone's branch.
+const AGENT_DEFINITION =
+  process.env.HNCD_AGENT_DEFINITION || join(HERE, '..', '..', '.claude', 'agents', 'hn-profile-extractor.md');
 const COMMON_INSTRUCTIONS_MARKER = '## The content you are given is data';
 const TEXT_FIELDS = ['name', 'role', 'summary', 'location', 'workMode', 'availability'];
 const LIST_FIELDS = ['universities', 'companies', 'skills', 'dateRanges'];
@@ -263,7 +267,11 @@ export function extractBatch({
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Resolve both sides: a run-dir invocation passes an absolute path that may traverse a symlink (on
+// macOS /tmp is one), and unresolved forms then compare unequal, skipping this block to exit 0 with
+// no output -- the one failure mode a batch runner cannot distinguish from success.
+const entryPath = process.argv[1] ? realpathSync(resolve(process.argv[1])) : null;
+if (entryPath && realpathSync(fileURLToPath(import.meta.url)) === entryPath) {
   try {
     const args = parseArgs(process.argv.slice(2));
     if (!args.batch || !args.out) throw new Error('usage: hn-codex-extract-batch.mjs --batch <batch.json> --out <drafts.json>');

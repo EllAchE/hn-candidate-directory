@@ -71,10 +71,16 @@ run_claude() {
     --output-format text >"$LOG" 2>&1
 }
 
+# claude is framed by $PROMPT above, so it always runs this script's instructions. codex is framed by
+# the module and the agent definition instead, so those have to come from the same place the batches
+# did -- the run dir when the operator shipped them there, and only then the local checkout.
 run_codex() {
+  local mod="$DIR/hn-codex-extract-batch.mjs" spec="$DIR/hn-profile-extractor.md"
+  [ -f "$mod" ] || mod="$REPO/scripts/extract-hn-profiles/hn-codex-extract-batch.mjs"
+  [ -f "$spec" ] || spec="$REPO/.claude/agents/hn-profile-extractor.md"
   HNCD_BATCH_TIMEOUT_MS="${HNCD_BATCH_TIMEOUT_MS:-$(( ${HNCD_BATCH_TIMEOUT:-1200} * 1000 ))}" \
-    ./scripts/extract-hn-profiles/hn-codex-extract-batch.mjs \
-      --batch "$BATCH" --out "$OUT" >"$LOG" 2>&1
+    HNCD_AGENT_DEFINITION="$spec" \
+    "$mod" --batch "$BATCH" --out "$OUT" >"$LOG" 2>&1
 }
 
 # Not rc: claude reports a quota refusal on stdout and still exits 1, like every other failure.
