@@ -53,7 +53,11 @@ function fail(message, code = 1) {
 
 function readBatch(path) {
   if (basename(path).endsWith('.map.json')) throw new Error('refusing to read an identity map as a model batch');
-  const batch = JSON.parse(readFileSync(path, 'utf8'));
+  return assertSealedBatch(JSON.parse(readFileSync(path, 'utf8')), path);
+}
+
+// Exported so the seal itself is testable without staging a file on disk.
+export function assertSealedBatch(batch, path) {
   if (!Number.isInteger(batch?.batch) || typeof batch?.delimiter !== 'string' || !Array.isArray(batch?.items)) {
     throw new Error(`${path} is not a sealed HN extraction batch`);
   }
@@ -76,6 +80,12 @@ function readBatch(path) {
     }
     nonces.add(item.nonce);
     if (item.text.includes(batch.delimiter)) throw new Error(`${path} contains its own delimiter`);
+    // The resume is fetched from a candidate-supplied URL, so it is attacker-controlled exactly
+    // like the comment and reaches the prompt the same way. It gets the same delimiter screen.
+    if (item.resume != null && typeof item.resume !== 'string') {
+      throw new Error(`${path} contains a malformed resume`);
+    }
+    if (item.resume?.includes(batch.delimiter)) throw new Error(`${path} contains its own delimiter`);
     for (const [offset, link] of item.links.entries()) {
       if (link?.index !== offset + 1 || typeof link?.url !== 'string') {
         throw new Error(`${path} contains a malformed numbered link`);
@@ -97,11 +107,22 @@ function renderLinks(links) {
   return links.length ? links.map(({ index, url }) => `${index}. ${url}`).join('  ') : 'none';
 }
 
+// The resume text is the whole point of the sealed batch: the harness has already fetched and
+// capped it, and name, employers, education and dates mostly live there rather than in the comment.
+// Omitting it here silently costs exactly what the claude path measured recovering -- names 4/15 ->
+// 12/15, employers 2 -> 9, education 0 -> 6 -- so this framing tracks `devbox-extract-batch.sh`.
+function renderItem(batch, item) {
+  const lines = [batch.delimiter, `nonce: ${item.nonce}`, `links: ${renderLinks(item.links)}`];
+  const expected = Array.isArray(item.expected) ? item.expected.join(', ') : (item.expected ?? '');
+  if (expected) lines.push(`EXPECTED: ${expected}`);
+  lines.push('COMMENT:', item.text);
+  if (item.resume) lines.push('RESUME:', item.resume);
+  lines.push(batch.delimiter);
+  return lines.join('\n');
+}
+
 export function renderPrompt(batch) {
-  const blocks = batch.items.map(
-    (item) =>
-      `${batch.delimiter}\nnonce: ${item.nonce}\nlinks: ${renderLinks(item.links)}\nCOMMENT:\n${item.text}\n${batch.delimiter}`
-  );
+  const blocks = batch.items.map((item) => renderItem(batch, item));
   return `Extract one profile for every sealed item below. Return the JSON array and nothing else.\n\n${blocks.join('\n\n')}`;
 }
 
