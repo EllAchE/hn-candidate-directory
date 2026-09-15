@@ -18,8 +18,9 @@ const basename = (p) => p.split('/').pop();
 // A stub stands in for the extractor CLI and records that it ran, so a fallback that never fired and
 // one that fired and failed are distinguishable. The codex stub keeps its .mjs name with a bash
 // shebang because the script execs that path directly rather than handing it to node.
-function stub(path, { message, exit, drafts }) {
-  const lines = ['#!/usr/bin/env bash', `touch "$RAN_DIR/${basename(path)}.ran"`];
+function stub(path, { message, exit, drafts, marker }) {
+  const lines = ['#!/usr/bin/env bash', `touch "$RAN_DIR/${marker ?? basename(path)}.ran"`];
+  lines.push('[ -n "${HNCD_AGENT_DEFINITION:-}" ] && echo "spec=$HNCD_AGENT_DEFINITION"');
   if (message) lines.push(`echo ${JSON.stringify(message)}`);
   if (drafts) lines.push(`printf '%s' ${JSON.stringify(JSON.stringify(drafts))} >"$STUB_OUT"`);
   lines.push(`exit ${exit}`);
@@ -31,7 +32,7 @@ function stub(path, { message, exit, drafts }) {
 // HNCD_REPO, so the fake repo only needs that one path to exist. Setup is separate from the run
 // because a batch with a drafts file is skipped as already extracted -- reusing one harness for two
 // invocations measures that skip instead of the fallback.
-function harness({ claude, codex }) {
+function harness({ claude, codex, shipped }) {
   const root = mkdtempSync(join(tmpdir(), 'hncd-fallback-'));
   const dir = join(root, 'run');
   const bin = join(root, 'bin');
@@ -42,6 +43,10 @@ function harness({ claude, codex }) {
   writeFileSync(join(dir, 'batch-1.json'), JSON.stringify({ batch: 1, delimiter: 'HNCD-AAAABBBB', items: [] }));
   stub(join(bin, 'claude'), claude);
   stub(join(repo, 'hn-codex-extract-batch.mjs'), codex);
+  if (shipped) {
+    stub(join(dir, 'hn-codex-extract-batch.mjs'), { ...shipped, marker: 'shipped' });
+    writeFileSync(join(dir, 'hn-profile-extractor.md'), '# shipped spec\n');
+  }
 
   const run = (extraEnv = {}) =>
     spawnSync('bash', [script, '1', dir], {
@@ -144,6 +149,39 @@ test('A successful claude run records itself and never invokes codex', () => {
     assert.equal(h.ran('hn-codex-extract-batch.mjs'), false);
     assert.match(res.stdout, /extractor=claude/);
     assert.equal(readFileSync(join(h.dir, 'logs', 'batch-1.extractor'), 'utf8').trim(), 'claude');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('codex extracts with the module and spec shipped into the run dir, not the box checkout', () => {
+  // The run dir travels from the operator's machine; the checkout at HNCD_REPO is whatever branch
+  // that box was left on. Preferring it discarded every resume p14 attached.
+  const h = harness({
+    claude: { exit: 0, drafts: ONE_DRAFT },
+    codex: { exit: 0, drafts: ONE_DRAFT },
+    shipped: { exit: 0, drafts: ONE_DRAFT }
+  });
+  try {
+    const res = h.run({ HNCD_EXTRACTOR: 'codex' });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.ok(h.ran('shipped'), 'the shipped module should have run');
+    assert.equal(h.ran('hn-codex-extract-batch.mjs'), false, 'the checkout module must stay unused');
+    assert.match(readFileSync(join(h.dir, 'logs', 'batch-1.log'), 'utf8'),
+      new RegExp(`spec=${h.dir}/hn-profile-extractor\\.md`));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('codex falls back to the local checkout when nothing was shipped', () => {
+  const h = harness({ claude: { exit: 0, drafts: ONE_DRAFT }, codex: { exit: 0, drafts: ONE_DRAFT } });
+  try {
+    const res = h.run({ HNCD_EXTRACTOR: 'codex' });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.ok(h.ran('hn-codex-extract-batch.mjs'));
+    assert.match(readFileSync(join(h.dir, 'logs', 'batch-1.log'), 'utf8'),
+      /spec=.*\/\.claude\/agents\/hn-profile-extractor\.md/);
   } finally {
     h.cleanup();
   }

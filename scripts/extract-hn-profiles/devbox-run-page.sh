@@ -28,6 +28,7 @@ REMOTE_REPO="${HNCD_REMOTE_REPO:-hn-candidate-directory}"
 LANES="${HNCD_LANES:-4}"
 PASSES="${HNCD_PASSES:-2}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+AGENT_SPEC="$HERE/../../.claude/agents/hn-profile-extractor.md"
 
 gc() { gcloud compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap --project="$PROJECT" "$@"; }
 # jq's `add` over objects keeps the last value per key; per-reason counts need a sum.
@@ -72,8 +73,10 @@ done | jq -s -c "$SUM"'{attached:([.[].attached]|add), fetched:([.[].fetched]|ad
   | sed "s/^/$PAGE: resumes pass 1 /"
 
 # --- extract remotely -------------------------------------------------------
-# The batch script travels with the batches, so the box runs this checkout's framing rather than
-# whatever its own clone happens to be on; it still cds into that clone for the agent definition.
+# Everything that frames the model travels with the batches -- the batch script, the codex module and
+# the agent definition -- so the box extracts against this checkout's spec rather than whatever its
+# own clone happens to be on. The box still cds into that clone, but only for the claude path, whose
+# subagent the harness discovers from the project directory.
 # tmux, not `setsid nohup`: both survive the ssh channel closing, but a tmux session can be
 # inspected and killed by name afterwards, and a stalled pool is otherwise invisible.
 #   remote_extract <local-dir> <remote-subdir> <tmux-name> "<batch numbers>"
@@ -86,7 +89,10 @@ remote_extract() {
   # make the pool look finished before it starts: re-running 20260913-p13 reported `extracted 14/14`
   # having genuinely extracted 3, and silently dropped the other 11 batches. Clear both ends first.
   rm -f "$local_dir"/drafts-*.json
-  ( cd "$local_dir" && cp "$HERE/devbox-extract-batch.sh" . && tar czf ship.tgz devbox-extract-batch.sh $(ls batch-*.json | grep -v '\.map\.') ) || return 1
+  local framing="devbox-extract-batch.sh hn-codex-extract-batch.mjs hn-profile-extractor.md"
+  ( cd "$local_dir" \
+    && cp "$HERE/devbox-extract-batch.sh" "$HERE/hn-codex-extract-batch.mjs" "$AGENT_SPEC" . \
+    && tar czf ship.tgz $framing $(ls batch-*.json | grep -v '\.map\.') ) || return 1
   if tar tzf "$local_dir/ship.tgz" | grep -q '\.map\.'; then
     echo "$PAGE: ABORT -- a nonce->id map reached the tarball"; return 1
   fi
