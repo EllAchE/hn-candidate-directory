@@ -64,6 +64,12 @@ done | jq -s -c "$SUM"'{attached:([.[].attached]|add), fetched:([.[].fetched]|ad
 remote_extract() {
   local local_dir="$1" remote="$2" session="$3" nums="$4" count
   count=$(wc -w <<<"$nums" | tr -d ' ')
+  # Every prepare run mints fresh nonces, so a draft left over from an earlier run of the same page
+  # tag cannot match the batch being shipped now -- each of its items assembles as `unknown_nonce`
+  # and pushes nothing. The readiness poll below only counts `drafts-*.json`, so the leftovers also
+  # make the pool look finished before it starts: re-running 20260913-p13 reported `extracted 14/14`
+  # having genuinely extracted 3, and silently dropped the other 11 batches. Clear both ends first.
+  rm -f "$local_dir"/drafts-*.json
   ( cd "$local_dir" && cp "$HERE/devbox-extract-batch.sh" . && tar czf ship.tgz devbox-extract-batch.sh $(ls batch-*.json | grep -v '\.map\.') ) || return 1
   if tar tzf "$local_dir/ship.tgz" | grep -q '\.map\.'; then
     echo "$PAGE: ABORT -- a nonce->id map reached the tarball"; return 1
@@ -71,7 +77,7 @@ remote_extract() {
   gcloud compute scp --tunnel-through-iap --project="$PROJECT" --zone="$ZONE" \
     "$local_dir/ship.tgz" "$VM:/tmp/ship-$session.tgz" >/dev/null || return 1
 
-  gc --command="mkdir -p ~/$remote && tar xzf /tmp/ship-$session.tgz -C ~/$remote && rm -f /tmp/ship-$session.tgz && cd ~/$REMOTE_REPO && tmux new-session -d -s $session \"export HNCD_RUN_DIR=\\\$HOME/$remote; printf '%s\\\\n' $nums | xargs -P $LANES -I{} bash \\\$HNCD_RUN_DIR/devbox-extract-batch.sh {} > \\\$HNCD_RUN_DIR/run.log 2>&1\" && echo launched" >/dev/null 2>&1
+  gc --command="mkdir -p ~/$remote && rm -f ~/$remote/drafts-*.json ~/$remote/batch-*.json && tar xzf /tmp/ship-$session.tgz -C ~/$remote && rm -f /tmp/ship-$session.tgz && cd ~/$REMOTE_REPO && tmux new-session -d -s $session \"export HNCD_RUN_DIR=\\\$HOME/$remote; printf '%s\\\\n' $nums | xargs -P $LANES -I{} bash \\\$HNCD_RUN_DIR/devbox-extract-batch.sh {} > \\\$HNCD_RUN_DIR/run.log 2>&1\" && echo launched" >/dev/null 2>&1
 
   # Wait in one remote loop rather than one ssh per poll -- the round trip costs more than the
   # check. Give up when the pool is gone, not only when every draft landed: a batch the model
