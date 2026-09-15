@@ -15,6 +15,7 @@ import {
   assertSealedBatch,
   codexArgs,
   extractBatch,
+  extractorDeveloperInstructions,
   renderPrompt,
   validateResult
 } from '../scripts/extract-hn-profiles/hn-codex-extract-batch.mjs';
@@ -381,4 +382,14 @@ test('a missing field drops the item rather than defaulting', () => {
   const { report, status } = assembleFixture([{ nonce: 'aaa', draft: withoutSummary }]);
   assert.equal(report.rejected[0].reason, 'invalid_draft');
   assert.equal(status, 1);
+});
+
+// Both extractors read one instruction source, but codex gets only what is below the marker --
+// so a rule written above it binds claude alone, which is how `dateRanges` diverged. Assert the
+// pinned format through the accessor codex reads rather than against the file, and collapse
+// whitespace so the assertion is about the rule and not the doc's line wrapping.
+test('the shared instruction block pins the bare dateRanges format for codex too', () => {
+  const instructions = extractorDeveloperInstructions().replace(/\s+/g, ' ');
+  assert.match(instructions, /`dateRanges` — bare year ranges only/);
+  assert.match(instructions, /No company name, label, or month inside the value/);
 });
