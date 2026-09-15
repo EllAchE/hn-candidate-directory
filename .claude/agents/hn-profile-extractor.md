@@ -102,7 +102,9 @@ Field rules:
   These are the whole point of the pass: they are almost always in unlabelled prose, so read
   the paragraph, not just the `Label:` lines.
 - `skills` — technologies and disciplines, deduplicated, no sentences.
-- `dateRanges` — e.g. `2019-2023`, tied to the companies above where the text allows.
+- `dateRanges` — bare year ranges only, e.g. `2019-2023` or `2022-Present`. No company name,
+  label, or month inside the value: order them to match `companies` above where the text
+  allows, rather than labelling them.
 
 Set `draft` to `null` only when the text is not a candidate posting at all (a recruiter ad,
 a "who wants to hire" reply, an off-topic comment). That retires the record; it is not a
