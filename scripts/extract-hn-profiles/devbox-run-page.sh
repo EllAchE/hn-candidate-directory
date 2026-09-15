@@ -41,14 +41,26 @@ before=$(jq -r '.remaining' "$RUN/pending.json")
 echo "$PAGE: pending before = $before"
 [ "$before" = "0" ] && { echo "$PAGE: nothing to do"; exit 0; }
 
+# --- clear the previous run of this page ------------------------------------
+# Every per-batch artefact, not just drafts: the tail stages address batches by number, so a re-run
+# preparing fewer batches than the last one silently screens and pushes the previous run's files for
+# every surplus number. `resume-*` survives on purpose -- it is a content-keyed fetch cache, and
+# re-fetching every resume is the expensive part of a page.
+rm -rf "$RUN/pass2"
+rm -f "$RUN"/batch-*.json "$RUN"/drafts-*.json "$RUN"/screened-*.json "$RUN"/check-*.json \
+  "$RUN"/push-*.json "$RUN/misses-$PAGE.json" "$RUN/prepare.json" "$RUN/ship.tgz" "$RUN/d.tgz"
+
 # --- prepare sealed batches -------------------------------------------------
 # The prepare step already names every pending item Algolia returned no text for -- usually a comment
 # its author later deleted -- and reducing its output to batches and items threw that list away, so a
 # page that went in with 100 and came out with 99 read as a clean run and the lost candidate was found
 # only by counting map entries by hand. An empty `dropped` prints too: it is what says nothing was lost.
+# Take the batch count from prepare's own output: a glob answers "what is on disk", which promotes
+# a stray or half-written file into a batch number the rest of the run then polls the box for.
 node "$HERE/hn-prepare-batch.mjs" --pending "$RUN/pending.json" --out "$RUN" --batch 5 \
-  | jq -c '{batches:(.batches|length), items:([.batches[].items]|add), dropped:.missing}' || exit 1
-nb=$(cd "$RUN" && ls batch-*.json 2>/dev/null | grep -vc '\.map\.')
+  >"$RUN/prepare.json" || exit 1
+jq -c '{batches:(.batches|length), items:([.batches[].items]|add), dropped:.missing}' "$RUN/prepare.json"
+nb=$(jq -r '.batches | length' "$RUN/prepare.json" 2>/dev/null)
 [ "${nb:-0}" -gt 0 ] || { echo "$PAGE: no batches prepared"; exit 1; }
 
 # --- resumes, pass 1: the link on each comment's own Résumé/CV line -----------
