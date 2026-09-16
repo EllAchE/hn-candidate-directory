@@ -63,7 +63,7 @@ async function call(host, path, token, init = {}) {
 }
 
 async function pending(args) {
-  const extractor = args.extractor || 'claude-skill-v1';
+  const extractor = args.extractor || 'claude-skill-v2';
   const body = await call(
     resolveHost(args),
     `/api/admin/profiles/hn/pending?extractor=${encodeURIComponent(extractor)}`,

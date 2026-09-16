@@ -114,7 +114,7 @@ for (const entry of entries) {
 
 const skipped = Object.keys(identities).filter((id) => !claimed.has(id));
 if (profiles.length) {
-  writeFileSync(args.out, JSON.stringify({ extractor: args.extractor || 'claude-skill-v1', profiles }, null, 2));
+  writeFileSync(args.out, JSON.stringify({ extractor: args.extractor || 'claude-skill-v2', profiles }, null, 2));
 }
 
 // The report prints on both paths: a batch where everything was rejected is the case an
