@@ -105,3 +105,20 @@ test('the batch count comes from prepare output, not from what is on disk', () =
     h.cleanup();
   }
 });
+
+test('the tarball carries every file that frames the model, and still no identity map', () => {
+  // The codex arm reads its instructions from the module and the agent definition rather than from
+  // the batch script, so shipping only the batch script left codex framed by the box's own clone.
+  const h = harness({ batchesReported: 1, batchFilesWritten: 1 });
+  try {
+    h.exec();
+    const shipped = execFileSync('tar', ['tzf', join(h.run, 'ship.tgz')], { encoding: 'utf8' })
+      .split('\n').filter(Boolean).map((n) => n.replace(/^\.\//, ''));
+    for (const needed of ['devbox-extract-batch.sh', 'hn-codex-extract-batch.mjs', 'hn-profile-extractor.md']) {
+      assert.ok(shipped.includes(needed), `${needed} did not travel with the batches`);
+    }
+    assert.equal(shipped.some((n) => n.includes('.map.')), false, 'a nonce->id map reached the tarball');
+  } finally {
+    h.cleanup();
+  }
+});
