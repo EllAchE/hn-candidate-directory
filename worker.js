@@ -50,8 +50,11 @@ const HN_EXTRACTION_VERSION = 2;
 // Rank, not identity, is what the write guards compare: a profile may only be overwritten by an
 // extractor at least as good as the one that produced it. Rank 0 is the deterministic pass and is
 // deliberately not pushable -- the push endpoint exists to improve on it, never to replay it.
-const HN_EXTRACTORS = Object.freeze({ 'deterministic-labels-v1': 0, 'claude-skill-v1': 1 });
-const HN_PROCESSED_RANK = Math.max(...Object.values(HN_EXTRACTORS));
+const HN_EXTRACTORS = Object.freeze({ 'deterministic-labels-v1': 0, 'claude-skill-v1': 1, 'claude-skill-v2': 2 });
+// Pinned to the first model rank, not derived from the highest: this drives the public "Processed"
+// badge, so deriving it would relabel every already-extracted profile as unprocessed the moment a
+// better extractor is merely registered.
+const HN_PROCESSED_RANK = HN_EXTRACTORS['claude-skill-v1'];
 const HN_PUSH_LIMITS = Object.freeze({ batch: 25, pendingPage: 100 });
 // A pushed item carries the whole comment as well as its draft, so the body cap is derived from the
 // largest comment the ingest will ever hold rather than picked as a round number.

@@ -364,6 +364,33 @@ describe('pushing externally-extracted HN profiles', () => {
     expect(await pendingIds(env)).toEqual([]);
   });
 
+  test('a newer extractor reopens what an older one already claimed', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [item(PROSE_COMMENT, { companies: ['Stripe'] })]);
+
+    // The rank guard is what makes a corpus-wide re-extraction possible at all: without a rank above
+    // the one that wrote these rows, the only way to re-reach them is resetting stored ranks by hand.
+    expect(await pendingIds(env)).not.toContain('44444501');
+    expect(await pendingIds(env, 'claude-skill-v2')).toContain('44444501');
+  });
+
+  test('a newer extractor overwrites an older one, and never the reverse', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [item(PROSE_COMMENT, { companies: ['Stripe'] })]);
+
+    await push(env, [item(PROSE_COMMENT, { companies: ['Stripe', 'Example Systems'] })], TOKEN, 'claude-skill-v2');
+    const upgraded = env.DB.revisions.get('hn-44444501');
+    expect(JSON.parse(upgraded.companies_json)).toEqual(['Stripe', 'Example Systems']);
+    expect(upgraded.extractor).toBe('claude-skill-v2');
+
+    await push(env, [item(PROSE_COMMENT, { companies: [] })]);
+    const survived = env.DB.revisions.get('hn-44444501');
+    expect(JSON.parse(survived.companies_json)).toEqual(['Stripe', 'Example Systems']);
+    expect(survived.extractor).toBe('claude-skill-v2');
+  });
+
   test('does not consume the ingest run reservation', async () => {
     const env = configured();
 
@@ -595,9 +622,9 @@ function push(env, profiles, token = TOKEN, extractor = 'claude-skill-v1') {
   return worker.fetch(apiRequest('/api/admin/profiles/hn', 'POST', body, token), env);
 }
 
-async function pendingIds(env) {
+async function pendingIds(env, extractor = 'claude-skill-v1') {
   const response = await worker.fetch(
-    apiRequest('/api/admin/profiles/hn/pending?extractor=claude-skill-v1', 'GET', null, TOKEN),
+    apiRequest(`/api/admin/profiles/hn/pending?extractor=${extractor}`, 'GET', null, TOKEN),
     env
   );
   expect(response.status).toBe(200);
