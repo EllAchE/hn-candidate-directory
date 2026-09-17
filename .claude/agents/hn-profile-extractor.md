@@ -70,10 +70,11 @@ Every field is required. Use `""` or `[]` for anything the text does not support
 string beats a guess, and the caller drops any item whose shape is wrong rather than
 repairing it.
 
-Write plain text, not markup. The text you are given has already been decoded, so an
-ampersand is `&` — write it back as `&`, never as `&amp;`. Nothing downstream decodes your
-output a second time, so an entity you emit is published verbatim: a role returned as
-`backend &amp; systems engineer` renders on the page with the `&amp;` showing.
+Field values contain literal characters, never markup escapes. The input is already plain
+text, so write `&`, `<`, `>`, `"`, and `'` as themselves rather than as HTML entities.
+Nothing downstream decodes them; a role returned as `Research &amp; Development` is published
+with the entity showing. Strip Markdown markers too: `**` and `#` describe formatting in a
+resume, not the value to publish.
 
 Field rules:
 

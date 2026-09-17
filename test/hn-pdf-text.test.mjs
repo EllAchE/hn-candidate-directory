@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { needsOcr, renderStructured } from '../scripts/extract-hn-profiles/hn-pdf-text.mjs';
+import { needsOcr, renderStructured, respaceEmphasis } from '../scripts/extract-hn-profiles/hn-pdf-text.mjs';
 
 function inspector({ pdfType = 'TextBased', pages = [] } = {}) {
   return async () => ({
@@ -83,4 +83,68 @@ test('every page needing OCR is a miss, but one page is not', () => {
   assert.equal(needsOcr('Mixed', [1, 2], 2), true);
   assert.equal(needsOcr('Mixed', [2], 2), false);
   assert.equal(needsOcr('TextBased', [], 2), false);
+});
+
+// The inspector drops the space around an emphasis run wherever the PDF's own text runs abut,
+// and a resume bolds exactly the words that must not merge: the school welds to the city, the
+// title welds to its date range.
+test('a bold span welded to the next word gets its boundary back', () => {
+  assert.equal(
+    respaceEmphasis('**College of Engineering**Tumkur, India'),
+    '**College of Engineering** Tumkur, India'
+  );
+  assert.equal(
+    respaceEmphasis('Engineer with**4+ years**building things'),
+    'Engineer with **4+ years** building things'
+  );
+});
+
+// `**Software Engineer III***July 2024 - Present*` is one run of three asterisks doing two jobs.
+test('a three-asterisk run closes the bold and opens the italic', () => {
+  assert.equal(
+    respaceEmphasis('**Software Engineer III***July 2024 - Present*'),
+    '**Software Engineer III** *July 2024 - Present*'
+  );
+});
+
+test('a matched three-asterisk span stays intact', () => {
+  assert.equal(respaceEmphasis('***Engineering lead***Tumkur'), '***Engineering lead*** Tumkur');
+});
+
+test('nested emphasis keeps its delimiter depth', () => {
+  assert.equal(
+    respaceEmphasis('**Engineering *and research* lead**Tumkur'),
+    '**Engineering *and research* lead** Tumkur'
+  );
+});
+
+// A closing run may legitimately hug a comma; only a word re-opening behind it is a weld.
+test('punctuation hugging a run is left alone', () => {
+  assert.equal(respaceEmphasis('**Google ADK**, and Gemini'), '**Google ADK**, and Gemini');
+  assert.equal(respaceEmphasis('**ADK**,**vector search**'), '**ADK**, **vector search**');
+});
+
+test('a leading list marker is not emphasis', () => {
+  assert.equal(respaceEmphasis('* Built a **thing**quickly'), '* Built a **thing** quickly');
+});
+
+// The transform inserts spaces and does nothing else: no character of content is added, dropped,
+// or reordered, and no emphasis marker changes count.
+test('re-spacing preserves every character of content and every marker', () => {
+  const source = '**Sabre Corporation** Bengaluru, India **Software Engineer III***July 2024*\n'
+    + '- Built a**production RAG backend**using**Python**, achieving**90% Precision@k**.';
+  const out = respaceEmphasis(source);
+  const strip = (value) => value.replace(/[*\s]+/g, '');
+  assert.equal(strip(out), strip(source));
+  assert.equal((out.match(/\*/g) || []).length, (source.match(/\*/g) || []).length);
+});
+
+test('page markdown arrives re-spaced', async () => {
+  const result = await renderStructured(Buffer.from('%PDF-'), {
+    importInspector: inspector({
+      pages: [{ page: 0, markdown: '**Ain Shams University**Cairo, Egypt', needsOcr: false }]
+    })
+  });
+
+  assert.equal(result.text, '**Ain Shams University** Cairo, Egypt');
 });
