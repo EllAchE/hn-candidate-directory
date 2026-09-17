@@ -64,6 +64,11 @@ tool for the other two. For Codex, run the wrapper's focused tests after any fla
 the clean config, empty directory, read-only sandbox, and every disabled capability passed to the
 child. If either check fails, this skill must not run until it is repaired.
 
+Agent definitions resolve at session start, so an edit made mid-session is not live and the
+next spawn can still run the old file. The tool checks above do not reveal that when the tool
+list itself is unchanged. When verifying an edited definition, also ask the agent to quote the
+new sentence; if it is absent, restart the session and verify again.
+
 ## 2. The model's output is a value, never a selector
 
 `hn-prepare-batch.mjs` writes identity to `batch-N.map.json` and content to `batch-N.json`.
