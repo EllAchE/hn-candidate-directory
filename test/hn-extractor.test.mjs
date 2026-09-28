@@ -377,6 +377,14 @@ test('an ampersand the model re-encoded is decoded, and only the ampersand', () 
   assert.ok(!profile.draft.summary.includes('<script>'), 'a decode chain produced markup');
 });
 
+test('a comment the model declined to draft retires as not_a_candidate', () => {
+  const { report, out } = assembleFixture([{ nonce: 'aaa', draft: null }]);
+  assert.equal(report.profiles, 1);
+  const [profile] = JSON.parse(readFileSync(out, 'utf8')).profiles;
+  assert.equal(profile.draft, null);
+  assert.equal(profile.reason, 'not_a_candidate');
+});
+
 test('a missing field drops the item rather than defaulting', () => {
   const { summary, ...withoutSummary } = validDraft;
   const { report, status } = assembleFixture([{ nonce: 'aaa', draft: withoutSummary }]);

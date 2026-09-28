@@ -90,7 +90,7 @@ for (const entry of entries) {
   claimed.add(id);
 
   if (entry.draft === null) {
-    profiles.push({ comment: identities[id], draft: null });
+    profiles.push({ comment: identities[id], draft: null, reason: 'not_a_candidate' });
     continue;
   }
 

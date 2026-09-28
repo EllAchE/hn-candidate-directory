@@ -692,6 +692,14 @@ describe('tracking step-outs', () => {
     expect(env.DB.revisions.has('hn-44444503')).toBe(false);
   });
 
+  test('a comment the extractor declined to draft retires as not_a_candidate', async () => {
+    const env = configured();
+    await ingestThread(env);
+
+    await push(env, [{ comment: commentBody(NOISE_COMMENT), draft: null, reason: 'not_a_candidate' }]);
+    expect(stepOut(env, '44444503')).toMatchObject({ step_out: 'retired', step_out_reason: 'not_a_candidate', step_out_count: 1 });
+  });
+
   test('a retire that carries its comment records the reason too', async () => {
     const env = configured();
     await ingestThread(env);
