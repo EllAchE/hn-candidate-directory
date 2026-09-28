@@ -49,7 +49,8 @@ be read:
 A comment its author has deleted can never be extracted: Algolia stops serving it. Retire it by
 id, since its text is exactly what can no longer be re-supplied — push `{"hnItemId": "<id>",
 "draft": null}` for each id `hn-check-sources.mjs` reports, and never for one it reports
-`unreachable`. `devbox-run-page.sh` does this for every item prepare drops. Until a row is retired
+`unreachable`. `devbox-run-page.sh` does this for every item prepare drops, and holds the rest
+(alive or `unreachable`) instead of retiring them. Until a row is retired or held
 it keeps its rank and comes back on the first page of every run (28 of the first 100 on
 2026-09-07), so plan an unretired page against `reachable`, not `remaining`.
 
@@ -222,11 +223,21 @@ with the batch script, extract on the box, pull the drafts back, run the targete
 (model-chosen links plus resume items missing a name or employer), merge, check for misses,
 assemble against the map and push. It prints the resume tallies per pass, the miss summary
 (and writes `misses-<tag>.json`), the assembled/rejected/trimmed counts, the pronoun-screen
-count, and the push tally (`retired` and `held` counted beside `updated`). Items prepare dropped
-are checked against Firebase and the confirmed ones retired. `HNCD_HOLD_MISSES=1` pushes flagged
-items as holds instead of publishing them; an item flagged only because its draft is missing or
-malformed is left pending for another pass. `HNCD_PASSES=1` skips the second pass. Use one tag per
-page. The steps it wraps, if you need them by hand:
+count, an `outcomes` line, and the push tally (`retired` and `held` counted beside `updated`).
+
+One outcome per item: after assembly every item the page read from pending gets exactly one of a
+pushed draft, a retirement (`draft: null`, only for a dropped comment Firebase confirms is gone) or
+a hold (`hold: true`). The holds are computed as every page id minus the drafted-and-pushed minus
+the retired, so nothing can fall through: the pending endpoint has no cursor, and an item left
+pending heads every later page and drags each page's yield down. The `outcomes` line counts holds
+by reason — `no_draft_batch` (the batch came back empty), `draft_missing` (a missing or malformed
+draft), `source_alive` and `source_unreachable` (dropped by prepare, not confirmed gone),
+`flagged` (held by `HNCD_HOLD_MISSES`) and `other` (anything else, such as a pronoun-screen drop) —
+and `holds.json` in the run dir names the reason per id. A hold writes no profile, and a newer
+extractor reads the row again. `HNCD_HOLD_MISSES=1` only decides whether a flagged item that does
+have a draft is held instead of published; items with no draft are held either way.
+`HNCD_PASSES=1` skips the second pass. Use one tag per page. The steps it wraps, if you need them
+by hand:
 
 ```bash
 # operator's machine: gate, prep, attach resumes, and ship the sealed batches only
@@ -254,8 +265,9 @@ re-run waits on that pool instead of launching a second one. Every draft file is
 prepare on disk before it is used: a file carrying any nonce the current batch and map did not
 mint is discarded and its batch re-extracted, so drafts from an earlier prepare of the same tag
 never reach assembly. The Firebase check on dropped items runs once and its answer stays in
-`sources.json`, and the push payloads are frozen once assembled. Each push request has its own
-marker: `pushed-N` for batch N's drafts (at most 5), `pushed-retire-K` and `pushed-hold-K` for
+`sources.json`; a check that failed is retried by a re-run until assembly, which holds whatever
+is still unchecked. The push payloads, holds included, are frozen once assembled. Each push
+request has its own marker: `pushed-N` for batch N's drafts (at most 5), `pushed-retire-K` and `pushed-hold-K` for
 step-out payload K (at most 25 ids). Retirements and holds go out in the push stage with the drafts,
 never earlier, so `HNCD_FRESH` stays available until then. A failed push re-sends only the payloads
 that did not land, and once all have landed the tag is finished and refuses to run again.

@@ -6,8 +6,9 @@
 //
 //   hn-page-state.mjs plan --run <dir> [--fresh]
 //   hn-page-state.mjs bind --batch <batch.json> [--map <batch.map.json>] --drafts <drafts.json>
+//   hn-page-state.mjs holds --run <dir> --batches <n>
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 function parseArgs(argv) {
@@ -95,6 +96,86 @@ export function bindDrafts({ batch, map, drafts }) {
   return { bound: true, entries: entries.length };
 }
 
+const nonEmpty = (path) => {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+};
+
+// Every step-out payload of one kind, in the order the push stage sends them.
+function stepoutIds(runDir, kind) {
+  const ids = [];
+  for (let k = 1; existsSync(join(runDir, `${kind}-${k}.json`)); k += 1) {
+    for (const entry of readJson(join(runDir, `${kind}-${k}.json`))?.profiles || []) ids.push(String(entry.hnItemId));
+  }
+  return ids;
+}
+
+// Why a held item has no draft, first match wins. `other` catches whatever nobody named -- a
+// pronoun-screen drop, a draft assembly rejected unflagged -- so it is counted, not lost.
+export const HOLD_REASONS = ['no_draft_batch', 'source_alive', 'source_unreachable', 'draft_missing', 'flagged', 'other'];
+
+// The pending endpoint has no cursor and only advances a row that is pushed, so every item this page
+// read and cannot publish must still step out, or it heads every later page. The hold set is built by
+// subtraction -- every page id minus the drafted-and-pushed minus the retired -- so no path through
+// the run can leave an item without an outcome. Retirements come from the payloads already written,
+// never from a fresh Firebase answer. Ids are compared as strings; nothing in a comment's text is
+// read here, only ids, nonces and flags.
+export function pageOutcomes({ runDir, batches }) {
+  const page = new Set();
+  const add = (id) => {
+    if (id !== undefined && id !== null && id !== '') page.add(String(id));
+  };
+  for (const item of readJson(join(runDir, 'pending.json'))?.items || []) add(item?.hnItemId);
+  const dropped = new Set((readJson(join(runDir, 'prepare.json'))?.missing || []).map(String));
+  for (const id of dropped) add(id);
+
+  const why = new Map();
+  const note = (id, reason) => {
+    if (id !== undefined && !why.has(id)) why.set(id, reason);
+  };
+  const pushed = new Set();
+  for (let n = 1; n <= batches; n += 1) {
+    const map = readJson(join(runDir, `batch-${n}.map.json`)) || {};
+    const idOf = (nonce) => (Object.hasOwn(map, nonce) && map[nonce]?.objectID != null ? String(map[nonce].objectID) : undefined);
+    for (const nonce of Object.keys(map)) add(idOf(nonce));
+    for (const profile of readJson(join(runDir, `push-${n}.json`))?.profiles || []) {
+      if (profile?.comment?.objectID != null) pushed.add(String(profile.comment.objectID));
+    }
+    if (!nonEmpty(join(runDir, `drafts-${n}.json`))) {
+      for (const nonce of Object.keys(map)) note(idOf(nonce), 'no_draft_batch');
+      continue;
+    }
+    for (const flag of readJson(join(runDir, `check-${n}.json`))?.flagged || []) {
+      const missing = Array.isArray(flag?.missing) ? flag.missing : [];
+      note(idOf(flag?.nonce), missing.includes('draft') || missing.includes('malformed') ? 'draft_missing' : 'flagged');
+    }
+  }
+
+  const sources = readJson(join(runDir, 'sources.json'));
+  const unreachable = new Set(Array.isArray(sources?.unreachableIds) ? sources.unreachableIds.map(String) : []);
+  // Prepare never batches a dropped item, so its only possible reason is what Firebase said.
+  for (const id of dropped) {
+    // Without a per-id answer the check did not run or predates the list, so nothing proves it alive.
+    const alive = Array.isArray(sources?.unreachableIds) && !unreachable.has(id);
+    why.set(id, alive ? 'source_alive' : 'source_unreachable');
+  }
+
+  const retired = new Set(stepoutIds(runDir, 'retire'));
+  const conflicts = [...pushed].filter((id) => retired.has(id)).sort();
+  const held = [...page].filter((id) => !pushed.has(id) && !retired.has(id)).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  const reasons = Object.fromEntries(HOLD_REASONS.map((reason) => [reason, 0]));
+  const heldBy = {};
+  for (const id of held) {
+    const reason = why.get(id) ?? 'other';
+    reasons[reason] += 1;
+    heldBy[id] = reason;
+  }
+  return { page: page.size, pushed: pushed.size, retired: retired.size, held, reasons, heldBy, conflicts };
+}
+
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
@@ -109,8 +190,12 @@ if (import.meta.main) {
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.bound ? 0 : 1);
+  } else if (command === 'holds' && args.run && /^[0-9]+$/.test(String(args.batches))) {
+    const result = pageOutcomes({ runDir: args.run, batches: Number(args.batches) });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.conflicts.length ? 1 : 0);
   } else {
-    console.error('usage: hn-page-state.mjs plan --run <dir> [--fresh] | bind --batch <batch.json> [--map <map.json>] --drafts <drafts.json>');
+    console.error('usage: hn-page-state.mjs plan --run <dir> [--fresh] | bind --batch <batch.json> [--map <map.json>] --drafts <drafts.json> | holds --run <dir> --batches <n>');
     process.exit(2);
   }
 }

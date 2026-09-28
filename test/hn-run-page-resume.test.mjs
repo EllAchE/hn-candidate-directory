@@ -113,7 +113,7 @@ test('bind: only drafts whose every nonce this prepare minted are kept', () => {
 const NB = 2;
 
 // `missing` are ids prepare drops and `sources` is what the Firebase check answers for them.
-function harness(page, { missing = [], sources = {} } = {}) {
+function harness(page, { missing = [], sources = {}, batches: NB = 2 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hncd-resume-'));
   const bin = join(dir, 'bin');
   const box = join(dir, 'box');
@@ -186,17 +186,23 @@ HOME="${box}" exec bash -c "$cmd"
 
   stub('tmux', `
 case "$1" in
-  new-session) shift 4; echo "pool $*" >>"${calls}"; bash -c "$1" ;;
+  # A real new-session returns once the session starts, whatever the pool inside it later does.
+  new-session) shift 4; echo "pool $*" >>"${calls}"; bash -c "$1" || true ;;
   has-session) [ -e "${flags}/tmux-$3" ] ;;
   kill-session) rm -f "${flags}/tmux-$3" ;;
 esac
 `);
 
+  // nodraft-<batch file>: the model answers nothing for that batch. partial-: only its first item.
+  // gender-: its first summary genders a candidate the comment never did, which the screen drops.
   stub('claude', `
 batch=$(grep -oE 'Read [^ ]+batch-[0-9]+\\.json' <<<"$2" | head -1 | cut -d' ' -f2)
 n=$(basename "$batch" .json); n=\${n#batch-}
 echo "claude $n" >>"${calls}"
-jq '[.items[] | {nonce, injection:false, draft:{name:"Ada", role:"Compiler engineer", summary:"Builds compilers.", location:"Berlin", workMode:"", availability:"", companies:[], universities:[], skills:[], dateRanges:[]}}]' "$batch" >"\${batch%batch-$n.json}drafts-$n.json"
+[ -e "${flags}/nodraft-batch-$n.json" ] && exit 1
+keep=1000; [ -e "${flags}/partial-batch-$n.json" ] && keep=1
+he=""; [ -e "${flags}/gender-batch-$n.json" ] && he=0
+jq --argjson keep "$keep" --arg he "$he" '[.items[:$keep] | to_entries[] | {nonce:.value.nonce, injection:false, draft:{name:"Ada", role:"Compiler engineer", summary:(if ($he != "" and .key == ($he|tonumber)) then "She builds compilers." else "Builds compilers." end), location:"Berlin", workMode:"", availability:"", companies:[], universities:[], skills:[], dateRanges:[]}}]' "$batch" >"\${batch%batch-$n.json}drafts-$n.json"
 `);
 
   const run = join(dir, 'run', page);
@@ -328,7 +334,8 @@ test('a poll that hangs is cut off locally, retried a bounded number of times, a
   const h = harness('t-hang');
   try {
     h.flag('hang-poll');
-    const hung = h.exec({ HNCD_SSH_TIMEOUT: '2', HNCD_POLL_SECONDS: '1', HNCD_POLL_TRIES: '2' });
+    // The fake box runs the whole pool inside the launch call, so that call needs a few seconds.
+    const hung = h.exec({ HNCD_SSH_TIMEOUT: '4', HNCD_POLL_SECONDS: '1', HNCD_POLL_TRIES: '2' });
     assert.notEqual(hung.status, 0);
     assert.ok(hung.seconds < 30, `the hung poll held the run for ${hung.seconds}s`);
     assert.match(hung.stderr, /poll 2\/2 ended without an answer/);
@@ -437,11 +444,12 @@ test('retirements and holds go out in the push stage, once each, across a crash 
     const second = h.exec(env);
     assert.notEqual(second.status, 0);
     assert.equal(count(h.calls(), 'sources'), 0, 'a resumed run asked Firebase again');
-    // Batch 1 is all holds, so it assembles no draft push of its own.
+    // Batch 1 is all holds, so it assembles no draft push of its own. 222 could not be checked, so it
+    // is held beside them rather than left to head the next page.
     assert.deepEqual(h.calls().filter((c) => c.startsWith('push')), ['push retire-1', 'push 2']);
     assert.ok(h.state().includes('pushed-retire-1') && !h.state().includes('pushed-hold-1'));
     const held = payload('hold-1.json');
-    assert.deepEqual(held.profiles.map((p) => p.hnItemId).sort(), [...h.nonces(1)].sort());
+    assert.deepEqual(held.profiles.map((p) => p.hnItemId).sort(), ['222', ...h.nonces(1)].sort());
     assert.ok(held.profiles.every((p) => p.hold === true));
     assert.equal(existsSync(join(h.run, 'push-1.json')), false, 'a held item was also pushed as a draft');
 
@@ -453,7 +461,93 @@ test('retirements and holds go out in the push stage, once each, across a crash 
     assert.equal(third.status, 0, third.stderr);
     assert.deepEqual(h.calls().filter((c) => /^(sources|push|claude|prepare|pending)/.test(c)), ['push hold-1']);
     assert.deepEqual(payload('hold-1.json'), held);
-    assert.match(third.stdout, /"held":2/);
+    assert.match(third.stdout, /"held":3/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// What every request that landed says about each id: the pushed-* markers name exactly the payloads
+// that went out, so reading those files back is reading what the Worker received.
+function outcomesSent(h) {
+  const seen = new Map();
+  for (const marker of h.state().filter((name) => name.startsWith('pushed-'))) {
+    const name = marker.slice('pushed-'.length);
+    const file = /^[0-9]+$/.test(name) ? `push-${name}.json` : `${name}.json`;
+    for (const entry of JSON.parse(readFileSync(join(h.run, file), 'utf8')).profiles) {
+      const id = String(entry.hnItemId ?? entry.comment.objectID);
+      const kind = entry.hold === true ? 'hold' : entry.comment ? 'draft' : 'retire';
+      seen.set(id, [...(seen.get(id) ?? []), kind]);
+    }
+  }
+  return seen;
+}
+
+// Three batches, one per failure that used to stay pending, plus three dropped comments: 111 is
+// deleted, 222 alive on Firebase but missing from the thread listing, 333 unreachable.
+function everyFailure(page) {
+  const h = harness(page, {
+    batches: 3,
+    missing: ['111', '222', '333'],
+    sources: { ids: { 111: 'deleted' }, unreachableIds: ['333'] }
+  });
+  h.flag('partial-batch-1.json');
+  h.flag('gender-batch-2.json');
+  h.flag('nodraft-batch-3.json');
+  return h;
+}
+
+test('every item the page read ends as exactly one pushed draft, retirement or hold', { timeout: 60_000 }, () => {
+  const h = everyFailure('t-one-each');
+  try {
+    // HNCD_HOLD_MISSES is off: it governs only flagged items that have a draft, and none of these do.
+    const run = h.exec();
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /batch 3 produced no drafts; its items are held/);
+    assert.match(run.stdout, /outcomes \{"page":9,"drafted":2,"retired":1,"held":6,"no_draft_batch":2,"source_alive":1,"source_unreachable":1,"draft_missing":1,"flagged":0,"other":1\}/);
+
+    const [b1, b2, b3] = [h.nonces(1), h.nonces(2), h.nonces(3)];
+    const page = ['111', '222', '333', ...b1, ...b2, ...b3];
+    const sent = outcomesSent(h);
+    assert.deepEqual([...sent.keys()].sort(), [...page].sort(), 'an id the page read got no outcome, or one it never read got one');
+    for (const [id, kinds] of sent) assert.equal(kinds.length, 1, `${id} got ${kinds.join(' and ')}`);
+    const expected = {
+      111: 'retire', 222: 'hold', 333: 'hold',
+      [b1[0]]: 'draft', [b1[1]]: 'hold', // case 2: the model never answered the second item
+      [b2[0]]: 'hold', [b2[1]]: 'draft', // case 4: the pronoun screen dropped the first
+      [b3[0]]: 'hold', [b3[1]]: 'hold' // case 1: the batch came back with nothing
+    };
+    assert.deepEqual(Object.fromEntries([...sent].map(([id, [kind]]) => [id, kind])), expected);
+
+    const holds = JSON.parse(readFileSync(join(h.run, 'holds.json'), 'utf8')).heldBy;
+    assert.deepEqual(holds, {
+      222: 'source_alive', 333: 'source_unreachable',
+      [b1[1]]: 'draft_missing', [b2[0]]: 'other', [b3[0]]: 'no_draft_batch', [b3[1]]: 'no_draft_batch'
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a resumed run sends only the payload that failed, never the holds again', { timeout: 60_000 }, () => {
+  const h = everyFailure('t-hold-resume');
+  try {
+    h.flag('fail-push-2');
+    const first = h.exec();
+    assert.notEqual(first.status, 0);
+    assert.deepEqual(h.calls().filter((c) => c.startsWith('push')), ['push retire-1', 'push 1', 'push hold-1']);
+    const held = readFileSync(join(h.run, 'hold-1.json'), 'utf8');
+
+    // Whatever the box or the flags now say, the outcomes were frozen at assembly.
+    h.flag('fail-push-2', false);
+    h.flag('nodraft-batch-3.json', false);
+    h.resetCalls();
+    const second = h.exec({ HNCD_HOLD_MISSES: '1' });
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(h.calls().filter((c) => /^(sources|push|claude|prepare|pending)/.test(c)), ['push 2']);
+    assert.equal(readFileSync(join(h.run, 'hold-1.json'), 'utf8'), held);
+    for (const [id, kinds] of outcomesSent(h)) assert.equal(kinds.length, 1, `${id} got ${kinds.join(' and ')}`);
+    assert.equal(outcomesSent(h).size, 9);
   } finally {
     h.cleanup();
   }
