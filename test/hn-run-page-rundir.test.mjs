@@ -49,9 +49,15 @@ case "$(basename "$1")" in
     done
     printf '%s' ${JSON.stringify(JSON.stringify({ batches, missing }))}
     ;;
-  hn-check-sources.mjs) printf '%s' ${JSON.stringify(JSON.stringify(sources ?? {}))} >"$5"; echo '{}' ;;
+  hn-check-sources.mjs) printf '%s' ${sources === false ? "''" : JSON.stringify(JSON.stringify(sources ?? {}))} >"$5"; echo '{}' ;;
   hn-check-drafts.mjs) printf '%s' ${JSON.stringify(JSON.stringify({ flagged: extracted?.flagged ?? [] }))} >"$7"; echo '{}' ;;
   hn-screen-pronouns.mjs) cp "$5" "$7"; echo '{"dropped":[]}' ;;
+  hn-assemble-push.mjs)
+    # Every screened draft whose nonce the map knows becomes a push entry, as the real assembly does.
+    jq -c --slurpfile m "\${3%.json}.map.json" '{extractor:"claude-skill-v2", profiles:[.[] | select($m[0][.nonce] != null) | {comment:$m[0][.nonce], draft}]}' "$5" >"$9"
+    [ "$(jq '.profiles | length' "$9")" -gt 0 ] || rm -f "$9"
+    echo '{"profiles":0,"rejected":[],"trimmed":[],"skipped":[]}'
+    ;;
   hn-attach-resumes.mjs) echo x >>"${attachLog}"; echo '{"attached":1,"fetched":1,"misses":{}}' ;;
   hn-page-state.mjs) exec "${process.execPath}" "$@" ;;
   *) echo '{}' ;;
@@ -89,7 +95,7 @@ exit 0
     attachCalls: () => (existsSync(attachLog) ? readFileSync(attachLog, 'utf8').split('\n').filter(Boolean).length : 0),
     exec: (extraEnv = {}) => {
       try {
-        execFileSync('bash', [script, PAGE], {
+        return execFileSync('bash', [script, PAGE], {
           env: {
             ...process.env,
             HNCD_PASSES: '1',
@@ -98,10 +104,12 @@ exit 0
             HNCD_HOST: 'https://example.invalid',
             HNCD_RUN_ROOT: join(dir, 'run')
           },
-          stdio: 'pipe'
+          stdio: 'pipe',
+          encoding: 'utf8'
         });
-      } catch {
+      } catch (error) {
         // The gcloud stub makes the remote extract fail, so a non-zero exit is the expected end.
+        return error.stdout ?? '';
       }
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true })
@@ -165,9 +173,16 @@ test('the tarball carries every file that frames the model, and still no identit
   }
 });
 
-test('an item prepare dropped is retired by id once its source is confirmed gone, and only then', () => {
-  // 222 is absent from Algolia but Firebase could not be reached, so nothing proves it was deleted.
-  const page = { batchesReported: 1, batchFilesWritten: 1, missing: ['111', '222'], sources: { ids: { 111: 'deleted' } } };
+test('an item prepare dropped is retired by id once its source is confirmed gone, and held otherwise', () => {
+  // 222 is absent from Algolia but Firebase could not be reached, so nothing proves it was deleted;
+  // 444 is alive on Firebase and only missing from the thread listing. Neither may be retired, and
+  // neither may stay pending, where it would head every later page.
+  const page = {
+    batchesReported: 1,
+    batchFilesWritten: 1,
+    missing: ['111', '222', '444'],
+    sources: { ids: { 111: 'deleted' }, unreachableIds: ['222'] }
+  };
   const retirement = { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] };
   // The box is down: the retirement is written and kept for the push stage, not sent ahead of it.
   const down = harness(page);
@@ -180,10 +195,15 @@ test('an item prepare dropped is retired by id once its source is confirmed gone
     assert.deepEqual(down.pushed(), []);
     assert.deepEqual(JSON.parse(readFileSync(join(down.run, 'retire-1.json'), 'utf8')), retirement);
     const checked = JSON.parse(readFileSync(join(down.run, 'dropped.json'), 'utf8'));
-    assert.deepEqual(checked.items.map((item) => item.hnItemId), ['111', '222']);
+    assert.deepEqual(checked.items.map((item) => item.hnItemId), ['111', '222', '444']);
 
-    up.exec();
-    assert.deepEqual(up.pushed(), [retirement]);
+    const out = up.exec();
+    assert.deepEqual(up.pushed(), [
+      retirement,
+      { extractor: 'claude-skill-v2', profiles: [{ comment: { objectID: '333' }, draft: {} }] },
+      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '222', hold: true }, { hnItemId: '444', hold: true }] }
+    ]);
+    assert.match(out, /outcomes \{"page":4,"drafted":1,"retired":1,"held":2,"no_draft_batch":0,"source_alive":1,"source_unreachable":1,"draft_missing":0,"flagged":0,"other":0\}/);
   } finally {
     down.cleanup();
     up.cleanup();
@@ -203,22 +223,67 @@ test('a page of nothing but deletions retires them and finishes the tag', () => 
   }
 });
 
-test('with HNCD_HOLD_MISSES a flagged item is pushed as a hold, never as a draft', () => {
-  const extracted = {
-    map: { n1: { objectID: '333' }, n2: { objectID: '444' }, n3: { objectID: '555' } },
-    drafts: [{ nonce: 'n1', draft: { name: '' } }, { nonce: 'n3', draft: { name: '' } }],
-    // n2 never came back from the box: a harness miss that another pass should get to retry.
-    flagged: [
-      { nonce: 'n1', missing: ['name'] },
-      { nonce: 'n2', missing: ['draft'] },
-      { nonce: 'n3', missing: ['malformed'] }
-    ]
-  };
-  const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted });
+test('a page with no batches holds a dropped item that is alive, and waits when the check failed', () => {
+  const alive = harness({
+    batchesReported: 0,
+    batchFilesWritten: 0,
+    missing: ['111', '222'],
+    sources: { ids: { 111: 'deleted' }, unreachableIds: [] }
+  });
+  // `false` leaves the answer file empty, which reads as a failed check: nothing to push yet, so the
+  // next run asks again rather than hold what may be retirable.
+  const unchecked = harness({ batchesReported: 0, batchFilesWritten: 0, missing: ['111'], sources: false });
   try {
-    h.exec({ HNCD_HOLD_MISSES: '1' });
-    assert.deepEqual(h.pushed(), [{ extractor: 'claude-skill-v2', profiles: [{ hnItemId: '333', hold: true }] }]);
+    alive.exec();
+    assert.deepEqual(alive.pushed(), [
+      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] },
+      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '222', hold: true }] }
+    ]);
+    assert.equal(existsSync(join(alive.run, 'state', 'pushed')), true);
+
+    unchecked.exec();
+    assert.deepEqual(unchecked.pushed(), []);
+    assert.equal(existsSync(join(unchecked.run, 'state', 'assembled')), false);
+  } finally {
+    alive.cleanup();
+    unchecked.cleanup();
+  }
+});
+
+const threeFlags = () => ({
+  map: { n1: { objectID: '333' }, n2: { objectID: '444' }, n3: { objectID: '555' } },
+  drafts: [{ nonce: 'n1', draft: { name: '' } }, { nonce: 'n3', draft: { name: '' } }],
+  // n2 never came back from the box, and n3's draft is malformed: harness misses, not verdicts.
+  flagged: [
+    { nonce: 'n1', missing: ['name'] },
+    { nonce: 'n2', missing: ['draft'] },
+    { nonce: 'n3', missing: ['malformed'] }
+  ]
+});
+const holds = (...ids) => ({ extractor: 'claude-skill-v2', profiles: ids.map((hnItemId) => ({ hnItemId, hold: true })) });
+
+test('with HNCD_HOLD_MISSES a flagged item is pushed as a hold, never as a draft', () => {
+  const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted: threeFlags() });
+  try {
+    const out = h.exec({ HNCD_HOLD_MISSES: '1' });
+    // 444 has no draft at all and 555's is malformed: held as well, or they head the next page.
+    assert.deepEqual(h.pushed(), [holds('333', '444', '555')]);
     assert.deepEqual(JSON.parse(readFileSync(join(h.run, 'screened-1.json'), 'utf8')), []);
+    assert.match(out, /"held":3,.*"draft_missing":2,"flagged":1,"other":0/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('without HNCD_HOLD_MISSES a flagged draft is published and an item with no draft is still held', () => {
+  const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted: threeFlags() });
+  try {
+    const out = h.exec({ HNCD_HOLD_MISSES: '0' });
+    const [drafts, held, ...rest] = h.pushed();
+    assert.deepEqual(rest, []);
+    assert.deepEqual(drafts.profiles.map((p) => p.comment.objectID), ['333', '555']);
+    assert.deepEqual(held, holds('444'));
+    assert.match(out, /"drafted":2,"retired":0,"held":1,.*"draft_missing":1,"flagged":0/);
   } finally {
     h.cleanup();
   }

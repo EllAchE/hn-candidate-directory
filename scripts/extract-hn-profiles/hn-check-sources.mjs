@@ -5,7 +5,8 @@
 // serving a deleted item, so the item can never be extracted and stays on the first page of every run
 // until it is retired by id (`{hnItemId, draft: null}`). This script is what makes that safe: absence
 // from Algolia is not proof of deletion, and only a positive Firebase answer is. devbox-run-page.sh
-// retires the ids reported here and leaves `unreachable` ones pending.
+// retires the ids reported here and holds the rest, `unreachable` ones included, rather than
+// retiring them.
 //
 // It only reports. Retiring leaves a published profile published; whether an author's deletion should
 // also unpublish them is a policy question for the removal route, not something a check decides.
@@ -92,7 +93,8 @@ async function main() {
 
   const verdicts = await classifyAll(ids);
   const blocked = [...verdicts].filter(([, verdict]) => isUnextractable(verdict) && verdict !== 'unreachable');
-  const unreachable = [...verdicts].filter(([, verdict]) => verdict === 'unreachable').length;
+  const unreachableIds = [...verdicts].filter(([, verdict]) => verdict === 'unreachable').map(([id]) => id);
+  const unreachable = unreachableIds.length;
   const byReason = {};
   for (const [, verdict] of blocked) byReason[verdict] = (byReason[verdict] || 0) + 1;
 
@@ -105,10 +107,12 @@ async function main() {
     reachable: ids.length - blocked.length - unreachable,
     unreachable,
     byReason,
-    ids: Object.fromEntries(blocked)
+    ids: Object.fromEntries(blocked),
+    // Named so the page run can tell a source it could not reach from one that is alive.
+    unreachableIds
   };
   if (args.out) writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`);
-  const { ids: _ids, ...summary } = report;
+  const { ids: _ids, unreachableIds: _unreachableIds, ...summary } = report;
   console.log(JSON.stringify(summary));
 }
 

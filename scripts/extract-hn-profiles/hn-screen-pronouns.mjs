@@ -9,7 +9,7 @@
 //
 // Drop, never repair: rewriting the summary here would make the harness the author of profile
 // text, which is the one thing this pipeline keeps the model responsible for. A dropped item
-// stays in `pending` and comes back on the next page.
+// is held by devbox-run-page.sh, so a later extractor reads it again.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 

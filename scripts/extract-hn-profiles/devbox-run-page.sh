@@ -18,14 +18,18 @@
 # draft already on the box can match. Each stage marks itself done under state/, drafts already on
 # the box are pulled back before anything ships, and only batches still without a draft go out.
 #
-# The pending endpoint only advances a row that is pushed, so every item this page cannot publish is
-# still pushed as a step-out that writes no profile: `draft: null` retires a comment Firebase confirms
-# is gone, and `hold: true` parks an item the miss check flagged. Without them both kinds sit at the
-# head of every later page. Step-outs go out in the push stage with the drafts, never earlier, so a
-# tag stays restartable with HNCD_FRESH until its push stage begins.
+# One outcome per item. The pending endpoint only advances a row that is pushed, so after assembly
+# every item this page read gets exactly one: a pushed draft, a retirement (`draft: null`, only for a
+# comment Firebase confirms is gone) or a hold (`hold: true`). The holds are everything else --
+# every page id minus the drafted-and-pushed minus the retired -- so a batch that came back empty, a
+# missing or malformed draft, a dropped comment that is alive or unreachable, and anything no one
+# anticipated all step out instead of heading every later page. A hold writes no profile and only
+# raises this extractor's rank; a newer extractor reads the row again. Step-outs go out in the push
+# stage with the drafts, never earlier, so a tag stays restartable with HNCD_FRESH until then.
 #
 #   HNCD_FRESH=1         discard this tag's unpushed run, here and on the box, and prepare again
-#   HNCD_HOLD_MISSES=1   hold an item the final check flags instead of publishing it (default: push, report)
+#   HNCD_HOLD_MISSES=1   hold an item the final check flags even though it has a draft, instead of
+#                        publishing it (default: push, report). Items with no draft are held either way.
 #   HNCD_PASSES=1        skip the targeted second pass
 #   HNCD_SSH_TIMEOUT     seconds any one ssh or scp may take (default 300)
 #   HNCD_POLL_SECONDS    seconds one readiness poll waits on the box (default 2600)
@@ -122,7 +126,7 @@ if [ "$action" = fresh ]; then
   rm -rf "$RUN/pass2" "$RUN/incoming" "$STATE"
   rm -f "$RUN"/batch-*.json "$RUN"/drafts-*.json "$RUN"/screened-*.json "$RUN"/check-*.json \
     "$RUN"/push-*.json "$RUN/misses-$PAGE.json" "$RUN/prepare.json" "$RUN/ship.tgz" "$RUN/d.tgz" \
-    "$RUN"/retire-*.json "$RUN"/hold-*.json "$RUN/dropped.json" "$RUN/sources.json" "$RUN/held-ids.txt"
+    "$RUN"/retire-*.json "$RUN"/hold-*.json "$RUN/dropped.json" "$RUN/sources.json" "$RUN/holds.json"
   mark wipe-remote
 
   # --- prepare sealed batches -----------------------------------------------
@@ -185,11 +189,12 @@ push_stage() {
 
 # --- check what prepare dropped against Firebase, once --------------------------------------------
 # Absent from Algolia is not proof of deletion (a thread listing can simply miss an item), so only
-# the ids hn-check-sources marks deleted, dead, missing or textless become retirements; `unreachable`
-# stays pending for a later page. The answer is kept in sources.json and turned into retire-<k>.json
-# once, so a resumed run pushes the same retirements instead of asking Firebase again. A check that
-# fails outright is not marked, and the next run of the tag asks again.
-if ! reached sources-checked; then
+# the ids hn-check-sources marks deleted, dead, missing or textless become retirements; the alive and
+# `unreachable` ones are held at assembly. The answer is kept in sources.json and turned into
+# retire-<k>.json once, so a resumed run pushes the same retirements instead of asking Firebase again.
+# A check that fails outright is not marked, and the next run of the tag asks again -- until assembly,
+# which freezes the outcomes and holds whatever went unchecked.
+if ! reached sources-checked && ! reached assembled; then
   rm -f "$RUN"/retire-*.json "$RUN/dropped.json" "$RUN/sources.json"
   if [ "$(jq '.missing // [] | length' "$RUN/prepare.json")" -gt 0 ]; then
     jq --slurpfile p "$RUN/prepare.json" '($p[0].missing | map(tostring)) as $ids
@@ -201,7 +206,7 @@ if ! reached sources-checked; then
       jq -r '.ids // {} | keys[]' "$RUN/sources.json" | write_stepouts "$RUN/retire" '{hnItemId:$id, draft:null}'
       mark sources-checked
     else
-      echo "$PAGE: could not check the dropped items' sources; they stay pending this run" >&2
+      echo "$PAGE: could not check the dropped items' sources; re-run before assembly to retry, or they are held" >&2
       rm -f "$RUN/sources.json"
     fi
   else
@@ -209,8 +214,29 @@ if ! reached sources-checked; then
   fi
 fi
 
-# A page that is nothing but deletions still clears itself.
+# --- one outcome per item ---------------------------------------------------------------------------
+# Holds every page id without a pushed draft or a retirement, from the payloads already written, and
+# prints why per reason. Written once, at the `assembled` marker, like every other payload.
+assemble_holds() {
+  local out
+  if ! out=$(node "$HERE/hn-page-state.mjs" holds --run "$RUN" --batches "$nb"); then
+    echo "$PAGE: ABORT -- cannot settle one outcome per item: ${out:-no answer}" >&2
+    return 1
+  fi
+  printf '%s\n' "$out" >"$RUN/holds.json"
+  jq -r '.held[]' <<<"$out" | write_stepouts "$RUN/hold" '{hnItemId:$id, hold:true}'
+  jq -c '{page, drafted:.pushed, retired, held:(.held|length)} + .reasons' <<<"$out" | sed "s/^/$PAGE: outcomes /"
+}
+
+# A page that is nothing but deletions still clears itself. Without a Firebase answer it stops, so
+# the next run can ask again rather than hold what may be retirable.
 if [ "$nb" -eq 0 ]; then
+  if ! reached assembled; then
+    reached sources-checked || { echo "$PAGE: no batches prepared, and the dropped items are unchecked" >&2; exit 1; }
+    rm -f "$RUN"/hold-*.json "$RUN/holds.json"
+    assemble_holds || exit 1
+    mark assembled
+  fi
   [ -n "$(payloads)" ] && { push_stage; exit 0; }
   echo "$PAGE: no batches prepared"
   exit 1
@@ -384,7 +410,7 @@ if [ "$PASSES" -ge 2 ] && ! reached merged-p2; then
       mark extracted-p2
     fi
     for n in $nums; do
-      [ -s "$RUN/pass2/drafts-$n.json" ] || { echo "$PAGE: pass 2 batch $n produced no drafts" >&2; continue; }
+      [ -s "$RUN/pass2/drafts-$n.json" ] || { echo "$PAGE: pass 2 batch $n produced no drafts; keeping pass 1's" >&2; continue; }
       node "$HERE/hn-merge-drafts.mjs" --base "$RUN/drafts-$n.json" --over "$RUN/pass2/drafts-$n.json" --out "$RUN/drafts-$n.json"
     done | jq -s -c '{merged_batches:length, replaced:([.[].replaced]|add)}' | sed "s/^/$PAGE: pass 2 /"
   else
@@ -400,9 +426,9 @@ if reached assembled; then
   echo "$PAGE: payloads already assembled; pushing what has not landed"
 else
   rm -f "$RUN"/screened-*.json "$RUN"/check-*.json "$RUN"/push-*.json "$RUN/misses-$PAGE.json" \
-    "$RUN"/hold-*.json "$RUN/held-ids.txt"
+    "$RUN"/hold-*.json "$RUN/holds.json"
   for n in $(seq 1 "$nb"); do
-    [ -s "$RUN/drafts-$n.json" ] || { echo "$PAGE: batch $n produced no drafts" >&2; continue; }
+    [ -s "$RUN/drafts-$n.json" ] || { echo "$PAGE: batch $n produced no drafts; its items are held" >&2; continue; }
     node "$HERE/hn-check-drafts.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" --out "$RUN/check-$n.json"
   done | jq -s -c "$SUM"'{items:([.[].items]|add), with_resume:([.[].withResume]|add), retired:([.[].retired]|add), flagged:([.[].flagged]|add), missing:sum_by(.missing)}' \
     | sed "s/^/$PAGE: misses /"
@@ -416,17 +442,13 @@ else
     [ -s "$RUN/drafts-$n.json" ] || continue
     node "$HERE/hn-screen-pronouns.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" \
       --out "$RUN/screened-$n.json" | jq -c --arg n "$n" '{batch:$n} + {dropped}' | grep -v '"dropped":\[\]' || true
+    # Taking a flagged draft out here is all HNCD_HOLD_MISSES does: it then has no push, so the
+    # outcome step below holds it with everything else that has none.
     if [ "${HNCD_HOLD_MISSES:-0}" = "1" ] && [ -s "$RUN/check-$n.json" ]; then
       jq --slurpfile c "$RUN/check-$n.json" '[.[] | select(.nonce as $x | ($c[0].flagged | map(.nonce) | index($x)) == null)]' \
         "$RUN/screened-$n.json" >"$RUN/screened-$n.held.json" && mv "$RUN/screened-$n.held.json" "$RUN/screened-$n.json"
-      # A flag for a missing or malformed draft is a harness miss, not a verdict on the item, so those
-      # stay pending for another pass; only an item the model did answer is held.
-      jq -r --slurpfile m "$RUN/batch-$n.map.json" '.flagged[]
-        | select((.missing | index("draft") or index("malformed")) | not)
-        | $m[0][.nonce].objectID // empty' "$RUN/check-$n.json" >>"$RUN/held-ids.txt"
     fi
   done
-  [ -s "$RUN/held-ids.txt" ] && write_stepouts "$RUN/hold" '{hnItemId:$id, hold:true}' <"$RUN/held-ids.txt"
   screened=$(for n in $(seq 1 "$nb"); do [ -s "$RUN/screened-$n.json" ] && jq '[.[] | select(.draft.summary != null)] | length' "$RUN/screened-$n.json"; done | jq -s add)
   echo "$PAGE: summaries surviving the pronoun screen = ${screened:-0}"
 
@@ -435,6 +457,7 @@ else
     node "$HERE/hn-assemble-push.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/screened-$n.json" \
       --extractor "$EXTRACTOR_ID" --out "$RUN/push-$n.json" 2>/dev/null | jq -c '{p:.profiles, r:(.rejected|length), t:(.trimmed|length), s:(.skipped|length)}'
   done | jq -s -c '{assembled:([.[].p]|add), rejected:([.[].r]|add), trimmed:([.[].t]|add), skipped:([.[].s]|add)}'
+  assemble_holds || exit 1
   mark assembled
 fi
 
