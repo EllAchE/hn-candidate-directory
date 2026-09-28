@@ -400,7 +400,8 @@ found and retried later instead of waiting for a new extractor:
 
 Reasons are validated per kind; anything else is answered `invalid_reason` and changes nothing.
 Holds: `no_draft_batch`, `draft_missing`, `source_alive`, `source_unreachable`, `flagged`, `other`.
-Retirements: `deleted`, `dead`, `missing`, `textless`. A step-out sent without a reason is stored as
+Retirements: `deleted`, `dead`, `missing`, `textless`, and `not_a_candidate` (the extractor returned no
+draft because the comment is not a candidate post). A step-out sent without a reason is stored as
 `unrecorded`. `devbox-run-page.sh` sends the reason on every hold (from `holds.json`) and every
 retirement (from `sources.json`).
 

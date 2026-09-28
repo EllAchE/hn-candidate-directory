@@ -62,7 +62,7 @@ const HN_PUSH_LIMITS = Object.freeze({ batch: 25, pendingPage: 100 });
 // off the head of every later page, and losing it over a missing label would cost more than the label.
 const HN_STEP_OUT_REASONS = Object.freeze({
   held: Object.freeze(['no_draft_batch', 'draft_missing', 'source_alive', 'source_unreachable', 'flagged', 'other']),
-  retired: Object.freeze(['deleted', 'dead', 'missing', 'textless'])
+  retired: Object.freeze(['deleted', 'dead', 'missing', 'textless', 'not_a_candidate'])
 });
 const HN_UNRECORDED_STEP_OUT = 'unrecorded';
 // A requeued row must be pending for the newest extractor, and pending is `extractor_rank < rank`.
