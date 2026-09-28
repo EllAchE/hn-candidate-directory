@@ -183,7 +183,7 @@ test('an item prepare dropped is retired by id once its source is confirmed gone
     missing: ['111', '222', '444'],
     sources: { ids: { 111: 'deleted' }, unreachableIds: ['222'] }
   };
-  const retirement = { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] };
+  const retirement = { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null, reason: 'deleted' }] };
   // The box is down: the retirement is written and kept for the push stage, not sent ahead of it.
   const down = harness(page);
   const up = harness({
@@ -201,7 +201,13 @@ test('an item prepare dropped is retired by id once its source is confirmed gone
     assert.deepEqual(up.pushed(), [
       retirement,
       { extractor: 'claude-skill-v2', profiles: [{ comment: { objectID: '333' }, draft: {} }] },
-      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '222', hold: true }, { hnItemId: '444', hold: true }] }
+      {
+        extractor: 'claude-skill-v2',
+        profiles: [
+          { hnItemId: '222', hold: true, reason: 'source_unreachable' },
+          { hnItemId: '444', hold: true, reason: 'source_alive' }
+        ]
+      }
     ]);
     assert.match(out, /outcomes \{"page":4,"drafted":1,"retired":1,"held":2,"no_draft_batch":0,"source_alive":1,"source_unreachable":1,"draft_missing":0,"flagged":0,"other":0\}/);
   } finally {
@@ -214,7 +220,7 @@ test('a page of nothing but deletions retires them and finishes the tag', () => 
   const h = harness({ batchesReported: 0, batchFilesWritten: 0, missing: ['111'], sources: { ids: { 111: 'deleted' } } });
   try {
     h.exec();
-    assert.deepEqual(h.pushed(), [{ extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] }]);
+    assert.deepEqual(h.pushed(), [{ extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null, reason: 'deleted' }] }]);
     assert.equal(existsSync(join(h.run, 'state', 'pushed')), true);
     h.exec();
     assert.equal(h.pushed().length, 1, 'a finished retirement-only tag pushed again');
@@ -236,8 +242,8 @@ test('a page with no batches holds a dropped item that is alive, and waits when 
   try {
     alive.exec();
     assert.deepEqual(alive.pushed(), [
-      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] },
-      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '222', hold: true }] }
+      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null, reason: 'deleted' }] },
+      { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '222', hold: true, reason: 'source_alive' }] }
     ]);
     assert.equal(existsSync(join(alive.run, 'state', 'pushed')), true);
 
@@ -260,14 +266,18 @@ const threeFlags = () => ({
     { nonce: 'n3', missing: ['malformed'] }
   ]
 });
-const holds = (...ids) => ({ extractor: 'claude-skill-v2', profiles: ids.map((hnItemId) => ({ hnItemId, hold: true })) });
+// [id, reason] pairs, in payload order.
+const holds = (...entries) => ({
+  extractor: 'claude-skill-v2',
+  profiles: entries.map(([hnItemId, reason]) => ({ hnItemId, hold: true, reason }))
+});
 
 test('with HNCD_HOLD_MISSES a flagged item is pushed as a hold, never as a draft', () => {
   const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted: threeFlags() });
   try {
     const out = h.exec({ HNCD_HOLD_MISSES: '1' });
     // 444 has no draft at all and 555's is malformed: held as well, or they head the next page.
-    assert.deepEqual(h.pushed(), [holds('333', '444', '555')]);
+    assert.deepEqual(h.pushed(), [holds(['333', 'flagged'], ['444', 'draft_missing'], ['555', 'draft_missing'])]);
     assert.deepEqual(JSON.parse(readFileSync(join(h.run, 'screened-1.json'), 'utf8')), []);
     assert.match(out, /"held":3,.*"draft_missing":2,"flagged":1,"other":0/);
   } finally {
@@ -282,7 +292,7 @@ test('without HNCD_HOLD_MISSES a flagged draft is published and an item with no 
     const [drafts, held, ...rest] = h.pushed();
     assert.deepEqual(rest, []);
     assert.deepEqual(drafts.profiles.map((p) => p.comment.objectID), ['333', '555']);
-    assert.deepEqual(held, holds('444'));
+    assert.deepEqual(held, holds(['444', 'draft_missing']));
     assert.match(out, /"drafted":2,"retired":0,"held":1,.*"draft_missing":1,"flagged":0/);
   } finally {
     h.cleanup();

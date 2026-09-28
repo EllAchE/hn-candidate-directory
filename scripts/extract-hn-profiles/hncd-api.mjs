@@ -9,7 +9,9 @@ import { join } from 'node:path';
 
 const USAGE = `usage:
   hncd-api.mjs pending [--extractor <id>] [--host <https://host>]
-  hncd-api.mjs push --file <push-payload.json> [--host <https://host>]`;
+  hncd-api.mjs push --file <push-payload.json> [--host <https://host>]
+  hncd-api.mjs step-outs [--reason <reason> [--step-out held|retired|requeued] [--after <id>]] [--host <https://host>]
+  hncd-api.mjs requeue (--reason <reason> | --ids <id,id,...> [--reason <reason>]) [--host <https://host>]`;
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -86,8 +88,33 @@ async function push(args) {
   process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
 }
 
+async function stepOuts(args) {
+  const query = new URLSearchParams();
+  if (typeof args.reason === 'string') query.set('reason', args.reason);
+  if (typeof args['step-out'] === 'string') query.set('stepOut', args['step-out']);
+  if (typeof args.after === 'string') query.set('after', args.after);
+  const suffix = query.size ? `?${query}` : '';
+  const body = await call(resolveHost(args), `/api/ingest/step-outs${suffix}`, resolveToken());
+  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+}
+
+async function requeue(args) {
+  const payload = {};
+  if (typeof args.reason === 'string') payload.reason = args.reason;
+  if (typeof args.ids === 'string') payload.hnItemIds = args.ids.split(',').map((id) => id.trim()).filter(Boolean);
+  if (!payload.reason && !payload.hnItemIds) fail(USAGE);
+  const body = await call(resolveHost(args), '/api/ingest/requeue', resolveToken(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+}
+
 const args = parseArgs(process.argv.slice(2));
 const command = args._[0];
 if (command === 'pending') await pending(args);
 else if (command === 'push') await push(args);
+else if (command === 'step-outs') await stepOuts(args);
+else if (command === 'requeue') await requeue(args);
 else fail(USAGE, 2);

@@ -209,6 +209,15 @@ is ignored. The item leaves this extractor's queue and returns when a newer extr
 registered, the same way a v2 re-extraction reopened every v1 row. `unknown_item` means the id has
 no ingest row; a step-out never creates one.
 
+Both step-outs carry a `reason`, and the Worker records it on the ingest row (`step_out`,
+`step_out_reason`, `step_out_count`), so nothing stepped out is lost: `hncd-api.mjs step-outs`
+counts them by reason, and `hncd-api.mjs requeue --reason <reason>` (or `--ids <id,...>`) puts them
+back on the pending page once the cause is fixed. Hold reasons are `no_draft_batch`,
+`draft_missing`, `source_alive`, `source_unreachable`, `flagged`, `other`; retirement reasons are
+`deleted`, `dead`, `missing`, `textless`. A reason outside its list is answered `invalid_reason` and
+changes nothing; a step-out sent with none is stored as `unrecorded`. A draft that later lands
+clears the step-out. OPERATIONS.md ("Step-outs") has the endpoints and the one-time backfill.
+
 ## Running step 3 elsewhere
 
 Extraction is the slow part and it is the only part that needs no credential, so it splits off
@@ -229,15 +238,19 @@ One outcome per item: after assembly every item the page read from pending gets 
 pushed draft, a retirement (`draft: null`, only for a dropped comment Firebase confirms is gone) or
 a hold (`hold: true`). The holds are computed as every page id minus the drafted-and-pushed minus
 the retired, so nothing can fall through: the pending endpoint has no cursor, and an item left
-pending heads every later page and drags each page's yield down. The `outcomes` line counts holds
+pending heads every later page and drags each page's yield down. Every hold and retirement is pushed
+with its reason, so the Worker records why each one left the queue. The `outcomes` line counts holds
 by reason — `no_draft_batch` (the batch came back empty), `draft_missing` (a missing or malformed
-draft), `source_alive` and `source_unreachable` (dropped by prepare, not confirmed gone),
-`flagged` (held by `HNCD_HOLD_MISSES`) and `other` (anything else, such as a pronoun-screen drop) —
-and `holds.json` in the run dir names the reason per id. A hold writes no profile, and a newer
-extractor reads the row again. `HNCD_HOLD_MISSES=1` only decides whether a flagged item that does
-have a draft is held instead of published; items with no draft are held either way.
-`HNCD_PASSES=1` skips the second pass. Use one tag per page. The steps it wraps, if you need them
-by hand:
+draft), `source_alive` and `source_unreachable` (dropped by prepare, not confirmed gone), `flagged`
+(held by `HNCD_HOLD_MISSES`) and `other` (anything else, such as a pronoun-screen drop) — and
+`holds.json` in the run dir names the reason per id. A retirement's reason is the one Firebase gave
+in `sources.json` (`deleted`, `dead`, `missing`, or `textless` for a comment with no text). Runs
+from before reasons were pushed are restated with
+`scripts/extract-hn-profiles/backfill-step-outs.mjs`, dry run by default. A hold writes no profile,
+and a newer extractor reads the row again. `HNCD_HOLD_MISSES=1` only decides whether a flagged item
+that does have a draft is held instead of published; items with no draft are held either way.
+`HNCD_PASSES=1` skips the second pass. Use one tag per page. The steps it wraps, if you need them by
+hand:
 
 ```bash
 # operator's machine: gate, prep, attach resumes, and ship the sealed batches only

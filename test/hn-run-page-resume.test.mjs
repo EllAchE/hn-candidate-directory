@@ -435,7 +435,10 @@ test('retirements and holds go out in the push stage, once each, across a crash 
     assert.notEqual(first.status, 0);
     assert.equal(count(h.calls(), 'sources'), 1);
     assert.equal(count(h.calls(), 'push'), 0, 'a step-out went out before the push stage');
-    assert.deepEqual(payload('retire-1.json'), { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] });
+    assert.deepEqual(payload('retire-1.json'), {
+      extractor: 'claude-skill-v2',
+      profiles: [{ hnItemId: '111', draft: null, reason: 'deleted' }]
+    });
 
     // The resumed run reaches the push stage and the hold payload fails.
     h.flag('fail-pull', false);
@@ -451,6 +454,11 @@ test('retirements and holds go out in the push stage, once each, across a crash 
     const held = payload('hold-1.json');
     assert.deepEqual(held.profiles.map((p) => p.hnItemId).sort(), ['222', ...h.nonces(1)].sort());
     assert.ok(held.profiles.every((p) => p.hold === true));
+    // Each hold carries the reason holds.json names for it: 222 went unchecked, the batch was flagged.
+    assert.deepEqual(
+      Object.fromEntries(held.profiles.map((p) => [p.hnItemId, p.reason])),
+      Object.fromEntries([['222', 'source_unreachable'], ...h.nonces(1).map((id) => [id, 'flagged'])])
+    );
     assert.equal(existsSync(join(h.run, 'push-1.json')), false, 'a held item was also pushed as a draft');
 
     // Only the hold that did not land goes out, from the payload the failed run wrote.
@@ -524,6 +532,12 @@ test('every item the page read ends as exactly one pushed draft, retirement or h
       222: 'source_alive', 333: 'source_unreachable',
       [b1[1]]: 'draft_missing', [b2[0]]: 'other', [b3[0]]: 'no_draft_batch', [b3[1]]: 'no_draft_batch'
     });
+    // The hold payload sends exactly those reasons, so the Worker records the same split.
+    const sentReasons = {};
+    for (const name of readdirSync(h.run).filter((file) => /^hold-\d+\.json$/.test(file))) {
+      for (const p of JSON.parse(readFileSync(join(h.run, name), 'utf8')).profiles) sentReasons[p.hnItemId] = p.reason;
+    }
+    assert.deepEqual(sentReasons, holds);
   } finally {
     h.cleanup();
   }

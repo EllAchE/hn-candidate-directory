@@ -118,7 +118,7 @@ Record the pre-deploy version, new version, staging URL, resource names, D1 ID, 
 
 ### 4. Write the staging secrets — mutation and immediate deploy
 
-`wrangler secret put` creates a new Worker version and deploys it immediately. Treat each one as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely. `HN_INGEST_TOKEN` gates `POST /api/admin/ingest/hn`, `POST /api/admin/profiles/hn`, and `GET /api/admin/profiles/hn/pending`; generate a fresh random value per environment and never reuse the staging value in production:
+`wrangler secret put` creates a new Worker version and deploys it immediately. Treat each one as a deploy, obtain a separate authorization, and re-record the active version afterward. Wrangler prompts for the value securely. `HN_INGEST_TOKEN` gates `POST /api/admin/ingest/hn`, `POST /api/admin/profiles/hn`, `GET /api/admin/profiles/hn/pending`, `POST /api/ingest/requeue`, and `GET /api/ingest/step-outs`; generate a fresh random value per environment and never reuse the staging value in production:
 
 ```sh
 wrangler secret put UNBLOCKER_ORG_API_KEY --config wrangler.staging.toml
@@ -369,10 +369,11 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
   published — stale and good beats fresh and bad on a directory card.
 - Two step-outs take a row off the pending head without writing a profile, addressed by
   `hnItemId`: `draft: null` retires a comment whose text Algolia no longer serves, and `hold: true`
-  parks one whose draft the operator will not publish. Both only raise `hn_ingests.extractor_rank`,
-  so an already-published profile stays published, and registering a newer extractor re-queues
-  them. Deploy the Worker before running a `devbox-run-page.sh` that sends them: an older Worker
-  answers each one `invalid_comment` and the row stays pending.
+  parks one whose draft the operator will not publish. Both raise `hn_ingests.extractor_rank`, so an
+  already-published profile stays published, and registering a newer extractor re-queues them. Each
+  one is recorded, not discarded: see "Step-outs" below. Deploy the Worker before running a
+  `devbox-run-page.sh` that sends them: an older Worker answers each one `invalid_comment` and the
+  row stays pending.
 - Pushes are rate-limited separately from the ingest run reservation, so a backfill of dozens of
   requests cannot starve the scheduled ingest.
 - The endpoint re-validates, redacts, and bounds every draft server-side and refuses to resurrect a
@@ -383,6 +384,97 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
   is stored.
 - **TODO:** the extractor is invoked by hand today. Wire it to a scheduled refresh once it has proven
   out over a few manual runs.
+
+#### Step-outs
+
+Every hold and retirement is recorded on its `hn_ingests` row, so a row the page run set aside can be
+found and retried later instead of waiting for a new extractor:
+
+| Column | Meaning |
+| --- | --- |
+| `step_out` | `held`, `retired`, `requeued`, or `NULL` (never stepped out, or a draft since reached it) |
+| `step_out_reason` | why, from the vocabulary below; kept through a requeue and cleared by a draft |
+| `step_out_at` | when the step-out was recorded |
+| `step_out_extractor` | the extractor that stepped it out; kept after a draft lands |
+| `step_out_count` | how many times the row has stepped out; never reset |
+
+Reasons are validated per kind; anything else is answered `invalid_reason` and changes nothing.
+Holds: `no_draft_batch`, `draft_missing`, `source_alive`, `source_unreachable`, `flagged`, `other`.
+Retirements: `deleted`, `dead`, `missing`, `textless`. A step-out sent without a reason is stored as
+`unrecorded`. `devbox-run-page.sh` sends the reason on every hold (from `holds.json`) and every
+retirement (from `sources.json`).
+
+A step-out that carries `restate: true` only records a reason: it fills in `unrecorded` or a missing
+record, never overwrites a recorded reason, never moves the rank, and answers `not_stepped_out` for
+a row that is back in the queue and `already_drafted` for one a draft has reached. That is what makes
+the backfill below safe to re-run.
+
+**Deploy order.** Each step depends on the one before it:
+
+1. A human applies migration `0007_step_outs.sql` (additive `ADD COLUMN`s and one index). The new
+   Worker reads these columns on every push, so it must not run ahead of the migration:
+
+   ```bash
+   wrangler d1 migrations list hn-candidate-directory --remote --config wrangler.production.toml
+   wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
+   ```
+
+2. Deploy the Worker.
+3. Name the reasons for the step-outs that earlier page runs already made. The backfill reads the run
+   directories under `/tmp/claude/hncd/` on the machine that ran them, skips a tag that is still
+   running, and restates only payloads whose `pushed-*` marker exists. Dry-run first and read the
+   per-tag report on stderr:
+
+   ```bash
+   node scripts/extract-hn-profiles/backfill-step-outs.mjs
+   node scripts/extract-hn-profiles/backfill-step-outs.mjs --send --host "$HNCD_HOST"
+   ```
+
+4. Mark the rest. Rows stepped out before `0007` that no run directory names (other machines, deleted
+   directories) still look like ordinary processed rows. The manual SQL marks every unsuppressed row
+   that a model extractor reached (`extractor_rank >= 1`) but that has no published model-written
+   revision (`profile_revisions.extractor_rank >= 1`) and no recorded step-out as `held` /
+   `unrecorded`. That is wider than "no published revision": a held item whose deterministic rank-0
+   profile is public was still held by the model pass, and belongs here. It is idempotent, and either
+   order with step 3 is safe, since a restatement upgrades an `unrecorded` reason it can name; running
+   it after step 3 just leaves less to upgrade:
+
+   ```bash
+   wrangler d1 execute hn-candidate-directory --remote --config wrangler.production.toml \
+     --file migrations/manual/2026-09-28-backfill-unrecorded-step-outs.sql
+   ```
+
+   `migrations/manual/` is outside what `migrations apply` reads, so this never runs by accident.
+
+**Reading them.** `GET /api/ingest/step-outs` (same `HN_INGEST_TOKEN`) returns `counts` grouped by
+`stepOut` and `reason`, and `recovered`, the rows a later draft brought back. Add `reason=<reason>`
+to list those items 100 at a time (`stepOut=held|retired|requeued` to narrow, `after=<nextAfter>` to
+page):
+
+```bash
+node scripts/extract-hn-profiles/hncd-api.mjs step-outs
+node scripts/extract-hn-profiles/hncd-api.mjs step-outs --reason draft_missing --step-out held
+```
+
+**Retrying them.** `POST /api/ingest/requeue` puts rows back on the pending page. The body is
+`{"reason": "<reason>"}`, `{"hnItemIds": ["<id>", ...]}` (at most 25), or both, which requeues only
+the listed ids that have that reason. A requeued row gets `step_out = 'requeued'` and
+`extractor_rank = MIN(extractor_rank, 1)`: it is pending for the current extractor again, keeps its
+Processed badge, and any published profile stays published. The reason is kept, so a second requeue
+of the same reason is a no-op; if the row steps out again the count goes up and the new reason
+replaces it.
+
+```bash
+node scripts/extract-hn-profiles/hncd-api.mjs requeue --reason no_draft_batch
+node scripts/extract-hn-profiles/hncd-api.mjs requeue --ids 41234567,41234568
+```
+
+- A reason alone reaches `held` rows only; its response counts the matching `retired` rows in
+  `retiredNotRequeued`. A retired comment is gone at the source, so it comes back by id or not at all.
+- By id, every id lands in exactly one bucket: `requeued`, `alreadyRequeued`, `notSteppedOut`,
+  `reasonMismatch`, `suppressed`, or `unknown`. A suppressed row is never requeued.
+- The response ends with `pending`, the queue length afterwards. Requeued rows head the next pages,
+  so requeue one reason at a time and let a page run drain it.
 
 ### Facet vocabularies
 

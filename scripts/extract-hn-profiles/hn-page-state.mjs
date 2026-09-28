@@ -7,6 +7,7 @@
 //   hn-page-state.mjs plan --run <dir> [--fresh]
 //   hn-page-state.mjs bind --batch <batch.json> [--map <batch.map.json>] --drafts <drafts.json>
 //   hn-page-state.mjs holds --run <dir> --batches <n>
+//   hn-page-state.mjs retire-reasons --sources <sources.json>
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -176,6 +177,19 @@ export function pageOutcomes({ runDir, batches }) {
   return { page: page.size, pushed: pushed.size, retired: retired.size, held, reasons, heldBy, conflicts };
 }
 
+// hn-check-sources' verdict for a gone comment, in the Worker's retire vocabulary. Only `no_text` is
+// renamed; a verdict the Worker does not know is left out, and that retirement is sent without a
+// reason (recorded as `unrecorded`) rather than refused.
+export const RETIRE_REASONS = Object.freeze({ deleted: 'deleted', dead: 'dead', missing: 'missing', no_text: 'textless' });
+
+export function retireReasons(sources) {
+  const why = {};
+  for (const [id, verdict] of Object.entries(sources?.ids || {})) {
+    if (Object.hasOwn(RETIRE_REASONS, verdict)) why[String(id)] = RETIRE_REASONS[verdict];
+  }
+  return why;
+}
+
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
@@ -194,8 +208,10 @@ if (import.meta.main) {
     const result = pageOutcomes({ runDir: args.run, batches: Number(args.batches) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.conflicts.length ? 1 : 0);
+  } else if (command === 'retire-reasons' && args.sources) {
+    process.stdout.write(`${JSON.stringify(retireReasons(readJson(args.sources)))}\n`);
   } else {
-    console.error('usage: hn-page-state.mjs plan --run <dir> [--fresh] | bind --batch <batch.json> [--map <map.json>] --drafts <drafts.json> | holds --run <dir> --batches <n>');
+    console.error('usage: hn-page-state.mjs plan --run <dir> [--fresh] | bind --batch <batch.json> [--map <map.json>] --drafts <drafts.json> | holds --run <dir> --batches <n> | retire-reasons --sources <sources.json>');
     process.exit(2);
   }
 }

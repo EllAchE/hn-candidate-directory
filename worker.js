@@ -56,6 +56,20 @@ const HN_EXTRACTORS = Object.freeze({ 'deterministic-labels-v1': 0, 'claude-skil
 // better extractor is merely registered.
 const HN_PROCESSED_RANK = HN_EXTRACTORS['claude-skill-v1'];
 const HN_PUSH_LIMITS = Object.freeze({ batch: 25, pendingPage: 100 });
+// Why an item stepped out, from a closed list per outcome, so a count by reason means the same thing
+// on every page and a requeue can name exactly the failure a fix addressed. An entry that states no
+// reason is still recorded, as `unrecorded`, rather than refused: a step-out is what keeps the item
+// off the head of every later page, and losing it over a missing label would cost more than the label.
+const HN_STEP_OUT_REASONS = Object.freeze({
+  held: Object.freeze(['no_draft_batch', 'draft_missing', 'source_alive', 'source_unreachable', 'flagged', 'other']),
+  retired: Object.freeze(['deleted', 'dead', 'missing', 'textless'])
+});
+const HN_UNRECORDED_STEP_OUT = 'unrecorded';
+// A requeued row must be pending for the newest extractor, and pending is `extractor_rank < rank`.
+// One below the newest does that without dropping under HN_PROCESSED_RANK, which drives the public
+// "Processed" badge off this same column; a lower value would relabel a retired comment's profile.
+const HN_REQUEUE_RANK = Math.max(...Object.values(HN_EXTRACTORS)) - 1;
+const MAX_HN_REQUEUE_REQUEST_BYTES = 16_384;
 // A pushed item carries the whole comment as well as its draft, so the body cap is derived from the
 // largest comment the ingest will ever hold rather than picked as a round number.
 const MAX_HN_PUSH_REQUEST_BYTES = HN_PUSH_LIMITS.batch * (HN_INGEST_LIMITS.commentChars + 8_192);
@@ -312,6 +326,16 @@ async function routeRequest(request, env) {
   if (url.pathname === '/api/admin/profiles/hn/pending') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return listPendingHackerNewsExtractions(request, env);
+  }
+
+  if (url.pathname === '/api/ingest/requeue') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return requeueStepOuts(request, env);
+  }
+
+  if (url.pathname === '/api/ingest/step-outs') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return listStepOuts(request, env);
   }
 
   if (url.pathname.startsWith('/api/')) return json({ error: 'not_found' }, 404);
@@ -1710,7 +1734,8 @@ async function loadHnPushState(env, itemIds) {
   if (!itemIds.length) return new Map();
 
   const result = await env.DB.prepare(
-    `SELECT i.hn_item_id, i.submission_id, i.suppressed_at, i.comment_hash,
+    `SELECT i.hn_item_id, i.submission_id, i.suppressed_at, i.comment_hash, i.extractor_rank,
+            i.step_out, i.step_out_reason,
             r.status AS revision_status, r.extractor_rank AS revision_rank
        FROM hn_ingests i
        LEFT JOIN profile_revisions r ON r.submission_id = i.submission_id
@@ -1728,13 +1753,13 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
   if (!record) {
     const hnItemId = stepOutItemId(entry);
     if (!hnItemId) return { result: { outcome: 'invalid_comment' }, statements: [] };
-    return planStepOut(env, hnItemId, known.get(hnItemId), entry.hold === true ? 'held' : 'retired', extractor, pushedAt);
+    return planStepOut(env, hnItemId, known.get(hnItemId), entry, entry.hold === true ? 'held' : 'retired', extractor, pushedAt);
   }
 
   const hnItemId = record.itemId;
   const state = known.get(hnItemId);
   if (state?.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
-  if (entry.hold === true) return planStepOut(env, hnItemId, state, 'held', extractor, pushedAt);
+  if (entry.hold === true) return planStepOut(env, hnItemId, state, entry, 'held', extractor, pushedAt);
 
   const resumeUrl = hnResumeUrl(entry?.resumeUrl);
   if (resumeUrl === null) return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
@@ -1749,8 +1774,11 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
 
   if (prepared.retired) {
+    const reason = stepOutReason(entry, 'retired');
+    if (!reason) return { result: { hnItemId, outcome: 'invalid_reason' }, statements: [] };
     const statement = hnIngestStatement(env, record, state?.submission_id || null, pushedAt, provenance);
-    return { result: { hnItemId, outcome: 'retired' }, statements: [statement] };
+    const stepOut = stepOutStatements(env, hnItemId, state, 'retired', reason, false, extractor, pushedAt);
+    return { result: { hnItemId, outcome: 'retired' }, statements: [statement, ...stepOut.statements] };
   }
 
   if (state?.revision_status && state.revision_status !== 'published') {
@@ -1769,7 +1797,20 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
       outcome: state?.revision_status ? 'updated' : 'created',
       redacted: prepared.redacted
     },
-    statements: [...profileStatements, hnIngestStatement(env, record, submissionId, pushedAt, provenance)]
+    statements: [
+      ...profileStatements,
+      hnIngestStatement(env, record, submissionId, pushedAt, provenance),
+      // A draft that finally lands ends the step-out but keeps its count, so an item that needed three
+      // pages to extract still says so.
+      ...(state?.step_out
+        ? [
+            env.DB.prepare(
+              `UPDATE hn_ingests SET step_out = NULL, step_out_reason = NULL, step_out_at = NULL
+                WHERE hn_item_id = ? AND step_out IS NOT NULL`
+            ).bind(hnItemId)
+          ]
+        : [])
+    ]
   };
 }
 
@@ -1793,14 +1834,59 @@ function stepOutItemId(entry) {
 // one returns every held and retired row to its queue with no extra bookkeeping. The comment hash is
 // left alone on purpose: if the text has moved since the ingest recorded it, the next cron pass
 // resets the rank and the item comes back as a new reading.
-function planStepOut(env, hnItemId, state, outcome, extractor, pushedAt) {
+//
+// The step-out columns are the only record of *why* a row left the queue, and nothing here deletes
+// one: a row stays listable, and requeueable, until a draft actually lands for it.
+function planStepOut(env, hnItemId, state, entry, outcome, extractor, pushedAt) {
+  const reason = stepOutReason(entry, outcome);
+  if (!reason) return { result: { hnItemId, outcome: 'invalid_reason' }, statements: [] };
   if (!state) return { result: { hnItemId, outcome: 'unknown_item' }, statements: [] };
   if (state.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+  const plan = stepOutStatements(env, hnItemId, state, outcome, reason, entry?.restate === true, extractor, pushedAt);
+  return { result: { hnItemId, outcome: plan.outcome }, statements: plan.statements };
+}
+
+// An absent reason is recorded rather than refused (see HN_STEP_OUT_REASONS), and `unrecorded` may be
+// named outright; any other reason has to be in the outcome's list, because a free-text reason would
+// split one failure across many counts.
+function stepOutReason(entry, outcome) {
+  const reason = entry?.reason;
+  if (reason === undefined || reason === null || reason === HN_UNRECORDED_STEP_OUT) return HN_UNRECORDED_STEP_OUT;
+  return typeof reason === 'string' && HN_STEP_OUT_REASONS[outcome].includes(reason) ? reason : '';
+}
+
+// Two cases, told apart by the row's rank. Below this extractor's rank, it is a new step-out: the rank
+// moves and the count goes up. At or above it, the item already left the queue and this is a
+// restatement -- a re-sent payload, or the backfill naming a step-out made before these columns
+// existed -- which may fill in a reason nobody recorded but never counts twice or overwrites a real
+// one. `restate: true` makes an entry restatement-only, so a backfill can never take a row that has
+// since come back (a requeue, a changed comment) off the queue again.
+function stepOutStatements(env, hnItemId, state, outcome, reason, restate, extractor, pushedAt) {
+  if (Number(state?.extractor_rank ?? 0) < extractor.rank) {
+    if (restate) return { outcome: 'not_stepped_out', statements: [] };
+    const statement = env.DB.prepare(
+      `UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?), step_out = ?, step_out_reason = ?,
+              step_out_at = ?, step_out_extractor = ?, step_out_count = step_out_count + 1, updated_at = ?
+        WHERE hn_item_id = ? AND suppressed_at IS NULL`
+    ).bind(extractor.rank, outcome, reason, pushedAt, extractor.id, pushedAt, hnItemId);
+    return { outcome, statements: [statement] };
+  }
+
+  if (!state.step_out && Number(state.revision_rank ?? -1) >= extractor.rank) {
+    return { outcome: 'already_drafted', statements: [] };
+  }
+  const recorded = state.step_out && (reason === HN_UNRECORDED_STEP_OUT || state.step_out_reason !== HN_UNRECORDED_STEP_OUT);
+  if (state.step_out === 'requeued' || recorded) return { outcome, statements: [] };
+
   const statement = env.DB.prepare(
-    `UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?), updated_at = ?
-      WHERE hn_item_id = ? AND suppressed_at IS NULL`
-  ).bind(extractor.rank, pushedAt, hnItemId);
-  return { result: { hnItemId, outcome }, statements: [statement] };
+    `UPDATE hn_ingests SET step_out = ?, step_out_reason = ?, step_out_at = COALESCE(step_out_at, ?),
+            step_out_extractor = COALESCE(step_out_extractor, ?),
+            step_out_count = CASE WHEN step_out IS NULL THEN step_out_count + 1 ELSE step_out_count END,
+            updated_at = ?
+      WHERE hn_item_id = ? AND suppressed_at IS NULL
+        AND (step_out IS NULL OR (step_out IN ('held', 'retired') AND step_out_reason = 'unrecorded'))`
+  ).bind(outcome, reason, pushedAt, extractor.id, pushedAt, hnItemId);
+  return { outcome, statements: [statement] };
 }
 
 // The order is not interchangeable. validateDraft first, so an oversized field earns a real
@@ -1887,6 +1973,162 @@ async function countPendingHackerNewsExtractions(env, rank) {
     .bind(rank)
     .first();
   return Number(row?.pending || 0);
+}
+
+const HN_STEP_OUT_KINDS = Object.freeze(['held', 'retired', 'requeued']);
+const HN_ALL_STEP_OUT_REASONS = Object.freeze([
+  ...HN_STEP_OUT_REASONS.held,
+  ...HN_STEP_OUT_REASONS.retired,
+  HN_UNRECORDED_STEP_OUT
+]);
+
+// Puts stepped-out rows back on the pending page once whatever stopped them is fixed. Only the rank
+// and the step_out marker move: the reason stays, so a second requeue of the same reason is a no-op
+// rather than a second pass, and profile_revisions is never read or written. A reason alone reaches
+// held rows only. A retired comment is gone at the source, and re-reading one is a decision about
+// that specific item, so retired rows come back by id or not at all.
+async function requeueStepOuts(request, env) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+
+  const denied = await authorizeIngestToken(request, env, 'profilePush');
+  if (denied) return denied;
+
+  const body = await readJson(request, MAX_HN_REQUEUE_REQUEST_BYTES);
+  if (body instanceof Response) return body;
+
+  const reason = body?.reason ?? null;
+  if (reason !== null && !HN_ALL_STEP_OUT_REASONS.includes(reason)) return json({ error: 'invalid_reason' }, 400);
+  const rawIds = body?.hnItemIds ?? null;
+  if (reason === null && rawIds === null) return json({ error: 'reason_or_ids_required' }, 400);
+  if (rawIds !== null && (!Array.isArray(rawIds) || !rawIds.length)) return json({ error: 'invalid_item_ids' }, 400);
+  if (rawIds !== null && rawIds.length > HN_PUSH_LIMITS.batch) {
+    return json({ error: 'batch_too_large', maxItems: HN_PUSH_LIMITS.batch }, 413);
+  }
+  const itemIds = rawIds === null ? null : [...new Set(rawIds.map((raw) => (typeof raw === 'string' || Number.isSafeInteger(raw) ? String(raw).trim() : '')))];
+  if (itemIds?.some((itemId) => !isHnItemId(itemId))) return json({ error: 'invalid_item_ids' }, 400);
+
+  const rank = Math.max(...Object.values(HN_EXTRACTORS));
+  const requeuedAt = new Date().toISOString();
+  const counts = itemIds === null
+    ? await requeueStepOutsByReason(env, reason, requeuedAt)
+    : await requeueStepOutsById(env, itemIds, reason, requeuedAt);
+
+  return json({ reason, ...counts, pending: await countPendingHackerNewsExtractions(env, rank) });
+}
+
+async function requeueStepOutsByReason(env, reason, requeuedAt) {
+  const result = await env.DB.prepare(
+    `UPDATE hn_ingests SET step_out = 'requeued', extractor_rank = MIN(extractor_rank, ?), updated_at = ?
+      WHERE step_out_reason = ? AND step_out = 'held' AND suppressed_at IS NULL`
+  )
+    .bind(HN_REQUEUE_RANK, requeuedAt, reason)
+    .run();
+  const retired = await env.DB.prepare(
+    `SELECT COUNT(*) AS retired FROM hn_ingests
+      WHERE step_out_reason = ? AND step_out = 'retired' AND suppressed_at IS NULL`
+  )
+    .bind(reason)
+    .first();
+  return { requeued: Number(result?.meta?.changes || 0), retiredNotRequeued: Number(retired?.retired || 0) };
+}
+
+// Every id gets exactly one bucket, so a caller can tell a typo (unknown) from a row that already came
+// back (alreadyRequeued) or was never out (notSteppedOut).
+async function requeueStepOutsById(env, itemIds, reason, requeuedAt) {
+  const result = await env.DB.prepare(
+    `SELECT hn_item_id, step_out, step_out_reason, suppressed_at FROM hn_ingests
+      WHERE hn_item_id IN (${itemIds.map(() => '?').join(', ')})`
+  )
+    .bind(...itemIds)
+    .all();
+  const rows = new Map((result?.results || []).map((row) => [row.hn_item_id, row]));
+
+  const counts = { requeued: 0, alreadyRequeued: 0, notSteppedOut: 0, reasonMismatch: 0, suppressed: 0, unknown: 0 };
+  const statements = [];
+  for (const itemId of itemIds) {
+    const row = rows.get(itemId);
+    const bucket = !row
+      ? 'unknown'
+      : row.suppressed_at
+        ? 'suppressed'
+        : row.step_out === 'requeued'
+          ? 'alreadyRequeued'
+          : !row.step_out
+            ? 'notSteppedOut'
+            : reason !== null && row.step_out_reason !== reason
+              ? 'reasonMismatch'
+              : 'requeued';
+    counts[bucket] += 1;
+    if (bucket !== 'requeued') continue;
+    statements.push(
+      env.DB.prepare(
+        `UPDATE hn_ingests SET step_out = 'requeued', extractor_rank = MIN(extractor_rank, ?), updated_at = ?
+          WHERE hn_item_id = ? AND step_out IN ('held', 'retired') AND suppressed_at IS NULL`
+      ).bind(HN_REQUEUE_RANK, requeuedAt, itemId)
+    );
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return counts;
+}
+
+// What the queue has set aside, by why. `recovered` counts rows a later draft brought back, which is
+// the number that says whether a requeue was worth running.
+async function listStepOuts(request, env) {
+  if (!env.DB) return json({ error: 'service_not_configured' }, 503);
+
+  const denied = await authorizeIngestToken(request, env, 'profilePush');
+  if (denied) return denied;
+
+  const params = new URL(request.url).searchParams;
+  const reason = params.get('reason');
+  const stepOut = params.get('stepOut');
+  const after = params.get('after') || '';
+  if (reason !== null && !HN_ALL_STEP_OUT_REASONS.includes(reason)) return json({ error: 'invalid_reason' }, 400);
+  if (stepOut !== null && !HN_STEP_OUT_KINDS.includes(stepOut)) return json({ error: 'invalid_step_out' }, 400);
+  if (after && !isHnItemId(after)) return json({ error: 'invalid_after' }, 400);
+
+  const grouped = await env.DB.prepare(
+    `SELECT step_out, step_out_reason, COUNT(*) AS items FROM hn_ingests
+      WHERE step_out IS NOT NULL AND suppressed_at IS NULL
+      GROUP BY step_out, step_out_reason ORDER BY step_out, step_out_reason`
+  ).all();
+  const recovered = await env.DB.prepare(
+    `SELECT COUNT(*) AS recovered FROM hn_ingests
+      WHERE step_out IS NULL AND step_out_count > 0 AND suppressed_at IS NULL`
+  ).first();
+
+  const response = {
+    counts: (grouped?.results || []).map((row) => ({
+      stepOut: row.step_out,
+      reason: row.step_out_reason,
+      items: Number(row.items || 0)
+    })),
+    recovered: Number(recovered?.recovered || 0)
+  };
+  if (reason === null) return json(response);
+
+  // Keyset paging on the primary key, so the page stays stable while a requeue runs against it.
+  const listed = await env.DB.prepare(
+    `SELECT hn_item_id, step_out, step_out_at, step_out_count, step_out_extractor FROM hn_ingests
+      WHERE step_out_reason = ? AND step_out = COALESCE(?, step_out) AND hn_item_id > ? AND suppressed_at IS NULL
+      ORDER BY hn_item_id LIMIT ?`
+  )
+    .bind(reason, stepOut, after, HN_PUSH_LIMITS.pendingPage + 1)
+    .all();
+  const rows = listed?.results || [];
+  const page = rows.slice(0, HN_PUSH_LIMITS.pendingPage);
+  return json({
+    ...response,
+    reason,
+    items: page.map((row) => ({
+      hnItemId: row.hn_item_id,
+      stepOut: row.step_out,
+      stepOutAt: row.step_out_at,
+      stepOutCount: Number(row.step_out_count || 0),
+      extractor: row.step_out_extractor
+    })),
+    nextAfter: rows.length > page.length ? page[page.length - 1].hn_item_id : null
+  });
 }
 
 function toPendingExtraction(row) {
@@ -2597,6 +2839,8 @@ export {
   HN_EXTRACTORS,
   HN_INGEST_LIMITS,
   HN_PUSH_LIMITS,
+  HN_REQUEUE_RANK,
+  HN_STEP_OUT_REASONS,
   HN_UNKNOWN,
   HN_WORK_MODES,
   MAX_HN_PUSH_REQUEST_BYTES,
