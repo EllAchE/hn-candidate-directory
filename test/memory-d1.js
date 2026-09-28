@@ -29,6 +29,13 @@ export async function deliverQueuedMessages(env, worker) {
   return { delivered: messages.length, acknowledged, retried };
 }
 
+const EMPTY_STEP_OUT = Object.freeze({
+  step_out: null,
+  step_out_reason: null,
+  step_out_at: null,
+  step_out_count: 0,
+  step_out_extractor: null
+});
 const PENDING_STATUSES = new Set(['submitted', 'processing', 'failed']);
 const ABANDONED_STATUSES = new Set(['submitted', 'failed']);
 
@@ -135,6 +142,18 @@ class MemoryStatement {
       const state = this.database.serviceState.get(this.values[0]);
       return state ? { value: state.value } : null;
     }
+    if (this.sql.startsWith('SELECT COUNT(*) AS retired FROM hn_ingests')) {
+      const retired = [...this.database.hnIngests.values()].filter(
+        (ingest) => ingest.step_out_reason === this.values[0] && ingest.step_out === 'retired' && ingest.suppressed_at === null
+      ).length;
+      return { retired };
+    }
+    if (this.sql.startsWith('SELECT COUNT(*) AS recovered FROM hn_ingests')) {
+      const recovered = [...this.database.hnIngests.values()].filter(
+        (ingest) => ingest.step_out === null && (ingest.step_out_count ?? 0) > 0 && ingest.suppressed_at === null
+      ).length;
+      return { recovered };
+    }
     if (this.sql.startsWith('SELECT COUNT(*) AS pending FROM hn_ingests')) {
       const pending = [...this.database.hnIngests.values()].filter(
         (ingest) => ingest.suppressed_at === null && (ingest.extractor_rank ?? 0) < this.values[0]
@@ -148,6 +167,43 @@ class MemoryStatement {
   }
 
   async all() {
+    if (this.sql.startsWith('SELECT hn_item_id, step_out, step_out_reason, suppressed_at FROM hn_ingests')) {
+      const results = this.values
+        .map((itemId) => this.database.hnIngests.get(itemId))
+        .filter(Boolean)
+        .map((ingest) => select(ingest, ['hn_item_id', 'step_out', 'step_out_reason', 'suppressed_at']));
+      return { results };
+    }
+    if (this.sql.startsWith('SELECT step_out, step_out_reason, COUNT(*) AS items FROM hn_ingests')) {
+      const groups = new Map();
+      for (const ingest of this.database.hnIngests.values()) {
+        if (!ingest.step_out || ingest.suppressed_at !== null) continue;
+        const key = `${ingest.step_out}\u0000${ingest.step_out_reason}`;
+        const group = groups.get(key) || { step_out: ingest.step_out, step_out_reason: ingest.step_out_reason, items: 0 };
+        group.items += 1;
+        groups.set(key, group);
+      }
+      const results = [...groups.values()].sort(
+        (a, b) => a.step_out.localeCompare(b.step_out) || a.step_out_reason.localeCompare(b.step_out_reason)
+      );
+      return { results };
+    }
+    if (this.sql.startsWith('SELECT hn_item_id, step_out, step_out_at, step_out_count, step_out_extractor FROM hn_ingests')) {
+      const [reason, stepOut, after, limit] = this.values;
+      const results = [...this.database.hnIngests.values()]
+        .filter(
+          (ingest) =>
+            ingest.step_out_reason === reason &&
+            ingest.step_out !== null &&
+            ingest.step_out === (stepOut ?? ingest.step_out) &&
+            ingest.hn_item_id > after &&
+            ingest.suppressed_at === null
+        )
+        .sort((a, b) => a.hn_item_id.localeCompare(b.hn_item_id))
+        .slice(0, limit)
+        .map((ingest) => select(ingest, ['hn_item_id', 'step_out', 'step_out_at', 'step_out_count', 'step_out_extractor']));
+      return { results };
+    }
     if (this.sql.includes('FROM hn_ingests i')) {
       return {
         results: this.values
@@ -160,6 +216,9 @@ class MemoryStatement {
               submission_id: ingest.submission_id,
               suppressed_at: ingest.suppressed_at,
               comment_hash: ingest.comment_hash,
+              extractor_rank: ingest.extractor_rank ?? 0,
+              step_out: ingest.step_out ?? null,
+              step_out_reason: ingest.step_out_reason ?? null,
               revision_status: revision?.status ?? null,
               revision_rank: revision?.extractor_rank ?? null
             };
@@ -354,7 +413,8 @@ class MemoryStatement {
         created_at: createdAt,
         extractor_rank: extractorRank,
         resume_url: resumeUrl ?? null,
-        resume_fetched_at: resumeFetchedAt ?? null
+        resume_fetched_at: resumeFetchedAt ?? null,
+        ...EMPTY_STEP_OUT
       });
       return success();
     }
@@ -523,11 +583,58 @@ class MemoryStatement {
       Object.assign(revision, { status: 'archived', published_at: null, updated_at: updatedAt });
       return success();
     }
-    if (this.sql.startsWith('UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?)')) {
-      const [rank, updatedAt, hnItemId] = this.values;
+    if (this.sql.startsWith('UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?), step_out = ?')) {
+      const [rank, stepOut, reason, stepOutAt, extractor, updatedAt, hnItemId] = this.values;
       const ingest = this.database.hnIngests.get(hnItemId);
       if (!ingest || ingest.suppressed_at !== null) return success(0);
-      Object.assign(ingest, { extractor_rank: Math.max(ingest.extractor_rank ?? 0, rank), updated_at: updatedAt });
+      Object.assign(ingest, {
+        extractor_rank: Math.max(ingest.extractor_rank ?? 0, rank),
+        step_out: stepOut,
+        step_out_reason: reason,
+        step_out_at: stepOutAt,
+        step_out_extractor: extractor,
+        step_out_count: (ingest.step_out_count ?? 0) + 1,
+        updated_at: updatedAt
+      });
+      return success();
+    }
+    if (this.sql.startsWith('UPDATE hn_ingests SET step_out = ?, step_out_reason = ?')) {
+      const [stepOut, reason, stepOutAt, extractor, updatedAt, hnItemId] = this.values;
+      const ingest = this.database.hnIngests.get(hnItemId);
+      if (!ingest || ingest.suppressed_at !== null) return success(0);
+      const upgradable = ['held', 'retired'].includes(ingest.step_out) && ingest.step_out_reason === 'unrecorded';
+      if (ingest.step_out && !upgradable) return success(0);
+      Object.assign(ingest, {
+        step_out_count: ingest.step_out ? ingest.step_out_count : (ingest.step_out_count ?? 0) + 1,
+        step_out: stepOut,
+        step_out_reason: reason,
+        step_out_at: ingest.step_out_at ?? stepOutAt,
+        step_out_extractor: ingest.step_out_extractor ?? extractor,
+        updated_at: updatedAt
+      });
+      return success();
+    }
+    if (this.sql.startsWith('UPDATE hn_ingests SET step_out = NULL')) {
+      const ingest = this.database.hnIngests.get(this.values[0]);
+      if (!ingest?.step_out) return success(0);
+      Object.assign(ingest, { step_out: null, step_out_reason: null, step_out_at: null });
+      return success();
+    }
+    if (this.sql.startsWith("UPDATE hn_ingests SET step_out = 'requeued'") && this.sql.includes('WHERE step_out_reason = ?')) {
+      const [rank, updatedAt, reason] = this.values;
+      const rows = [...this.database.hnIngests.values()].filter(
+        (ingest) => ingest.step_out_reason === reason && ingest.step_out === 'held' && ingest.suppressed_at === null
+      );
+      rows.forEach((ingest) =>
+        Object.assign(ingest, { step_out: 'requeued', extractor_rank: Math.min(ingest.extractor_rank ?? 0, rank), updated_at: updatedAt })
+      );
+      return success(rows.length);
+    }
+    if (this.sql.startsWith("UPDATE hn_ingests SET step_out = 'requeued'") && this.sql.includes('WHERE hn_item_id = ?')) {
+      const [rank, updatedAt, hnItemId] = this.values;
+      const ingest = this.database.hnIngests.get(hnItemId);
+      if (!ingest || !['held', 'retired'].includes(ingest.step_out) || ingest.suppressed_at !== null) return success(0);
+      Object.assign(ingest, { step_out: 'requeued', extractor_rank: Math.min(ingest.extractor_rank ?? 0, rank), updated_at: updatedAt });
       return success();
     }
     if (this.sql === 'UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?') {

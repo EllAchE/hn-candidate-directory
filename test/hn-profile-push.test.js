@@ -662,6 +662,290 @@ describe('profile links and the HN handle', () => {
   });
 });
 
+describe('tracking step-outs', () => {
+  test('records the reason, time and extractor of a step-out and counts it', async () => {
+    const env = configured();
+    await ingestThread(env);
+
+    const response = await push(
+      env,
+      [
+        { hnItemId: '44444501', hold: true, reason: 'draft_missing' },
+        { hnItemId: '44444502', draft: null, reason: 'deleted' },
+        { hnItemId: '44444503', hold: true }
+      ],
+      TOKEN,
+      'claude-skill-v2'
+    );
+    expect((await response.json()).results.map((result) => result.outcome)).toEqual(['held', 'retired', 'held']);
+
+    expect(stepOut(env, '44444501')).toEqual({
+      step_out: 'held',
+      step_out_reason: 'draft_missing',
+      step_out_count: 1,
+      step_out_extractor: 'claude-skill-v2'
+    });
+    expect(stepOut(env, '44444502')).toMatchObject({ step_out: 'retired', step_out_reason: 'deleted', step_out_count: 1 });
+    // No reason is still a step-out: dropping it would put the item back at the head of every page.
+    expect(stepOut(env, '44444503')).toMatchObject({ step_out: 'held', step_out_reason: 'unrecorded', step_out_count: 1 });
+    expect(env.DB.hnIngests.get('44444501').step_out_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(env.DB.revisions.has('hn-44444503')).toBe(false);
+  });
+
+  test('a retire that carries its comment records the reason too', async () => {
+    const env = configured();
+    await ingestThread(env);
+
+    await push(env, [{ comment: commentBody(NOISE_COMMENT), draft: null, reason: 'textless' }]);
+    expect(stepOut(env, '44444503')).toMatchObject({ step_out: 'retired', step_out_reason: 'textless', step_out_count: 1 });
+  });
+
+  test('an invalid reason fails only its own entry and writes nothing for it', async () => {
+    const env = configured();
+    await ingestThread(env);
+
+    const response = await push(env, [
+      { hnItemId: '44444501', hold: true, reason: 'deleted' },
+      { hnItemId: '44444502', draft: null, reason: 'source_alive' },
+      { comment: commentBody(NOISE_COMMENT), draft: null, reason: 'Gone!' },
+      { hnItemId: '44444503', hold: true, reason: 'flagged' }
+    ]);
+    expect((await response.json()).results).toEqual([
+      { hnItemId: '44444501', outcome: 'invalid_reason' },
+      { hnItemId: '44444502', outcome: 'invalid_reason' },
+      { hnItemId: '44444503', outcome: 'invalid_reason' },
+      { hnItemId: '44444503', outcome: 'held' }
+    ]);
+    expect(stepOut(env, '44444501')).toMatchObject({ step_out: null, step_out_count: 0 });
+    expect(env.DB.hnIngests.get('44444501').extractor_rank).toBe(0);
+    expect(stepOut(env, '44444502')).toMatchObject({ step_out: null, step_out_count: 0 });
+    expect(stepOut(env, '44444503')).toMatchObject({ step_out: 'held', step_out_reason: 'flagged' });
+  });
+
+  test('a later draft clears the step-out and keeps the count', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [{ hnItemId: '44444501', hold: true, reason: 'no_draft_batch' }], TOKEN, 'claude-skill-v2');
+    await requeue(env, { reason: 'no_draft_batch' });
+
+    const response = await push(env, [item(PROSE_COMMENT, { companies: ['Stripe'] })], TOKEN, 'claude-skill-v2');
+    expect((await response.json()).results[0].outcome).toBe('updated');
+
+    expect(stepOut(env, '44444501')).toEqual({
+      step_out: null,
+      step_out_reason: null,
+      step_out_count: 1,
+      step_out_extractor: 'claude-skill-v2'
+    });
+    expect(env.DB.hnIngests.get('44444501').step_out_at).toBeNull();
+    expect((await stepOuts(env)).recovered).toBe(1);
+  });
+
+  test('a re-sent step-out fills in a missing reason but never counts twice or overwrites one', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [{ hnItemId: '44444501', hold: true }, { hnItemId: '44444502', hold: true, reason: 'flagged' }]);
+    const at = env.DB.hnIngests.get('44444501').step_out_at;
+
+    const response = await push(env, [
+      { hnItemId: '44444501', hold: true, reason: 'source_alive' },
+      { hnItemId: '44444502', hold: true, reason: 'other' }
+    ]);
+    expect((await response.json()).results.map((result) => result.outcome)).toEqual(['held', 'held']);
+    expect(stepOut(env, '44444501')).toMatchObject({ step_out_reason: 'source_alive', step_out_count: 1 });
+    expect(env.DB.hnIngests.get('44444501').step_out_at).toBe(at);
+    expect(stepOut(env, '44444502')).toMatchObject({ step_out_reason: 'flagged', step_out_count: 1 });
+  });
+
+  // The backfill sends `restate: true`, so naming a reason can never take a row off the queue again.
+  test('a restatement only records a reason, never a new step-out', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [item(PROSE_COMMENT, { companies: ['Stripe'] })]);
+
+    const response = await push(env, [
+      { hnItemId: '44444501', hold: true, reason: 'draft_missing', restate: true },
+      { hnItemId: '44444502', hold: true, reason: 'draft_missing', restate: true }
+    ]);
+    expect((await response.json()).results).toEqual([
+      { hnItemId: '44444501', outcome: 'already_drafted' },
+      { hnItemId: '44444502', outcome: 'not_stepped_out' }
+    ]);
+    expect(stepOut(env, '44444501')).toMatchObject({ step_out: null, step_out_count: 0 });
+    expect(stepOut(env, '44444502')).toMatchObject({ step_out: null, step_out_count: 0 });
+    expect(await pendingIds(env)).toContain('44444502');
+  });
+
+  test('requeue by reason brings held rows back and leaves retired and suppressed ones alone', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(
+      env,
+      [
+        { hnItemId: '44444501', hold: true },
+        { hnItemId: '44444502', hold: true },
+        { hnItemId: '44444503', draft: null }
+      ],
+      TOKEN,
+      'claude-skill-v2'
+    );
+    suppress(env, '44444502');
+    const revisions = structuredClone([...env.DB.revisions.entries()]);
+    expect(await pendingIds(env, 'claude-skill-v2')).toEqual([]);
+
+    const response = await requeue(env, { reason: 'unrecorded' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ reason: 'unrecorded', requeued: 1, retiredNotRequeued: 1, pending: 1 });
+
+    expect(await pendingIds(env, 'claude-skill-v2')).toEqual(['44444501']);
+    expect(stepOut(env, '44444501')).toMatchObject({ step_out: 'requeued', step_out_reason: 'unrecorded', step_out_count: 1 });
+    // Pending for the newest extractor, still processed as far as the public badge is concerned.
+    expect(env.DB.hnIngests.get('44444501').extractor_rank).toBe(1);
+    expect(stepOut(env, '44444502').step_out).toBe('held');
+    expect(stepOut(env, '44444503').step_out).toBe('retired');
+    expect([...env.DB.revisions.entries()]).toEqual(revisions);
+
+    const again = await requeue(env, { reason: 'unrecorded' });
+    expect(await again.json()).toMatchObject({ requeued: 0, pending: 1 });
+  });
+
+  test('requeue by id reaches retired rows, and classifies every id', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(
+      env,
+      [
+        { hnItemId: '44444501', hold: true, reason: 'flagged' },
+        { hnItemId: '44444503', draft: null, reason: 'dead' }
+      ],
+      TOKEN,
+      'claude-skill-v2'
+    );
+    suppress(env, '44444502');
+
+    const response = await requeue(env, { hnItemIds: ['44444503', 44444501, '44444502', '49999999', '44444503'] });
+    expect(await response.json()).toEqual({
+      reason: null,
+      requeued: 2,
+      alreadyRequeued: 0,
+      notSteppedOut: 0,
+      reasonMismatch: 0,
+      suppressed: 1,
+      unknown: 1,
+      pending: 2
+    });
+    expect(await pendingIds(env, 'claude-skill-v2')).toEqual(expect.arrayContaining(['44444501', '44444503']));
+    expect(stepOut(env, '44444503')).toMatchObject({ step_out: 'requeued', step_out_reason: 'dead' });
+
+    const again = await requeue(env, { hnItemIds: ['44444503'], reason: 'dead' });
+    expect(await again.json()).toMatchObject({ requeued: 0, alreadyRequeued: 1 });
+  });
+
+  test('requeue by id and reason skips a row stepped out for another reason', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [{ hnItemId: '44444501', hold: true, reason: 'flagged' }, { hnItemId: '44444502', hold: true, reason: 'other' }]);
+
+    const response = await requeue(env, { reason: 'flagged', hnItemIds: ['44444501', '44444502', '44444503'] });
+    expect(await response.json()).toMatchObject({ requeued: 1, reasonMismatch: 1, notSteppedOut: 1 });
+    expect(stepOut(env, '44444502').step_out).toBe('held');
+  });
+
+  test('a requeued row is pending again, and a second step-out counts', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [{ hnItemId: '44444501', hold: true, reason: 'source_unreachable' }], TOKEN, 'claude-skill-v2');
+    expect(await pendingIds(env, 'claude-skill-v2')).not.toContain('44444501');
+
+    await requeue(env, { reason: 'source_unreachable' });
+    expect(await pendingIds(env, 'claude-skill-v2')).toContain('44444501');
+
+    await push(env, [{ hnItemId: '44444501', hold: true, reason: 'source_unreachable' }], TOKEN, 'claude-skill-v2');
+    expect(stepOut(env, '44444501')).toMatchObject({ step_out: 'held', step_out_count: 2 });
+    expect(await pendingIds(env, 'claude-skill-v2')).not.toContain('44444501');
+  });
+
+  test('requeue rejects an unusable body', async () => {
+    const env = configured();
+    const cases = [
+      [{}, 400, 'reason_or_ids_required'],
+      [{ reason: 'bogus' }, 400, 'invalid_reason'],
+      [{ hnItemIds: [] }, 400, 'invalid_item_ids'],
+      [{ hnItemIds: ['12a'] }, 400, 'invalid_item_ids'],
+      [{ hnItemIds: Array.from({ length: HN_PUSH_LIMITS.batch + 1 }, (_, index) => String(index + 1)) }, 413, 'batch_too_large']
+    ];
+    for (const [body, status, error] of cases) {
+      const response = await requeue(env, body);
+      expect(response.status).toBe(status);
+      expect((await response.json()).error).toBe(error);
+    }
+    expect((await requeue(env, { reason: 'deleted' }, '')).status).toBe(401);
+    expect((await worker.fetch(apiRequest('/api/ingest/requeue', 'GET', null, TOKEN), env)).status).toBe(405);
+  });
+
+  test('lists step-outs by kind and reason, with a paged id list for one reason', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(
+      env,
+      [
+        { hnItemId: '44444501', hold: true, reason: 'flagged' },
+        { hnItemId: '44444502', hold: true, reason: 'flagged' },
+        { hnItemId: '44444503', draft: null, reason: 'deleted' }
+      ],
+      TOKEN,
+      'claude-skill-v2'
+    );
+    suppress(env, '44444502');
+
+    const summary = await stepOuts(env);
+    expect(summary).toEqual({
+      counts: [
+        { stepOut: 'held', reason: 'flagged', items: 1 },
+        { stepOut: 'retired', reason: 'deleted', items: 1 }
+      ],
+      recovered: 0
+    });
+
+    const listed = await stepOuts(env, '?reason=flagged');
+    expect(listed.items).toEqual([
+      { hnItemId: '44444501', stepOut: 'held', stepOutAt: expect.any(String), stepOutCount: 1, extractor: 'claude-skill-v2' }
+    ]);
+    expect(listed.nextAfter).toBeNull();
+    expect((await stepOuts(env, '?reason=deleted&stepOut=held')).items).toEqual([]);
+    expect((await stepOuts(env, '?reason=flagged&after=44444501')).items).toEqual([]);
+
+    for (const query of ['?reason=nope', '?reason=flagged&stepOut=gone', '?reason=flagged&after=x']) {
+      expect((await worker.fetch(apiRequest(`/api/ingest/step-outs${query}`, 'GET', null, TOKEN), env)).status).toBe(400);
+    }
+    expect((await worker.fetch(apiRequest('/api/ingest/step-outs'), env)).status).toBe(401);
+  });
+
+  test('pages the id list past one page', async () => {
+    const env = configured();
+    for (let index = 0; index < HN_PUSH_LIMITS.pendingPage + 2; index += 1) {
+      const hnItemId = String(45000000 + index);
+      env.DB.hnIngests.set(hnItemId, {
+        hn_item_id: hnItemId,
+        suppressed_at: null,
+        extractor_rank: 2,
+        step_out: 'held',
+        step_out_reason: 'other',
+        step_out_at: '2026-09-28T00:00:00.000Z',
+        step_out_count: 1,
+        step_out_extractor: 'claude-skill-v2'
+      });
+    }
+
+    const first = await stepOuts(env, '?reason=other');
+    expect(first.items).toHaveLength(HN_PUSH_LIMITS.pendingPage);
+    expect(first.nextAfter).toBe(first.items.at(-1).hnItemId);
+    const second = await stepOuts(env, `?reason=other&after=${first.nextAfter}`);
+    expect(second.items.map((entry) => entry.hnItemId)).toEqual(['45000100', '45000101']);
+    expect(second.nextAfter).toBeNull();
+  });
+});
+
 function configured() {
   const env = createEnvironment();
   env.HN_INGEST_TOKEN = TOKEN;
@@ -702,6 +986,26 @@ function commentBody(comment) {
 function push(env, profiles, token = TOKEN, extractor = 'claude-skill-v1') {
   const body = extractor === null ? { profiles } : { extractor, profiles };
   return worker.fetch(apiRequest('/api/admin/profiles/hn', 'POST', body, token), env);
+}
+
+function requeue(env, body, token = TOKEN) {
+  return worker.fetch(apiRequest('/api/ingest/requeue', 'POST', body, token), env);
+}
+
+async function stepOuts(env, query = '') {
+  const response = await worker.fetch(apiRequest(`/api/ingest/step-outs${query}`, 'GET', null, TOKEN), env);
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+function stepOut(env, itemId) {
+  const row = env.DB.hnIngests.get(itemId);
+  return {
+    step_out: row.step_out,
+    step_out_reason: row.step_out_reason,
+    step_out_count: row.step_out_count,
+    step_out_extractor: row.step_out_extractor
+  };
 }
 
 async function pendingIds(env, extractor = 'claude-skill-v1') {

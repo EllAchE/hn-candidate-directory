@@ -86,12 +86,15 @@ reached() { [ -f "$STATE/$1" ]; }
 SUM='def sum_by(f): reduce (.[] | f // {}) as $m ({}; reduce ($m | to_entries[]) as $e (.; .[$e.key] += $e.value));'
 
 # ids on stdin, one per line -> step-out payloads of at most 25 (the push endpoint's batch limit),
-# numbered from 1. Sorted and de-duplicated, so the same ids always make the same files.
-#   write_stepouts <prefix> <jq entry for id $id>
+# numbered from 1. Sorted and de-duplicated, so the same ids always make the same files. Each entry
+# carries its id's reason from the optional {id: reason} map, so the Worker records why it stepped
+# out; an id the map does not name goes without one and is recorded as `unrecorded`.
+#   write_stepouts <prefix> <jq entry for id $id> [reasons-json]
 write_stepouts() {
-  local prefix="$1" entry="$2" i=0 chunk
-  jq -R -s -c --arg x "$EXTRACTOR_ID" "[split(\"\\n\")[] | select(. != \"\")] | unique
-    | [range(0; length; 25) as \$i | .[\$i:\$i+25]][] | {extractor:\$x, profiles:map(. as \$id | $entry)}" \
+  local prefix="$1" entry="$2" why="${3:-}" i=0 chunk
+  [ -n "$why" ] || why='{}'
+  jq -R -s -c --arg x "$EXTRACTOR_ID" --argjson why "$why" "[split(\"\\n\")[] | select(. != \"\")] | unique
+    | [range(0; length; 25) as \$i | .[\$i:\$i+25]][] | {extractor:\$x, profiles:map(. as \$id | $entry + (if \$why[\$id] then {reason:\$why[\$id]} else {} end))}" \
     | while IFS= read -r chunk; do i=$((i + 1)); printf '%s\n' "$chunk" >"$prefix-$i.json"; done
 }
 
@@ -203,7 +206,8 @@ if ! reached sources-checked && ! reached assembled; then
     if out=$(node "$HERE/hn-check-sources.mjs" --pending "$RUN/dropped.json" --out "$RUN/sources.json") \
       && [ -s "$RUN/sources.json" ]; then
       echo "$PAGE: dropped sources $out"
-      jq -r '.ids // {} | keys[]' "$RUN/sources.json" | write_stepouts "$RUN/retire" '{hnItemId:$id, draft:null}'
+      jq -r '.ids // {} | keys[]' "$RUN/sources.json" | write_stepouts "$RUN/retire" '{hnItemId:$id, draft:null}' \
+        "$(node "$HERE/hn-page-state.mjs" retire-reasons --sources "$RUN/sources.json")"
       mark sources-checked
     else
       echo "$PAGE: could not check the dropped items' sources; re-run before assembly to retry, or they are held" >&2
@@ -224,7 +228,7 @@ assemble_holds() {
     return 1
   fi
   printf '%s\n' "$out" >"$RUN/holds.json"
-  jq -r '.held[]' <<<"$out" | write_stepouts "$RUN/hold" '{hnItemId:$id, hold:true}'
+  jq -r '.held[]' <<<"$out" | write_stepouts "$RUN/hold" '{hnItemId:$id, hold:true}' "$(jq -c '.heldBy // {}' <<<"$out")"
   jq -c '{page, drafted:.pushed, retired, held:(.held|length)} + .reasons' <<<"$out" | sed "s/^/$PAGE: outcomes /"
 }
 
