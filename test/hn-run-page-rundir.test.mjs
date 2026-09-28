@@ -36,6 +36,7 @@ case "$(basename "$1")" in
     printf '%s' ${JSON.stringify(JSON.stringify({ batches, missing: [] }))}
     ;;
   hn-attach-resumes.mjs) echo x >>"${attachLog}"; echo '{"attached":1,"fetched":1,"misses":{}}' ;;
+  hn-page-state.mjs) exec "${process.execPath}" "$@" ;;
   *) echo '{}' ;;
 esac
 exit 0

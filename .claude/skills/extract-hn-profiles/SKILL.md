@@ -220,8 +220,8 @@ with the batch script, extract on the box, pull the drafts back, run the targete
 assemble against the map and push. It prints the resume tallies per pass, the miss summary
 (and writes `misses-<tag>.json`), the assembled/rejected/trimmed counts, the pronoun-screen
 count, and the push tally. `HNCD_HOLD_MISSES=1` keeps flagged items out of the push instead of
-pushing and reporting; `HNCD_PASSES=1` skips the second pass. Run it once per page; the tag
-only has to be unique per run. The steps it wraps, if you need them by hand:
+pushing and reporting; `HNCD_PASSES=1` skips the second pass. Use one tag per page. The steps
+it wraps, if you need them by hand:
 
 ```bash
 # operator's machine: gate, prep, attach resumes, and ship the sealed batches only
@@ -241,11 +241,24 @@ that never left, the push stays where the credential is, and nothing on the box 
 Keep the remote run directory outside any checkout — `[assets] directory = "."` in this repo
 means a data file at the root is served publicly.
 
-Run one page at a time and let the pool drain before starting another. Two `xargs` pools over the
-same run directory race on batch numbers — `devbox-extract-batch.sh` checks for an existing draft
-only at start, so both lanes extract the same items and throughput halves for no gain. Watch the
-pool, not the draft count: four lanes between batches look identical to a dead pool in `ps`, and
-the count alone will not tell you which you have.
+Re-running a tag resumes it. Stage markers under `<run>/state/` record what finished: a re-run
+reuses the prepared batches and their maps (no second prepare, no second read of pending), pulls
+whatever drafts the box already has, extracts only the batches still missing one, and picks up at
+the first unfinished stage. If the previous runner died while its tmux pool was still going, the
+re-run waits on that pool instead of launching a second one. Every draft file is bound to the
+prepare on disk before it is used: a file carrying any nonce the current batch and map did not
+mint is discarded and its batch re-extracted, so drafts from an earlier prepare of the same tag
+never reach assembly. Pushes are marked per batch; a failed push re-runs only the batches that did
+not land, and once every batch has pushed the tag is finished and refuses to run again.
+`HNCD_FRESH=1` discards local state, re-prepares and clears the box's copy on the first ship; it
+still refuses a tag that has pushed anything, because the push changed what pending returns — start
+the next page under a new tag.
+
+Every `gcloud compute ssh`/`scp` call is cut off locally after `HNCD_SSH_TIMEOUT` seconds (default
+300; GNU `timeout`/`gtimeout` when present, a perl watchdog otherwise), so a wedged IAP tunnel ends
+the call instead of hanging the run. The wait for the pool is one remote call bounded by
+`HNCD_POLL_SECONDS` (default 2600) plus the ssh timeout, retried `HNCD_POLL_TRIES` times (default
+3); after that the script exits non-zero and the same command resumes from the wait.
 
 Run one page at a time and let the pool drain before starting another. Two `xargs` pools over the
 same run directory race on batch numbers — `devbox-extract-batch.sh` checks for an existing draft
