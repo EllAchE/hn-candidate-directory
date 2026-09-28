@@ -81,7 +81,7 @@ test('plan: a tag that pushed refuses, even under HNCD_FRESH', () => {
     assert.equal(planRun({ runDir: done, fresh: true }).action, 'refuse');
     // Some batches landed: resuming pushes the rest, starting over would re-read a changed pending.
     assert.equal(planRun({ runDir: partial }).action, 'resume');
-    assert.deepEqual(planRun({ runDir: partial }).pushed, [1]);
+    assert.deepEqual(planRun({ runDir: partial }).pushed, ['1']);
     assert.equal(planRun({ runDir: partial, fresh: true }).action, 'refuse');
     assert.equal(planRun({ runDir: partialLost }).action, 'refuse');
   } finally {
@@ -112,7 +112,8 @@ test('bind: only drafts whose every nonce this prepare minted are kept', () => {
 
 const NB = 2;
 
-function harness(page) {
+// `missing` are ids prepare drops and `sources` is what the Firebase check answers for them.
+function harness(page, { missing = [], sources = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hncd-resume-'));
   const bin = join(dir, 'bin');
   const box = join(dir, 'box');
@@ -129,11 +130,11 @@ function harness(page) {
   stub('node', `
 case "$(basename "$1")" in
   hncd-api.mjs)
-    if [ "$2" = pending ]; then echo pending >>"${calls}"; echo '{"remaining":10,"items":[]}'; exit 0; fi
+    if [ "$2" = pending ]; then echo pending >>"${calls}"; printf '%s\\n' ${JSON.stringify(JSON.stringify({ remaining: 10, items: missing.map((hnItemId) => ({ hnItemId })) }))}; exit 0; fi
     file="$4"; n=$(basename "$file" .json); n=\${n#push-}
     [ -e "${flags}/fail-push-$n" ] && exit 1
     echo "push $n" >>"${calls}"
-    jq -c '{pending:0, results:[.profiles[] | {outcome:"updated"}]}' "$file"
+    jq -c '{pending:0, results:[.profiles[] | {outcome:(if .hold then "held" elif (has("draft") and .draft == null) then "retired" else "updated" end)}]}' "$file"
     ;;
   hn-prepare-batch.mjs)
     echo prepare >>"${calls}"
@@ -142,7 +143,18 @@ case "$(basename "$1")" in
       jq -n --arg s "$stamp" --argjson b "$b" '{batch:$b, delimiter:"HNCD-TEST", items:[range(2) | {nonce:"n\\($s)-\\($b)-\\(.)", text:"Location: Berlin\\nI build compilers.", links:[]}]}' >"$out/batch-$b.json"
       jq '[.items[] | {key:.nonce, value:{objectID:.nonce, author:"someone", comment_text:.text, created_at:"2026-01-01T00:00:00Z", threadId:1, threadMonth:"2026-01"}}] | from_entries' "$out/batch-$b.json" >"$out/batch-$b.map.json"
     done
-    jq -n '{prepared:${NB * 2}, missing:[], batches:[range(${NB}) | {items:2}]}'
+    jq -n '{prepared:${NB * 2}, missing:${JSON.stringify(missing)}, batches:[range(${NB}) | {items:2}]}'
+    ;;
+  hn-check-sources.mjs)
+    echo sources >>"${calls}"
+    printf '%s' ${JSON.stringify(JSON.stringify(sources))} >"$5"; echo '{}'
+    ;;
+  hn-check-drafts.mjs)
+    # flag-<batch file> makes the miss check flag every item in that batch for an empty employer.
+    if [ -e "${flags}/flag-$(basename "$3")" ]; then
+      jq '{items:(.items|length), withResume:0, retired:0, flagged:[.items[] | {nonce, missing:["companies"]}], missing:{companies:(.items|length)}}' "$3" >"$7"
+      echo '{"items":2,"flagged":2}'
+    else exec "${process.execPath}" "$@"; fi
     ;;
   hn-attach-resumes.mjs)
     batch="$3"; write=""; prev=""
@@ -399,6 +411,49 @@ test('a run that dies in pass 2 keeps pass 1 and the pass-2 selection, and extra
     assert.equal(count(h.calls(), 'claude'), 0);
     assert.match(second.stdout, /pass 2 \{"merged_batches":1/);
     assert.deepEqual(h.calls().filter((c) => c.startsWith('push')), ['push 1', 'push 2']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('retirements and holds go out in the push stage, once each, across a crash and a failed push', { timeout: 60_000 }, () => {
+  // 111 is confirmed deleted, 222 could not be checked; batch 1's items are all flagged and held.
+  const h = harness('t-stepout', { missing: ['111', '222'], sources: { ids: { 111: 'deleted' } } });
+  const env = { HNCD_HOLD_MISSES: '1' };
+  const payload = (name) => JSON.parse(readFileSync(join(h.run, name), 'utf8'));
+  try {
+    h.flag('flag-batch-1.json');
+    h.flag('fail-pull');
+    const first = h.exec(env);
+    assert.notEqual(first.status, 0);
+    assert.equal(count(h.calls(), 'sources'), 1);
+    assert.equal(count(h.calls(), 'push'), 0, 'a step-out went out before the push stage');
+    assert.deepEqual(payload('retire-1.json'), { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] });
+
+    // The resumed run reaches the push stage and the hold payload fails.
+    h.flag('fail-pull', false);
+    h.flag('fail-push-hold-1');
+    h.resetCalls();
+    const second = h.exec(env);
+    assert.notEqual(second.status, 0);
+    assert.equal(count(h.calls(), 'sources'), 0, 'a resumed run asked Firebase again');
+    // Batch 1 is all holds, so it assembles no draft push of its own.
+    assert.deepEqual(h.calls().filter((c) => c.startsWith('push')), ['push retire-1', 'push 2']);
+    assert.ok(h.state().includes('pushed-retire-1') && !h.state().includes('pushed-hold-1'));
+    const held = payload('hold-1.json');
+    assert.deepEqual(held.profiles.map((p) => p.hnItemId).sort(), [...h.nonces(1)].sort());
+    assert.ok(held.profiles.every((p) => p.hold === true));
+    assert.equal(existsSync(join(h.run, 'push-1.json')), false, 'a held item was also pushed as a draft');
+
+    // Only the hold that did not land goes out, from the payload the failed run wrote.
+    h.flag('fail-push-hold-1', false);
+    h.flag('flag-batch-1.json', false);
+    h.resetCalls();
+    const third = h.exec(env);
+    assert.equal(third.status, 0, third.stderr);
+    assert.deepEqual(h.calls().filter((c) => /^(sources|push|claude|prepare|pending)/.test(c)), ['push hold-1']);
+    assert.deepEqual(payload('hold-1.json'), held);
+    assert.match(third.stdout, /"held":2/);
   } finally {
     h.cleanup();
   }

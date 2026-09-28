@@ -367,6 +367,12 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
   reports `queued: 0` and a genuine comment edit still re-queues. An edited comment resets
   `hn_ingests.extractor_rank`, returning it to the pending set while its existing profile stays
   published — stale and good beats fresh and bad on a directory card.
+- Two step-outs take a row off the pending head without writing a profile, addressed by
+  `hnItemId`: `draft: null` retires a comment whose text Algolia no longer serves, and `hold: true`
+  parks one whose draft the operator will not publish. Both only raise `hn_ingests.extractor_rank`,
+  so an already-published profile stays published, and registering a newer extractor re-queues
+  them. Deploy the Worker before running a `devbox-run-page.sh` that sends them: an older Worker
+  answers each one `invalid_comment` and the row stays pending.
 - Pushes are rate-limited separately from the ingest run reservation, so a backfill of dozens of
   requests cannot starve the scheduled ingest.
 - The endpoint re-validates, redacts, and bounds every draft server-side and refuses to resurrect a

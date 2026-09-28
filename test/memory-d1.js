@@ -523,6 +523,13 @@ class MemoryStatement {
       Object.assign(revision, { status: 'archived', published_at: null, updated_at: updatedAt });
       return success();
     }
+    if (this.sql.startsWith('UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?)')) {
+      const [rank, updatedAt, hnItemId] = this.values;
+      const ingest = this.database.hnIngests.get(hnItemId);
+      if (!ingest || ingest.suppressed_at !== null) return success(0);
+      Object.assign(ingest, { extractor_rank: Math.max(ingest.extractor_rank ?? 0, rank), updated_at: updatedAt });
+      return success();
+    }
     if (this.sql === 'UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?') {
       const [suppressedAt, updatedAt, submissionId] = this.values;
       const ingest = [...this.database.hnIngests.values()].find((row) => row.submission_id === submissionId);

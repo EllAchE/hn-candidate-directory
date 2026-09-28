@@ -30,15 +30,15 @@ const readJson = (path) => {
 
 // A push is the one step that cannot be taken back, and it also changes what the pending endpoint
 // returns, so a tag that has pushed anything is finished: a second page needs a second tag, and
-// HNCD_FRESH does not reopen it.
-export function pushedBatches(runDir) {
+// HNCD_FRESH does not reopen it. Each marker names one push request: a batch number for drafts,
+// `retire-<k>` or `hold-<k>` for a step-out payload.
+export function pushedPayloads(runDir) {
   const state = join(runDir, 'state');
   if (!existsSync(state)) return [];
   return readdirSync(state)
-    .map((name) => /^pushed-(\d+)$/.exec(name)?.[1])
+    .map((name) => /^pushed-(.+)$/.exec(name)?.[1])
     .filter(Boolean)
-    .map(Number)
-    .sort((a, b) => a - b);
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 }
 
 export function planRun({ runDir, fresh = false }) {
@@ -46,7 +46,7 @@ export function planRun({ runDir, fresh = false }) {
   if (existsSync(join(state, 'pushed'))) {
     return { action: 'refuse', reason: 'this tag already pushed; start the next page under a new tag' };
   }
-  const partial = pushedBatches(runDir);
+  const partial = pushedPayloads(runDir);
   if (partial.length && fresh) {
     return { action: 'refuse', reason: `batches ${partial.join(',')} already pushed; HNCD_FRESH cannot restart a tag that has pushed` };
   }
@@ -54,8 +54,13 @@ export function planRun({ runDir, fresh = false }) {
   if (!existsSync(join(state, 'prepared'))) return { action: 'fresh', reason: 'no completed prepare to resume' };
 
   const prepare = readJson(join(runDir, 'prepare.json'));
-  const batches = Array.isArray(prepare?.batches) ? prepare.batches.length : 0;
-  if (!batches) return { action: partial.length ? 'refuse' : 'fresh', reason: 'prepare.json is missing or lists no batches' };
+  if (!Array.isArray(prepare?.batches)) {
+    return { action: partial.length ? 'refuse' : 'fresh', reason: 'prepare.json is missing or unreadable' };
+  }
+  const batches = prepare.batches.length;
+  // A page of nothing but deletions prepares no batch and only retires. Once one retirement landed,
+  // the rest are finished from the same payloads; before that, starting over costs nothing.
+  if (!batches && !partial.length) return { action: 'fresh', reason: 'prepare.json lists no batches' };
   const lost = [];
   for (let n = 1; n <= batches; n += 1) {
     for (const name of [`batch-${n}.json`, `batch-${n}.map.json`]) if (!existsSync(join(runDir, name))) lost.push(name);

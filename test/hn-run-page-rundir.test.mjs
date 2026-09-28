@@ -3,7 +3,7 @@
 // so what the previous run left behind is indistinguishable from what this one produced.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,33 +15,66 @@ const PAGE = 'testpage';
 
 // One `node` stub dispatches on the script name the real run would have invoked, so the page script
 // executes its own control flow rather than a reimplementation of it. `gcloud` fails on purpose:
-// that aborts the run at the first remote extract, just past the region under test.
-function harness({ batchesReported, batchFilesWritten }) {
+// that aborts the run at the first remote extract, just past the region under test -- unless
+// `extracted` is given, in which case the box "returns" those drafts and the run goes on to push.
+function harness({ batchesReported, batchFilesWritten, missing = [], sources = null, extracted = null }) {
   const dir = mkdtempSync(join(tmpdir(), 'hncd-rundir-'));
   const bin = join(dir, 'bin');
   const run = join(dir, 'run', PAGE);
   const attachLog = join(dir, 'attach.log');
+  const pushes = join(dir, 'pushes');
+  const box = join(dir, 'box');
   mkdirSync(bin, { recursive: true });
   mkdirSync(run, { recursive: true });
+  mkdirSync(pushes, { recursive: true });
+  mkdirSync(box, { recursive: true });
+  const pending = { remaining: 10, items: missing.map((hnItemId) => ({ hnItemId, threadId: '1' })) };
+  if (extracted) writeFileSync(join(box, 'drafts-1.json'), JSON.stringify(extracted.drafts));
 
   const batches = Array.from({ length: batchesReported }, () => ({ items: 5 }));
   writeFileSync(join(bin, 'node'), `#!/usr/bin/env bash
 case "$(basename "$1")" in
-  hncd-api.mjs) echo '{"remaining":10}' ;;
+  hncd-api.mjs)
+    if [ "$2" = push ]; then
+      cp "$4" "${pushes}/$(ls "${pushes}" | wc -l | tr -d ' ').json"
+      echo '{"pending":7,"results":[]}'
+    else
+      printf '%s' ${JSON.stringify(JSON.stringify(pending))}
+    fi
+    ;;
   hn-prepare-batch.mjs)
     for i in $(seq 1 ${batchFilesWritten}); do
-      printf '%s' '{"delimiter":"HNCD-TEST","items":[]}' >"${run}/batch-$i.json"
-      printf '%s' '{}' >"${run}/batch-$i.map.json"
+      printf '%s' ${JSON.stringify(JSON.stringify({ delimiter: 'HNCD-TEST', items: Object.keys(extracted?.map ?? {}).map((nonce) => ({ nonce })) }))} >"${run}/batch-$i.json"
+      printf '%s' ${JSON.stringify(JSON.stringify(extracted?.map ?? {}))} >"${run}/batch-$i.map.json"
     done
-    printf '%s' ${JSON.stringify(JSON.stringify({ batches, missing: [] }))}
+    printf '%s' ${JSON.stringify(JSON.stringify({ batches, missing }))}
     ;;
+  hn-check-sources.mjs) printf '%s' ${JSON.stringify(JSON.stringify(sources ?? {}))} >"$5"; echo '{}' ;;
+  hn-check-drafts.mjs) printf '%s' ${JSON.stringify(JSON.stringify({ flagged: extracted?.flagged ?? [] }))} >"$7"; echo '{}' ;;
+  hn-screen-pronouns.mjs) cp "$5" "$7"; echo '{"dropped":[]}' ;;
   hn-attach-resumes.mjs) echo x >>"${attachLog}"; echo '{"attached":1,"fetched":1,"misses":{}}' ;;
   hn-page-state.mjs) exec "${process.execPath}" "$@" ;;
   *) echo '{}' ;;
 esac
 exit 0
 `);
-  writeFileSync(join(bin, 'gcloud'), '#!/usr/bin/env bash\nexit 1\n');
+  writeFileSync(
+    join(bin, 'gcloud'),
+    // Answers each remote step the way a healthy box would: nothing running, launched, extracted, packed.
+    extracted
+      ? `#!/usr/bin/env bash
+if [ "$2" = scp ]; then case "\${@: -1}" in */d.tgz) tar czf "\${@: -1}" -C "${box}" drafts-1.json ;; esac; exit 0; fi
+for a in "$@"; do case "$a" in --command=*) cmd="\${a#--command=}" ;; esac; done
+case "$cmd" in
+  *"tmux new-session"*) echo launched ;;
+  "for i in"*) echo "extracted 1/1" ;;
+  *"tar czf"*) echo packed ;;
+  *) echo stopped ;;
+esac
+exit 0
+`
+      : '#!/usr/bin/env bash\nexit 1\n'
+  );
   chmodSync(join(bin, 'node'), 0o755);
   chmodSync(join(bin, 'gcloud'), 0o755);
 
@@ -49,12 +82,18 @@ exit 0
   return {
     run,
     stale,
+    pushed: () =>
+      readdirSync(pushes)
+        .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10))
+        .map((name) => JSON.parse(readFileSync(join(pushes, name), 'utf8'))),
     attachCalls: () => (existsSync(attachLog) ? readFileSync(attachLog, 'utf8').split('\n').filter(Boolean).length : 0),
-    exec: () => {
+    exec: (extraEnv = {}) => {
       try {
         execFileSync('bash', [script, PAGE], {
           env: {
             ...process.env,
+            HNCD_PASSES: '1',
+            ...extraEnv,
             PATH: `${bin}:${process.env.PATH}`,
             HNCD_HOST: 'https://example.invalid',
             HNCD_RUN_ROOT: join(dir, 'run')
@@ -78,6 +117,8 @@ test('a re-run clears every per-batch artefact the previous run left, not just d
     h.stale('check-9.json', '{"flagged":[]}');
     h.stale('push-1.json');
     h.stale('drafts-9.json');
+    h.stale('retire-1.json');
+    h.stale('hold-1.json');
     mkdirSync(join(h.run, 'pass2'), { recursive: true });
     h.stale('pass2/batch-9.json', '{}');
     // A content-keyed resume fetch is the expensive part of a page and is safe to reuse.
@@ -85,7 +126,7 @@ test('a re-run clears every per-batch artefact the previous run left, not just d
 
     h.exec();
 
-    for (const gone of ['screened-9.json', 'check-9.json', 'push-1.json', 'drafts-9.json']) {
+    for (const gone of ['screened-9.json', 'check-9.json', 'push-1.json', 'drafts-9.json', 'retire-1.json', 'hold-1.json']) {
       assert.equal(existsSync(join(h.run, gone)), false, `${gone} survived the re-run`);
     }
     assert.equal(existsSync(join(h.run, 'pass2', 'batch-9.json')), false, 'stale pass2 batch survived');
@@ -119,6 +160,83 @@ test('the tarball carries every file that frames the model, and still no identit
       assert.ok(shipped.includes(needed), `${needed} did not travel with the batches`);
     }
     assert.equal(shipped.some((n) => n.includes('.map.')), false, 'a nonce->id map reached the tarball');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an item prepare dropped is retired by id once its source is confirmed gone, and only then', () => {
+  // 222 is absent from Algolia but Firebase could not be reached, so nothing proves it was deleted.
+  const page = { batchesReported: 1, batchFilesWritten: 1, missing: ['111', '222'], sources: { ids: { 111: 'deleted' } } };
+  const retirement = { extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] };
+  // The box is down: the retirement is written and kept for the push stage, not sent ahead of it.
+  const down = harness(page);
+  const up = harness({
+    ...page,
+    extracted: { map: { n1: { objectID: '333' } }, drafts: [{ nonce: 'n1', draft: {} }], flagged: [] }
+  });
+  try {
+    down.exec();
+    assert.deepEqual(down.pushed(), []);
+    assert.deepEqual(JSON.parse(readFileSync(join(down.run, 'retire-1.json'), 'utf8')), retirement);
+    const checked = JSON.parse(readFileSync(join(down.run, 'dropped.json'), 'utf8'));
+    assert.deepEqual(checked.items.map((item) => item.hnItemId), ['111', '222']);
+
+    up.exec();
+    assert.deepEqual(up.pushed(), [retirement]);
+  } finally {
+    down.cleanup();
+    up.cleanup();
+  }
+});
+
+test('a page of nothing but deletions retires them and finishes the tag', () => {
+  const h = harness({ batchesReported: 0, batchFilesWritten: 0, missing: ['111'], sources: { ids: { 111: 'deleted' } } });
+  try {
+    h.exec();
+    assert.deepEqual(h.pushed(), [{ extractor: 'claude-skill-v2', profiles: [{ hnItemId: '111', draft: null }] }]);
+    assert.equal(existsSync(join(h.run, 'state', 'pushed')), true);
+    h.exec();
+    assert.equal(h.pushed().length, 1, 'a finished retirement-only tag pushed again');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('with HNCD_HOLD_MISSES a flagged item is pushed as a hold, never as a draft', () => {
+  const extracted = {
+    map: { n1: { objectID: '333' }, n2: { objectID: '444' }, n3: { objectID: '555' } },
+    drafts: [{ nonce: 'n1', draft: { name: '' } }, { nonce: 'n3', draft: { name: '' } }],
+    // n2 never came back from the box: a harness miss that another pass should get to retry.
+    flagged: [
+      { nonce: 'n1', missing: ['name'] },
+      { nonce: 'n2', missing: ['draft'] },
+      { nonce: 'n3', missing: ['malformed'] }
+    ]
+  };
+  const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted });
+  try {
+    h.exec({ HNCD_HOLD_MISSES: '1' });
+    assert.deepEqual(h.pushed(), [{ extractor: 'claude-skill-v2', profiles: [{ hnItemId: '333', hold: true }] }]);
+    assert.deepEqual(JSON.parse(readFileSync(join(h.run, 'screened-1.json'), 'utf8')), []);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a page that is almost all holds splits them at the push batch limit instead of dropping any', () => {
+  const ids = Array.from({ length: 27 }, (_, index) => String(9000 + index));
+  const extracted = {
+    map: Object.fromEntries(ids.map((id) => [`n${id}`, { objectID: id }])),
+    drafts: ids.map((id) => ({ nonce: `n${id}`, draft: {} })),
+    flagged: ids.map((id) => ({ nonce: `n${id}`, missing: ['companies'] }))
+  };
+  const h = harness({ batchesReported: 1, batchFilesWritten: 1, extracted });
+  try {
+    h.exec({ HNCD_HOLD_MISSES: '1' });
+    const pushed = h.pushed();
+    assert.deepEqual(pushed.map((payload) => payload.profiles.length), [25, 2]);
+    assert.deepEqual(pushed.flatMap((payload) => payload.profiles.map((entry) => entry.hnItemId)).sort(), ids);
   } finally {
     h.cleanup();
   }

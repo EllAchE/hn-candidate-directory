@@ -18,8 +18,14 @@
 # draft already on the box can match. Each stage marks itself done under state/, drafts already on
 # the box are pulled back before anything ships, and only batches still without a draft go out.
 #
+# The pending endpoint only advances a row that is pushed, so every item this page cannot publish is
+# still pushed as a step-out that writes no profile: `draft: null` retires a comment Firebase confirms
+# is gone, and `hold: true` parks an item the miss check flagged. Without them both kinds sit at the
+# head of every later page. Step-outs go out in the push stage with the drafts, never earlier, so a
+# tag stays restartable with HNCD_FRESH until its push stage begins.
+#
 #   HNCD_FRESH=1         discard this tag's unpushed run, here and on the box, and prepare again
-#   HNCD_HOLD_MISSES=1   keep an item the final check flags out of the push (default: push, report)
+#   HNCD_HOLD_MISSES=1   hold an item the final check flags instead of publishing it (default: push, report)
 #   HNCD_PASSES=1        skip the targeted second pass
 #   HNCD_SSH_TIMEOUT     seconds any one ssh or scp may take (default 300)
 #   HNCD_POLL_SECONDS    seconds one readiness poll waits on the box (default 2600)
@@ -42,6 +48,9 @@ POLL_SECONDS="${HNCD_POLL_SECONDS:-2600}"
 POLL_INTERVAL="${HNCD_POLL_INTERVAL:-10}"
 POLL_TRIES="${HNCD_POLL_TRIES:-3}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# One id for the queue read, the drafts and the step-outs: a step-out raises the rank to this
+# extractor's, and a mismatch would leave the row pending for the one that was actually read.
+EXTRACTOR_ID="claude-skill-v2"
 AGENT_SPEC="$HERE/../../.claude/agents/hn-profile-extractor.md"
 
 # The tag is spliced into remote shell commands and tmux session names.
@@ -72,6 +81,16 @@ reached() { [ -f "$STATE/$1" ]; }
 # jq's `add` over objects keeps the last value per key; per-reason counts need a sum.
 SUM='def sum_by(f): reduce (.[] | f // {}) as $m ({}; reduce ($m | to_entries[]) as $e (.; .[$e.key] += $e.value));'
 
+# ids on stdin, one per line -> step-out payloads of at most 25 (the push endpoint's batch limit),
+# numbered from 1. Sorted and de-duplicated, so the same ids always make the same files.
+#   write_stepouts <prefix> <jq entry for id $id>
+write_stepouts() {
+  local prefix="$1" entry="$2" i=0 chunk
+  jq -R -s -c --arg x "$EXTRACTOR_ID" "[split(\"\\n\")[] | select(. != \"\")] | unique
+    | [range(0; length; 25) as \$i | .[\$i:\$i+25]][] | {extractor:\$x, profiles:map(. as \$id | $entry)}" \
+    | while IFS= read -r chunk; do i=$((i + 1)); printf '%s\n' "$chunk" >"$prefix-$i.json"; done
+}
+
 mkdir -p "$RUN"
 
 fresh_flag=""
@@ -89,7 +108,7 @@ if [ "$action" = fresh ]; then
   # --- gate -------------------------------------------------------------------
   # Read only on a fresh run: pending has no cursor and a push changes what it returns, so a
   # resumed run rebuilding its batches from it would get a different page with new nonces.
-  node "$HERE/hncd-api.mjs" pending --host "$HOST" >"$RUN/pending.json" || exit 1
+  node "$HERE/hncd-api.mjs" pending --extractor "$EXTRACTOR_ID" --host "$HOST" >"$RUN/pending.json" || exit 1
   before=$(jq -r '.remaining' "$RUN/pending.json")
   echo "$PAGE: pending before = $before"
   [ "$before" = "0" ] && { echo "$PAGE: nothing to do"; exit 0; }
@@ -102,7 +121,8 @@ if [ "$action" = fresh ]; then
   # which `wipe-remote` asks for until it has happened.
   rm -rf "$RUN/pass2" "$RUN/incoming" "$STATE"
   rm -f "$RUN"/batch-*.json "$RUN"/drafts-*.json "$RUN"/screened-*.json "$RUN"/check-*.json \
-    "$RUN"/push-*.json "$RUN/misses-$PAGE.json" "$RUN/prepare.json" "$RUN/ship.tgz" "$RUN/d.tgz"
+    "$RUN"/push-*.json "$RUN/misses-$PAGE.json" "$RUN/prepare.json" "$RUN/ship.tgz" "$RUN/d.tgz" \
+    "$RUN"/retire-*.json "$RUN"/hold-*.json "$RUN/dropped.json" "$RUN/sources.json" "$RUN/held-ids.txt"
   mark wipe-remote
 
   # --- prepare sealed batches -----------------------------------------------
@@ -117,9 +137,84 @@ fi
 
 # Take the batch count from prepare's own output: a glob answers "what is on disk", which promotes
 # a stray or half-written file into a batch number the rest of the run then polls the box for.
-nb=$(jq -r '.batches | length' "$RUN/prepare.json" 2>/dev/null)
-[ "${nb:-0}" -gt 0 ] || { echo "$PAGE: no batches prepared"; exit 1; }
+nb=$(jq -r '.batches | length' "$RUN/prepare.json" 2>/dev/null) || nb=""
+[[ "$nb" =~ ^[0-9]+$ ]] || { echo "$PAGE: prepare.json lists no batches" >&2; exit 1; }
 mark prepared
+
+# --- push -------------------------------------------------------------------
+# A marker covers exactly one push request, i.e. one payload file: `pushed-<n>` is push-<n>.json,
+# the drafts of batch n (never more than one prepared batch of 5), and `pushed-retire-<k>` /
+# `pushed-hold-<k>` are step-out payload k (at most 25 ids each). Payloads are written once --
+# retirements when the source check lands, drafts and holds when assembly finishes -- and never
+# rebuilt after, so a marker always names the request that actually went out. A run that dies
+# mid-push resumes with the payloads it had not reached and never sends one twice; a crash between
+# a landed request and its marker re-sends only that one, which the endpoint absorbs (a draft
+# updates in place, a step-out only raises a rank that is already raised). The page is marked done
+# only when every push landed.
+payload_file() { case "$1" in *-*) echo "$RUN/$1.json" ;; *) echo "$RUN/push-$1.json" ;; esac; }
+payloads() {
+  local k n
+  for ((k = 1; ; k++)); do [ -f "$RUN/retire-$k.json" ] || break; echo "retire-$k"; done
+  for ((n = 1; n <= nb; n++)); do [ -f "$RUN/push-$n.json" ] && echo "$n"; done
+  for ((k = 1; ; k++)); do [ -f "$RUN/hold-$k.json" ] || break; echo "hold-$k"; done
+}
+# `other` carries every outcome not named, so an outcome nobody anticipated is counted instead of
+# vanishing from the tally line.
+push_stage() {
+  local p out
+  rm -f "$STATE/push-failed"
+  for p in $(payloads); do
+    reached "pushed-$p" && { echo "$PAGE: $p already pushed" >&2; continue; }
+    if out=$(node "$HERE/hncd-api.mjs" push --file "$(payload_file "$p")" --host "$HOST" 2>/dev/null); then
+      mark "pushed-$p"
+      jq -c '{pending, o:([.results[]?.outcome] | group_by(.) | map({(.[0]): length}) | add)}' <<<"$out"
+    else
+      echo "$PAGE: push of $p failed" >&2
+      mark push-failed
+    fi
+    sleep 1
+  done | jq -s -c "$SUM"'sum_by(.o) as $o | {pending_after:(.[-1].pending), created:($o.created//0), updated:($o.updated//0), retired:($o.retired//0), held:($o.held//0), invalid_draft:($o.invalid_draft//0), blocked:($o.blocked_by_status//0), suppressed:($o.skipped_suppressed//0), other:($o | del(.created, .updated, .retired, .held, .invalid_draft, .blocked_by_status, .skipped_suppressed))}'
+
+  if reached push-failed; then
+    echo "$PAGE: some pushes failed; re-run this tag to retry only those" >&2
+    exit 1
+  fi
+  mark pushed
+  echo "$PAGE: pushed; this tag is finished"
+}
+
+# --- check what prepare dropped against Firebase, once --------------------------------------------
+# Absent from Algolia is not proof of deletion (a thread listing can simply miss an item), so only
+# the ids hn-check-sources marks deleted, dead, missing or textless become retirements; `unreachable`
+# stays pending for a later page. The answer is kept in sources.json and turned into retire-<k>.json
+# once, so a resumed run pushes the same retirements instead of asking Firebase again. A check that
+# fails outright is not marked, and the next run of the tag asks again.
+if ! reached sources-checked; then
+  rm -f "$RUN"/retire-*.json "$RUN/dropped.json" "$RUN/sources.json"
+  if [ "$(jq '.missing // [] | length' "$RUN/prepare.json")" -gt 0 ]; then
+    jq --slurpfile p "$RUN/prepare.json" '($p[0].missing | map(tostring)) as $ids
+      | {remaining, items:[(.items // [])[] | select((.hnItemId | tostring) as $i | $ids | index($i))]}' \
+      "$RUN/pending.json" >"$RUN/dropped.json"
+    if out=$(node "$HERE/hn-check-sources.mjs" --pending "$RUN/dropped.json" --out "$RUN/sources.json") \
+      && [ -s "$RUN/sources.json" ]; then
+      echo "$PAGE: dropped sources $out"
+      jq -r '.ids // {} | keys[]' "$RUN/sources.json" | write_stepouts "$RUN/retire" '{hnItemId:$id, draft:null}'
+      mark sources-checked
+    else
+      echo "$PAGE: could not check the dropped items' sources; they stay pending this run" >&2
+      rm -f "$RUN/sources.json"
+    fi
+  else
+    mark sources-checked
+  fi
+fi
+
+# A page that is nothing but deletions still clears itself.
+if [ "$nb" -eq 0 ]; then
+  [ -n "$(payloads)" ] && { push_stage; exit 0; }
+  echo "$PAGE: no batches prepared"
+  exit 1
+fi
 
 # --- resumes, pass 1: the link on each comment's own Résumé/CV line -----------
 # Sealed into the batch in place, so the extractor, the pronoun screen and assembly all see the
@@ -299,57 +394,48 @@ if [ "$PASSES" -ge 2 ] && ! reached merged-p2; then
 fi
 
 # --- strict miss check: an empty field the source answers is a miss, reported per page ----------
-# Everything from here to the push is derived from the drafts and rebuilt on every run.
-rm -f "$RUN"/screened-*.json "$RUN"/check-*.json "$RUN"/push-*.json "$RUN/misses-$PAGE.json"
-for n in $(seq 1 "$nb"); do
-  [ -s "$RUN/drafts-$n.json" ] || { echo "$PAGE: batch $n produced no drafts" >&2; continue; }
-  node "$HERE/hn-check-drafts.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" --out "$RUN/check-$n.json"
-done | jq -s -c "$SUM"'{items:([.[].items]|add), with_resume:([.[].withResume]|add), retired:([.[].retired]|add), flagged:([.[].flagged]|add), missing:sum_by(.missing)}' \
-  | sed "s/^/$PAGE: misses /"
-jq -s '[.[].flagged[]]' "$RUN"/check-*.json >"$RUN/misses-$PAGE.json"
-echo "$PAGE: flagged items listed in $RUN/misses-$PAGE.json"
+# Everything from here to the push is derived from the drafts, rebuilt until assembly finishes and
+# frozen after it, so the payloads the push markers name never change under them.
+if reached assembled; then
+  echo "$PAGE: payloads already assembled; pushing what has not landed"
+else
+  rm -f "$RUN"/screened-*.json "$RUN"/check-*.json "$RUN"/push-*.json "$RUN/misses-$PAGE.json" \
+    "$RUN"/hold-*.json "$RUN/held-ids.txt"
+  for n in $(seq 1 "$nb"); do
+    [ -s "$RUN/drafts-$n.json" ] || { echo "$PAGE: batch $n produced no drafts" >&2; continue; }
+    node "$HERE/hn-check-drafts.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" --out "$RUN/check-$n.json"
+  done | jq -s -c "$SUM"'{items:([.[].items]|add), with_resume:([.[].withResume]|add), retired:([.[].retired]|add), flagged:([.[].flagged]|add), missing:sum_by(.missing)}' \
+    | sed "s/^/$PAGE: misses /"
+  jq -s '[.[].flagged[]]' "$RUN"/check-*.json >"$RUN/misses-$PAGE.json"
+  echo "$PAGE: flagged items listed in $RUN/misses-$PAGE.json"
 
-# Screen before assembling, not after: a summary that genders a candidate the source never
-# gendered is dropped here, while the nonce still links it to its own text. Counting the leaks
-# after the push would only tell you which real people you had already published a guess about.
-for n in $(seq 1 "$nb"); do
-  [ -s "$RUN/drafts-$n.json" ] || continue
-  node "$HERE/hn-screen-pronouns.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" \
-    --out "$RUN/screened-$n.json" | jq -c --arg n "$n" '{batch:$n} + {dropped}' | grep -v '"dropped":\[\]' || true
-  if [ "${HNCD_HOLD_MISSES:-0}" = "1" ] && [ -s "$RUN/check-$n.json" ]; then
-    jq --slurpfile c "$RUN/check-$n.json" '[.[] | select(.nonce as $x | ($c[0].flagged | map(.nonce) | index($x)) == null)]' \
-      "$RUN/screened-$n.json" >"$RUN/screened-$n.held.json" && mv "$RUN/screened-$n.held.json" "$RUN/screened-$n.json"
-  fi
-done
-screened=$(for n in $(seq 1 "$nb"); do [ -s "$RUN/screened-$n.json" ] && jq '[.[] | select(.draft.summary != null)] | length' "$RUN/screened-$n.json"; done | jq -s add)
-echo "$PAGE: summaries surviving the pronoun screen = ${screened:-0}"
+  # Screen before assembling, not after: a summary that genders a candidate the source never
+  # gendered is dropped here, while the nonce still links it to its own text. Counting the leaks
+  # after the push would only tell you which real people you had already published a guess about.
+  for n in $(seq 1 "$nb"); do
+    [ -s "$RUN/drafts-$n.json" ] || continue
+    node "$HERE/hn-screen-pronouns.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/drafts-$n.json" \
+      --out "$RUN/screened-$n.json" | jq -c --arg n "$n" '{batch:$n} + {dropped}' | grep -v '"dropped":\[\]' || true
+    if [ "${HNCD_HOLD_MISSES:-0}" = "1" ] && [ -s "$RUN/check-$n.json" ]; then
+      jq --slurpfile c "$RUN/check-$n.json" '[.[] | select(.nonce as $x | ($c[0].flagged | map(.nonce) | index($x)) == null)]' \
+        "$RUN/screened-$n.json" >"$RUN/screened-$n.held.json" && mv "$RUN/screened-$n.held.json" "$RUN/screened-$n.json"
+      # A flag for a missing or malformed draft is a harness miss, not a verdict on the item, so those
+      # stay pending for another pass; only an item the model did answer is held.
+      jq -r --slurpfile m "$RUN/batch-$n.map.json" '.flagged[]
+        | select((.missing | index("draft") or index("malformed")) | not)
+        | $m[0][.nonce].objectID // empty' "$RUN/check-$n.json" >>"$RUN/held-ids.txt"
+    fi
+  done
+  [ -s "$RUN/held-ids.txt" ] && write_stepouts "$RUN/hold" '{hnItemId:$id, hold:true}' <"$RUN/held-ids.txt"
+  screened=$(for n in $(seq 1 "$nb"); do [ -s "$RUN/screened-$n.json" ] && jq '[.[] | select(.draft.summary != null)] | length' "$RUN/screened-$n.json"; done | jq -s add)
+  echo "$PAGE: summaries surviving the pronoun screen = ${screened:-0}"
 
-for n in $(seq 1 "$nb"); do
-  [ -s "$RUN/screened-$n.json" ] || continue
-  node "$HERE/hn-assemble-push.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/screened-$n.json" \
-    --out "$RUN/push-$n.json" 2>/dev/null | jq -c '{p:.profiles, r:(.rejected|length), t:(.trimmed|length), s:(.skipped|length)}'
-done | jq -s -c '{assembled:([.[].p]|add), rejected:([.[].r]|add), trimmed:([.[].t]|add), skipped:([.[].s]|add)}'
-
-# --- push -------------------------------------------------------------------
-# Each batch marks itself pushed as it lands, so a run that dies mid-push resumes with the batches
-# it had not reached and never sends one twice. The page is marked done only when every push landed.
-rm -f "$STATE/push-failed"
-for n in $(seq 1 "$nb"); do
-  [ -f "$RUN/push-$n.json" ] || continue
-  reached "pushed-$n" && { echo "$PAGE: batch $n already pushed" >&2; continue; }
-  if out=$(node "$HERE/hncd-api.mjs" push --file "$RUN/push-$n.json" --host "$HOST" 2>/dev/null); then
-    mark "pushed-$n"
-    jq -c '{pending, o:([.results[]?.outcome] | group_by(.) | map({(.[0]): length}) | add)}' <<<"$out"
-  else
-    echo "$PAGE: push of batch $n failed" >&2
-    mark push-failed
-  fi
-  sleep 1
-done | jq -s -c '{pending_after:(.[-1].pending), updated:([.[].o.updated//0]|add), retired:([.[].o.retired//0]|add), invalid_draft:([.[].o.invalid_draft//0]|add), blocked:([.[].o.blocked_by_status//0]|add), suppressed:([.[].o.skipped_suppressed//0]|add)}'
-
-if reached push-failed; then
-  echo "$PAGE: some pushes failed; re-run this tag to retry only those" >&2
-  exit 1
+  for n in $(seq 1 "$nb"); do
+    [ -s "$RUN/screened-$n.json" ] || continue
+    node "$HERE/hn-assemble-push.mjs" --batch "$RUN/batch-$n.json" --drafts "$RUN/screened-$n.json" \
+      --extractor "$EXTRACTOR_ID" --out "$RUN/push-$n.json" 2>/dev/null | jq -c '{p:.profiles, r:(.rejected|length), t:(.trimmed|length), s:(.skipped|length)}'
+  done | jq -s -c '{assembled:([.[].p]|add), rejected:([.[].r]|add), trimmed:([.[].t]|add), skipped:([.[].s]|add)}'
+  mark assembled
 fi
-mark pushed
-echo "$PAGE: pushed; this tag is finished"
+
+push_stage
