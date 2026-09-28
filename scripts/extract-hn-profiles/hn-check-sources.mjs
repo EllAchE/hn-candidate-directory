@@ -1,22 +1,14 @@
 #!/usr/bin/env node
 // Reports pending items whose Hacker News source no longer exists.
 //
-// A deleted comment is a permanent hole in the work queue, not a transient miss. Extraction
-// reads the comment from Algolia, which stops serving a deleted item, so the item can never
-// be extracted. Retiring it (`draft: null`) cannot clear it either: the push endpoint
-// identifies an item by re-supplying its comment text (worker.js `toHnRecord` returns null on
-// empty text), and deletion is precisely the state where that text is gone. So the row keeps
-// its low `extractor_rank`, stays in `pending`, and is re-served on the first page of every
-// run forever -- the one case the `draft: null` design note at worker.js:1806 was written for
-// is the one case it cannot close.
+// A deleted comment is not a transient miss. Extraction reads the comment from Algolia, which stops
+// serving a deleted item, so the item can never be extracted and stays on the first page of every run
+// until it is retired by id (`{hnItemId, draft: null}`). This script is what makes that safe: absence
+// from Algolia is not proof of deletion, and only a positive Firebase answer is. devbox-run-page.sh
+// retires the ids reported here and leaves `unreachable` ones pending.
 //
-// That share only grows: every page leaves its own deleted items behind, so each run has fewer
-// usable slots than the last. Hence this script -- it names the floor so a run can be read
-// against the work that is actually reachable rather than against `remaining`.
-//
-// It only reports. Clearing a row means either archiving the published profile through the
-// removal route or a Worker change, and which of those is right is a policy question about
-// what an author's deletion should mean -- not something a check should decide on its own.
+// It only reports. Retiring leaves a published profile published; whether an author's deletion should
+// also unpublish them is a policy question for the removal route, not something a check decides.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 

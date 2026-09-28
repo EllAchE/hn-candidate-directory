@@ -1686,10 +1686,9 @@ async function pushHackerNewsProfiles(request, env) {
 
   const extractor = Object.freeze({ id: body.extractor, rank });
   const records = await Promise.all(body.profiles.map((entry) => toHnRecord(null, entry?.comment)));
-  const known = await loadHnPushState(
-    env,
-    records.filter(Boolean).map((record) => record.itemId)
-  );
+  const known = await loadHnPushState(env, [
+    ...new Set(body.profiles.map((entry, index) => records[index]?.itemId || stepOutItemId(entry)).filter(Boolean))
+  ]);
   const pushedAt = new Date().toISOString();
   const plans = await Promise.all(
     body.profiles.map((entry, index) => planPushedProfile(env, entry, records[index], known, extractor, pushedAt))
@@ -1726,11 +1725,16 @@ async function loadHnPushState(env, itemIds) {
 // A malformed item costs itself and nothing else: a backfill is dozens of requests and must not
 // abort a batch of 25 over one unparsable draft.
 async function planPushedProfile(env, entry, record, known, extractor, pushedAt) {
-  if (!record) return { result: { outcome: 'invalid_comment' }, statements: [] };
+  if (!record) {
+    const hnItemId = stepOutItemId(entry);
+    if (!hnItemId) return { result: { outcome: 'invalid_comment' }, statements: [] };
+    return planStepOut(env, hnItemId, known.get(hnItemId), entry.hold === true ? 'held' : 'retired', extractor, pushedAt);
+  }
 
   const hnItemId = record.itemId;
   const state = known.get(hnItemId);
   if (state?.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+  if (entry.hold === true) return planStepOut(env, hnItemId, state, 'held', extractor, pushedAt);
 
   const resumeUrl = hnResumeUrl(entry?.resumeUrl);
   if (resumeUrl === null) return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
@@ -1767,6 +1771,36 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     },
     statements: [...profileStatements, hnIngestStatement(env, record, submissionId, pushedAt, provenance)]
   };
+}
+
+// A step-out takes an item out of this extractor's queue and writes nothing a reader can see: a
+// comment Algolia stopped serving (retired), or one whose draft the caller will not publish (held).
+// It is addressed by id because a retired comment's text is exactly what can no longer be
+// re-supplied. A comment, when one is sent, always wins and `hnItemId` is ignored: preferring the
+// bare id would let a caller retire item A by naming it next to item B's text, so an unusable
+// comment stays `invalid_comment` rather than falling back to the id.
+function stepOutItemId(entry) {
+  if (entry?.comment !== undefined && entry?.comment !== null) return '';
+  if (entry?.draft !== null && entry?.hold !== true) return '';
+  const raw = entry?.hnItemId;
+  const itemId = typeof raw === 'string' || Number.isSafeInteger(raw) ? String(raw).trim() : '';
+  return isHnItemId(itemId) ? itemId : '';
+}
+
+// Only the rank moves, and only upward. Nothing touches profile_revisions, so a profile that is
+// already published -- a deleted comment's included -- stays exactly as it is, and a held draft is
+// never written anywhere. The rank is the same one a newer extractor compares against, so registering
+// one returns every held and retired row to its queue with no extra bookkeeping. The comment hash is
+// left alone on purpose: if the text has moved since the ingest recorded it, the next cron pass
+// resets the rank and the item comes back as a new reading.
+function planStepOut(env, hnItemId, state, outcome, extractor, pushedAt) {
+  if (!state) return { result: { hnItemId, outcome: 'unknown_item' }, statements: [] };
+  if (state.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+  const statement = env.DB.prepare(
+    `UPDATE hn_ingests SET extractor_rank = MAX(extractor_rank, ?), updated_at = ?
+      WHERE hn_item_id = ? AND suppressed_at IS NULL`
+  ).bind(extractor.rank, pushedAt, hnItemId);
+  return { result: { hnItemId, outcome }, statements: [statement] };
 }
 
 // The order is not interchangeable. validateDraft first, so an oversized field earns a real
@@ -1842,8 +1876,10 @@ async function listPendingHackerNewsExtractions(request, env) {
 }
 
 // No cursor, deliberately: a successful push raises the row's rank, so the pending set shrinks
-// monotonically and the caller just re-reads the first page. `draft: null` is what keeps that
-// closed -- it retires a comment nothing can extract instead of leaving it to reappear forever.
+// monotonically and the caller just re-reads the first page. That only holds if every row on the page
+// leaves it, so the push also takes two step-outs addressed by id: `draft: null` retires a comment
+// nothing can extract (Algolia no longer serves its text), and `hold: true` parks one whose draft the
+// caller will not publish. Without them both kinds sit at the head of every page forever.
 async function countPendingHackerNewsExtractions(env, rank) {
   const row = await env.DB.prepare(
     'SELECT COUNT(*) AS pending FROM hn_ingests WHERE suppressed_at IS NULL AND extractor_rank < ?'

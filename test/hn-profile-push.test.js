@@ -320,6 +320,88 @@ describe('pushing externally-extracted HN profiles', () => {
     expect(await pendingIds(env)).not.toContain('44444503');
   });
 
+  // Algolia stops serving a deleted comment, so its text is exactly what a retirement cannot
+  // re-supply. Addressed by id, the row still leaves the head of the queue.
+  test('retires a comment whose text is gone, by id, writing no profile', async () => {
+    const env = configured();
+    await ingestThread(env);
+    const revisions = structuredClone([...env.DB.revisions.entries()]);
+    const listed = await publicCandidateIds(env);
+    expect((await pendingIds(env))[0]).toBe('44444503');
+
+    const response = await push(env, [{ hnItemId: '44444503', draft: null }]);
+    const body = await response.json();
+    expect(body.results).toEqual([{ hnItemId: '44444503', outcome: 'retired' }]);
+
+    expect(await pendingIds(env)).not.toContain('44444503');
+    expect(body.pending).toBe((await pendingIds(env)).length);
+    expect([...env.DB.revisions.entries()]).toEqual(revisions);
+    expect(await publicCandidateIds(env)).toEqual(listed);
+  });
+
+  test('retiring a deleted comment leaves its published profile published', async () => {
+    const env = configured();
+    await ingestThread(env);
+    await push(env, [item(PROSE_COMMENT, { companies: ['Stripe'] })]);
+    const before = { ...env.DB.revisions.get('hn-44444501') };
+    expect(await pendingIds(env, 'claude-skill-v2')).toContain('44444501');
+
+    const response = await push(env, [{ hnItemId: '44444501', draft: null }], TOKEN, 'claude-skill-v2');
+    expect((await response.json()).results[0]).toEqual({ hnItemId: '44444501', outcome: 'retired' });
+
+    expect(env.DB.revisions.get('hn-44444501')).toEqual(before);
+    expect(before.status).toBe('published');
+    expect(await publicCandidateIds(env)).toContain(before.id);
+    expect(await pendingIds(env, 'claude-skill-v2')).not.toContain('44444501');
+  });
+
+  test('a hold steps an item out of the queue without publishing its draft', async () => {
+    const env = configured();
+    await ingestThread(env);
+    const revisions = structuredClone([...env.DB.revisions.entries()]);
+    const listed = await publicCandidateIds(env);
+
+    const response = await push(env, [
+      { hnItemId: '44444501', hold: true, draft: draft({ companies: ['Stripe'] }) },
+      { ...item(SECOND_COMMENT, { companies: ['Held Co'] }), hold: true }
+    ]);
+    const body = await response.json();
+    expect(body.results).toEqual([
+      { hnItemId: '44444501', outcome: 'held' },
+      { hnItemId: '44444502', outcome: 'held' }
+    ]);
+
+    expect([...env.DB.revisions.entries()]).toEqual(revisions);
+    expect(await publicCandidateIds(env)).toEqual(listed);
+    expect(await pendingIds(env)).toEqual(['44444503']);
+    // Held, not finished: registering a better extractor is what brings it back.
+    expect(await pendingIds(env, 'claude-skill-v2')).toEqual(expect.arrayContaining(['44444501', '44444502']));
+  });
+
+  test('a step-out never creates a row, revives a suppressed one, or trusts a bare id with a draft', async () => {
+    const env = configured();
+    await ingestThread(env);
+    suppress(env, '44444502');
+
+    const response = await push(env, [
+      { hnItemId: '49999999', draft: null },
+      { hnItemId: '44444502', hold: true },
+      { hnItemId: '44444501', draft: draft() },
+      { hnItemId: '12a', draft: null },
+      { comment: { ...commentBody(PROSE_COMMENT), commentText: '' }, hnItemId: '44444501', draft: null }
+    ]);
+    expect((await response.json()).results).toEqual([
+      { hnItemId: '49999999', outcome: 'unknown_item' },
+      { hnItemId: '44444502', outcome: 'skipped_suppressed' },
+      { outcome: 'invalid_comment' },
+      { outcome: 'invalid_comment' },
+      { outcome: 'invalid_comment' }
+    ]);
+    expect(env.DB.hnIngests.has('49999999')).toBe(false);
+    expect(env.DB.hnIngests.get('44444502').extractor_rank).toBe(0);
+    expect(await pendingIds(env)).toContain('44444501');
+  });
+
   test('is idempotent', async () => {
     const env = configured();
     const batch = [item(PROSE_COMMENT, { companies: ['Stripe'] })];
