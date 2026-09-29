@@ -1197,6 +1197,32 @@ describe('pilot feedback', () => {
     expect(limited.status).toBe(429);
     expect(env.DB.launchFeedback).toHaveLength(10);
   });
+
+  test('logs why storage failed while still answering the generic 503', async () => {
+    const env = createEnvironment();
+    const prepare = env.DB.prepare.bind(env.DB);
+    env.DB.prepare = (sql) => {
+      if (sql.includes('INSERT INTO launch_feedback')) throw new Error('D1_ERROR: no such column: candidate_id');
+      return prepare(sql);
+    };
+
+    const logged = [];
+    const original = console.error;
+    console.error = (...values) => logged.push(values.join(' '));
+    let response;
+    try {
+      response = await worker.fetch(
+        apiRequest('/api/feedback', 'POST', { message: 'private detail', contact: 'ada@example.com' }),
+        env
+      );
+    } finally {
+      console.error = original;
+    }
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: 'submission_storage_unavailable' });
+    expect(logged).toEqual(['storage unavailable during recordFeedback: Error: D1_ERROR: no such column: candidate_id']);
+  });
 });
 
 function apiRequest(path, method = 'GET', body = null, token = '') {

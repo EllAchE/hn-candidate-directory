@@ -244,6 +244,14 @@ function logIngestFailure(stage, error) {
   return reason;
 }
 
+// Every route answers a D1 failure with the same generic 503, which is right for the caller. Discarding
+// the error as well made a cold-start blip and a missing column indistinguishable: a healthy deploy
+// was once rolled back on one such 503. Only the error's name and message are logged, never request input.
+function storageUnavailable(route, error) {
+  console.error(`storage unavailable during ${route}: ${ingestFailureReason(error)}`);
+  return json({ error: 'submission_storage_unavailable' }, 503);
+}
+
 function ingestFailureReason(error) {
   return error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
 }
@@ -535,8 +543,8 @@ async function createUrlSubmission(request, env) {
   let existingSubmission;
   try {
     existingSubmission = await env.DB.prepare('SELECT id, status FROM submissions WHERE id = ?').bind(submissionId).first();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('createUrlSubmission', error);
   }
   if (existingSubmission && existingSubmission.status !== 'failed') return json({ error: 'duplicate_url_submission' }, 409);
 
@@ -576,8 +584,8 @@ async function createResumeSubmission(request, env) {
   let existingSubmission;
   try {
     existingSubmission = await env.DB.prepare('SELECT id, status FROM submissions WHERE id = ?').bind(submissionId).first();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('createResumeSubmission', error);
   }
   if (existingSubmission && existingSubmission.status !== 'failed') return json({ error: 'duplicate_resume_submission' }, 409);
 
@@ -609,8 +617,8 @@ async function resetFailedSubmission(env, submissionId, sourceText, duplicateErr
           WHERE submission_id = ? AND status = 'failed'`
       ).bind(updatedAt, submissionId)
     ]);
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('resetFailedSubmission', error);
   }
 
   if (results.some((result) => changedRows(result) !== 1)) return json({ error: duplicateError }, 409);
@@ -640,14 +648,14 @@ async function persistQueuedSubmission(env, submissionId, sourceText, duplicateE
          VALUES (?, ?, 'extract_profile', 'queued', 0, ?, ?)`
       ).bind(jobId, submissionId, createdAt, createdAt)
     ]);
-  } catch {
+  } catch (error) {
     let duplicate = false;
     try {
       duplicate = Boolean(await env.DB.prepare('SELECT id FROM submissions WHERE id = ?').bind(submissionId).first());
     } catch {
       duplicate = false;
     }
-    return duplicate ? json({ error: duplicateError }, 409) : json({ error: 'submission_storage_unavailable' }, 503);
+    return duplicate ? json({ error: duplicateError }, 409) : storageUnavailable('persistQueuedSubmission', error);
   }
 
   return { reviewToken };
@@ -1194,8 +1202,8 @@ async function listPublishedCandidates(request, env) {
         ORDER BY r.published_at DESC, r.id
         LIMIT ? OFFSET ?`
     ).bind(...bindings).all();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('listPublishedCandidates', error);
   }
 
   const pageWasFull = result.results.length === limit;
@@ -1252,8 +1260,8 @@ async function summarizePublishedCandidates(request, env) {
         WHERE r.status = 'published' AND i.suppressed_at IS NULL
         LIMIT ?`
     ).bind(MAX_PUBLIC_CANDIDATES).all();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('summarizePublishedCandidates', error);
   }
 
   const locations = new Set();
@@ -1312,8 +1320,8 @@ async function requestCandidateRemoval(request, env, candidateId) {
     )
       .bind(candidateId)
       .first();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('requestCandidateRemoval', error);
   }
 
   if (!row) return json({ error: 'candidate_not_found' }, 404);
@@ -1332,8 +1340,8 @@ async function requestCandidateRemoval(request, env, candidateId) {
         "UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ? WHERE id = ?"
       ).bind(removedAt, row.id)
     ]);
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('requestCandidateRemoval', error);
   }
 
   return json({ removed: true });
@@ -1364,8 +1372,8 @@ async function recordFeedback(request, env) {
     )
       .bind(crypto.randomUUID(), message, contact || null, candidateId || null, new Date().toISOString())
       .run();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('recordFeedback', error);
   }
 
   return json({ received: true }, 201);
@@ -2487,8 +2495,8 @@ async function authorizeReview(request, env, submissionId) {
   let submission;
   try {
     submission = await env.DB.prepare('SELECT id, review_token_hash, status FROM submissions WHERE id = ?').bind(submissionId).first();
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('authorizeReview', error);
   }
 
   const tokenHash = await hashToken(token);
@@ -2506,8 +2514,8 @@ async function authorizeCandidateManagement(request, env, candidateId) {
   let management;
   try {
     management = await getCandidateManagementRecord(env, candidateId);
-  } catch {
-    return json({ error: 'submission_storage_unavailable' }, 503);
+  } catch (error) {
+    return storageUnavailable('authorizeCandidateManagement', error);
   }
 
   const tokenHash = await hashToken(token);
