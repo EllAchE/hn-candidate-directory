@@ -401,3 +401,13 @@ test('the shared instruction block pins the bare dateRanges format for codex too
   assert.match(instructions, /`dateRanges` — bare year ranges only/);
   assert.match(instructions, /No company name, label, or month inside the value/);
 });
+
+test('both extractors distinguish attendance from independent education', () => {
+  const instructions = extractorDeveloperInstructions().replace(/\s+/g, ' ');
+  assert.match(instructions, /Require evidence of enrollment, attendance, or a degree/);
+  assert.match(instructions, /an explicitly enrolled student or dropout still qualifies/);
+  assert.match(instructions, /course certificates do not establish university attendance/);
+  assert.match(instructions, /self-taught; Harvard CS50 online` yields `\[\]`/);
+  assert.match(instructions, /BSc, Harvard University` yields `\["Harvard University"\]`/);
+  assert.match(instructions, /university employer, collaborator, or course author is not/);
+});
