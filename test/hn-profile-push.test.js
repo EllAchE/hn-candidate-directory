@@ -493,8 +493,14 @@ describe('pushing externally-extracted HN profiles', () => {
 
     // The single-flight reservation exists to stop the cron amplifying against Algolia. A backfill
     // is dozens of pushes and must not spend it.
-    const ingest = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', null, TOKEN), env);
-    expect(ingest.status).not.toBe(429);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ hits: [], nbPages: 1 });
+    try {
+      const ingest = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', null, TOKEN), env);
+      expect(ingest.status).not.toBe(429);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test('keeps provenance out of the public payload', async () => {
@@ -693,6 +699,7 @@ describe('profile links and the HN handle', () => {
       ['<script>Website: https://script.example/</script>', ''],
       ['<style>Website: https://style.example/</style>', ''],
       ['<script><a href="https://script.example/">my site</a></script>', ''],
+      ['Website:<blockquote>not mine</blockquote>https://colleague.example/', ''],
       ['<blockquote>Website: https://colleague.example/</blockquote><p>Website: https://candidate.example/', 'https://candidate.example/'],
       ['<script>Website: https://script.example/</script><p><a href="https://candidate.example/">my site</a>', 'https://candidate.example/'],
       ['Website: https://one.example/<p>Website: https://two.example/', '']

@@ -2242,7 +2242,7 @@ function hnIngestStatement(env, record, submissionId, ingestedAt, provenance = {
        thread_month = excluded.thread_month, comment_hash = excluded.comment_hash,
        resume_url = COALESCE(excluded.resume_url, hn_ingests.resume_url),
        resume_fetched_at = COALESCE(excluded.resume_fetched_at, hn_ingests.resume_fetched_at),
-       -- The rank records the best extractor that has read *this* text. A changed comment is a new
+       -- The rank records the best extractor that has read this evidence. A changed comment is a new
        -- reading, so it drops back to whatever just wrote it and returns to the work queue.
        extractor_rank = CASE WHEN hn_ingests.comment_hash = excluded.comment_hash
                              THEN MAX(hn_ingests.extractor_rank, excluded.extractor_rank)
@@ -2408,6 +2408,7 @@ function hnOwnershipHtml(html) {
     if (tag[0].startsWith('</')) {
       if (blocked.at(-1) === name) blocked.pop();
     } else if (!blocked.length || blocked.at(-1) === 'blockquote') {
+      if (!blocked.length) ownHtml += '\n';
       blocked.push(name);
     }
     cursor = tag.index + tag[0].length;
