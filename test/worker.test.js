@@ -20,7 +20,7 @@ describe('source-text review drafts', () => {
       'Location: Toronto, Canada',
       'Work mode: Remote',
       'Availability: Immediate',
-      'Education: University of Waterloo',
+      'University: University of Waterloo',
       'Companies: Stripe, Example Labs',
       'Skills: Rust, Go, Kubernetes',
       'Experience: Example Labs 2021 - 2024',
@@ -1053,7 +1053,7 @@ function seedPublishedCandidate(env, index, overrides = {}) {
 
 test('extractProfile returns normalized collection fields', () => {
   expect(
-    extractProfile('Name: Lin\nEducation: MIT; Stanford University\nSkills: TypeScript | Go | TypeScript\nExperience: 2019 to present\nLocation: Boston')
+    extractProfile('Name: Lin\nUniversities: MIT; Stanford University\nSkills: TypeScript | Go | TypeScript\nExperience: 2019 to present\nLocation: Boston')
   ).toMatchObject({
     name: 'Lin',
     location: 'Boston',
