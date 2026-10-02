@@ -637,6 +637,37 @@ describe('profile links and the HN handle', () => {
     expect(revision.personal_url).toBe('https://ada.example/');
   });
 
+  test('attributes Website only to an explicitly identified personal site', async () => {
+    for (const [source, website] of [
+      ['Project: https://project.example/\nEmployer: https://employer.example/', ''],
+      ['A colleague has a website at https://colleague.example/', ''],
+      ['https://unattributed.example/', ''],
+      ['Company website: https://employer.example/', ''],
+      ['Website: https://candidate.example/', 'https://candidate.example/'],
+      ['Portfolio: https://candidate.example/work', 'https://candidate.example/work'],
+      ['Project: https://project.example/\nPersonal site: https://candidate.example/', 'https://candidate.example/'],
+      ['Website: https://one.example/\nWebsite: https://two.example/', ''],
+      ['Website: https://one.example/ https://two.example/', ''],
+      ['Website: https://candidate.example/\nWebsite: https://candidate.example/#about', 'https://candidate.example/'],
+      ['Website: https://drive.google.com/file/d/abc/view', ''],
+      ['Website: https://www.linkedin.com/company/example', ''],
+      ['Built <a href="https://project.example/">a project</a>; <a href="https://candidate.example/">my site</a>', 'https://candidate.example/']
+    ]) {
+      const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source.replaceAll('\n', '<p>')}` };
+      const env = configured();
+      await ingestThread(env, transport([comment]));
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+      await push(env, [item(comment)]);
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+    }
+  });
+
+  test('preserves an explicitly saved Website when the comment has no attribution', async () => {
+    const env = configured();
+    await push(env, [item(PROSE_COMMENT, { personalUrl: 'https://candidate.example/' })]);
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+  });
+
   // The push endpoint outranks the deterministic pass by design, so normalizing only that pass would
   // hold the vocabulary exactly until the first backfill ran.
   test('canonicalizes the facets a pushed draft states, rather than trusting them', async () => {
