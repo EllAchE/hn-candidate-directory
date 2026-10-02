@@ -10,6 +10,10 @@ const REQUIRED_CANDIDATE_FIELDS = Object.freeze({
   location: 'string',
   mode: 'string',
   availability: 'string',
+  hnUsername: 'string',
+  linkedinUrl: 'string',
+  githubUrl: 'string',
+  personalUrl: 'string',
   university: 'string',
   universities: 'stringArray',
   companies: 'stringArray',
@@ -17,6 +21,8 @@ const REQUIRED_CANDIDATE_FIELDS = Object.freeze({
   dateRanges: 'stringArray',
   source: 'string',
   sourceUrl: 'string',
+  sources: 'sourceArray',
+  processed: 'boolean',
   posted: 'number',
   publishedAt: 'string'
 });
@@ -203,9 +209,34 @@ function validateCandidate(candidate, index) {
 
   Object.entries(REQUIRED_CANDIDATE_FIELDS).forEach(([key, type]) => {
     const value = candidate[key];
-    const valid = type === 'stringArray' ? Array.isArray(value) && value.every((item) => typeof item === 'string') : typeof value === type;
+    const valid = type === 'stringArray' ? Array.isArray(value) && value.every((item) => typeof item === 'string')
+      : type === 'sourceArray' ? Array.isArray(value) : typeof value === type;
     if (!valid) throw new Error(`candidate ${index} has invalid ${key}`);
   });
+  for (const key of ['linkedinUrl', 'githubUrl', 'personalUrl']) {
+    validatePublicUrl(candidate[key], `candidate ${index}.${key}`, { allowEmpty: true });
+  }
+  validatePublicUrl(candidate.sourceUrl, `candidate ${index}.sourceUrl`, { allowEmpty: true, hnSource: true });
+  candidate.sources.forEach((source, sourceIndex) => {
+    const label = `candidate ${index}.sources[${sourceIndex}]`;
+    if (!isPlainObject(source) || Object.keys(source).sort().join(',') !== 'label,url'
+      || typeof source.label !== 'string' || !source.label.trim() || typeof source.url !== 'string') {
+      throw new Error(`${label} does not match the public source shape`);
+    }
+    validatePublicUrl(source.url, `${label}.url`, { hnSource: true });
+  });
+}
+
+function validatePublicUrl(value, label, { allowEmpty = false, hnSource = false } = {}) {
+  if (allowEmpty && value === '') return;
+  let url;
+  try { url = new URL(value); } catch { throw new Error(`${label} has an invalid URL`); }
+  const host = url.hostname.toLowerCase();
+  const blockedHost = host === 'localhost' || /\.(?:localhost|local|internal)$/.test(host)
+    || host.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(host);
+  const safe = url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash && !blockedHost;
+  const safePath = hnSource ? host === 'news.ycombinator.com' && url.pathname === '/item' && /^\?id=\d+$/.test(url.search) : !url.search;
+  if (!safe || !safePath) throw new Error(`${label} has an invalid URL`);
 }
 
 function rejectPrivateKeys(value, path) {
