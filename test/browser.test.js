@@ -291,6 +291,25 @@ test(
 );
 
 test(
+  'one person appears once while matching several selected skill and university values',
+  async () => {
+    const person = { ...PUBLIC_CANDIDATES[0], hnUsername: 'synthetic_handle', universities: ['Example University', 'Sample College'], skills: ['TypeScript', 'Go'] };
+    await withPage(async (cdp) => {
+      await selectFacetOption(cdp, 'skill', 'TypeScript');
+      await selectFacetOption(cdp, 'skill', 'Go');
+      await selectFacetOption(cdp, 'university', 'Example University');
+      await selectFacetOption(cdp, 'university', 'Sample College');
+      expect(await candidateNames(cdp)).toEqual(['Ada Rivera']);
+      expect(await textContent(cdp, '#result-count')).toBe('1');
+      await clearFilters(cdp);
+      await setControl(cdp, 'search', 'Sample College');
+      expect(await candidateNames(cdp)).toEqual(['Ada Rivera']);
+    }, { candidates: [person, { ...person, id: 'second-comment', hnUsername: 'SYNTHETIC_HANDLE' }] });
+  },
+  30_000
+);
+
+test(
   'facet options are derived from the loaded candidates and drive an accessible combobox',
   async () => {
     await withPage(async (cdp) => {
@@ -667,7 +686,7 @@ test(
       expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content [data-remove-for]')).fontSize`)).toBe('9px');
       expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content .profile-removal')).textAlign`)).toBe('right');
       expect(await textContent(cdp, '#dialog-content .privacy-note')).toBe(
-        'This profile was compiled from a public HN · July 2026. Removal takes effect immediately and the comment will not be collected again.'
+        'This profile was compiled from a public HN · July 2026. Removal takes effect immediately and hides all submissions from this HN account.'
       );
       expect(await evaluate(cdp, `document.querySelector('#dialog-content .privacy-note a')`)).toBe(null);
       expect(await evaluate(cdp, `[...document.querySelectorAll('a')].some((link) => link.protocol === 'javascript:')`)).toBe(false);
