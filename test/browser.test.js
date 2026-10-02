@@ -484,6 +484,18 @@ test(
 );
 
 test(
+  'candidate cards show company history beside the name without inventing current employment',
+  async () => {
+    await withPage(async (cdp) => {
+      expect(await evaluate(cdp, `[...document.querySelectorAll('.candidate-card')].map((card) => ({ name: card.querySelector('.candidate-name').textContent, company: card.querySelector('.candidate-identity .candidate-company')?.textContent || null }))`)).toEqual(PUBLIC_CANDIDATES.map((candidate) => ({ name: candidate.name, company: candidate.companies.length ? `Previously at ${candidate.companies.join(', ')}` : null })));
+      await setViewport(cdp, 390, 844, true);
+      expect(await evaluate(cdp, `document.documentElement.scrollWidth <= innerWidth`)).toBe(true);
+    });
+  },
+  30_000
+);
+
+test(
   'candidate cards link a source only when its URL is https, and never render a hostile scheme',
   async () => {
     await withPage(async (cdp) => {
