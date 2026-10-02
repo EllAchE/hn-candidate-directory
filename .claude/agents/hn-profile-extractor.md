@@ -98,9 +98,20 @@ Field rules:
 - `location` — as written, including "remote (EU)" style qualifiers.
 - `workMode` — one of `remote`, `hybrid`, `onsite`, or `""`.
 - `availability` — e.g. `immediately`, `2 weeks`, `Q4`.
-- `universities` / `companies` — institution and employer names only, no titles or degrees.
-  These are the whole point of the pass: they are almost always in unlabelled prose, so read
-  the paragraph, not just the `Label:` lines.
+- `universities` — named universities or colleges the candidate actually attended as a
+  student. Require evidence of enrollment, attendance, or a degree from that institution;
+  graduation is not required, so an explicitly enrolled student or dropout still qualifies.
+  Read the relationship described in the surrounding prose, not just an `Education` heading
+  or the presence of a familiar institution name. Self-taught study, bootcamps, course
+  providers, MOOCs, individual courses, and course certificates do not establish university
+  attendance. This includes university-branded open courses: `self-taught; Harvard CS50
+  online` yields `[]`, while `BSc, Harvard University` yields `["Harvard University"]`.
+  A university employer, collaborator, or course author is not the candidate's university.
+  When actual attendance and independent courses appear together, keep only the attended
+  institutions. If the relationship is unclear, leave it out. Relevant independent study
+  may enrich `summary` or `skills` without becoming a university.
+- `companies` — employer names only, no titles or degrees. Employers often appear in
+  unlabelled prose, so read the paragraph, not just the `Label:` lines.
 - `skills` — technologies and disciplines, deduplicated, no sentences.
 - `dateRanges` — bare year ranges only, e.g. `2019-2023` or `2022-Present`. No company name,
   label, or month inside the value: order them to match `companies` above where the text
