@@ -493,8 +493,14 @@ describe('pushing externally-extracted HN profiles', () => {
 
     // The single-flight reservation exists to stop the cron amplifying against Algolia. A backfill
     // is dozens of pushes and must not spend it.
-    const ingest = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', null, TOKEN), env);
-    expect(ingest.status).not.toBe(429);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ hits: [], nbPages: 1 });
+    try {
+      const ingest = await worker.fetch(apiRequest('/api/admin/ingest/hn', 'POST', null, TOKEN), env);
+      expect(ingest.status).not.toBe(429);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test('keeps provenance out of the public payload', async () => {
@@ -535,7 +541,7 @@ describe('profile links and the HN handle', () => {
   // a push that makes the profile worse.
   test('an omitted link falls back to the comment, an explicit empty one clears it', async () => {
     const env = configured();
-    const withLinks = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>https://github.com/adacandidate` };
+    const withLinks = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>GitHub: https://github.com/adacandidate` };
 
     await push(env, [{ ...item(), comment: commentBody(withLinks) }]);
     expect(env.DB.revisions.get('hn-44444501').github_url).toBe('https://github.com/adacandidate');
@@ -632,8 +638,8 @@ describe('profile links and the HN handle', () => {
             'Location: Toronto, Canada',
             'Technologies: Rust, Go',
             'Resume is at <a href="https://drive.google.com/file/d/abc/view?usp=sharing">drive.google.com/file/d/abc...</a>',
-            'Also <a href="https://www.linkedin.com/in/ada-candidate">LinkedIn</a>, ' +
-              '<a href="https://github.com/adacandidate">GitHub</a> and <a href="https://ada.example/">my site</a>.'
+            '<a href="https://www.linkedin.com/in/ada-candidate">my LinkedIn</a>, ' +
+              '<a href="https://github.com/adacandidate">my GitHub</a> and <a href="https://ada.example/">my site</a>.'
           ].join('<p>')
         }
       ])
@@ -677,6 +683,179 @@ describe('profile links and the HN handle', () => {
     const env = configured();
     await push(env, [item(PROSE_COMMENT, { personalUrl: 'https://candidate.example/' })]);
     expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+  });
+
+  test('rejects negated, third-party, quoted, and hidden Website evidence on both write paths', async () => {
+    for (const [source, website] of [
+      ['Website: not mine, see https://employer.example/', ''],
+      ['Website: my old employer at https://employer.example/', ''],
+      ['Website: https://employer.example/ (not mine)', ''],
+      ['Website: <a href="https://employer.example/">my old employer</a>', ''],
+      ['Website: <a href="https://candidate.example/">my site</a>', 'https://candidate.example/'],
+      ['Website: not mine <a href="https://colleague.example/">my site</a>', ''],
+      ['Website: https://drive.google.com.', ''],
+      ['A colleague wrote:<blockquote><p>Website: https://colleague.example/</blockquote>', ''],
+      ['<blockquote><a href="https://colleague.example/">my site</a></blockquote>', ''],
+      ['<blockquote><blockquote>Other source</blockquote><p>Website: https://colleague.example/</blockquote>', ''],
+      ['<blockquote><p>Website: https://colleague.example/', ''],
+      ['<script>Website: https://script.example/</script>', ''],
+      ['<style>Website: https://style.example/</style>', ''],
+      ['<script><a href="https://script.example/">my site</a></script>', ''],
+      ['Website:<blockquote>not mine</blockquote>https://colleague.example/', ''],
+      ['<blockquote>Website: https://colleague.example/</blockquote><p>Website: https://candidate.example/', 'https://candidate.example/'],
+      ['<script>Website: https://script.example/</script><p><a href="https://candidate.example/">my site</a>', 'https://candidate.example/'],
+      ['Website: https://one.example/<p>Website: https://two.example/', '']
+    ]) {
+      const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source}` };
+      const env = configured();
+      await ingestThread(env, transport([comment]));
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+      await push(env, [item(comment)]);
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+    }
+  });
+
+  test('an ownership-only edit updates an unprocessed Website without replacing a better draft', async () => {
+    const owned = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p><a href="https://candidate.example/">my site</a>` };
+    const unrelated = { ...owned, comment_text: owned.comment_text.replace('my site', 'employer website') };
+    expect(decodeHnCommentText(owned.comment_text)).toBe(decodeHnCommentText(unrelated.comment_text));
+    const env = configured();
+    await ingestThread(env, transport([owned]));
+    const before = env.DB.hnIngests.get('44444501').comment_hash;
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+    await ingestThread(env, transport([unrelated]));
+    expect(env.DB.hnIngests.get('44444501').comment_hash).not.toBe(before);
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('');
+    await push(env, [item(owned, { summary: 'The better extracted summary.' })], TOKEN, 'claude-skill-v2');
+    await ingestThread(env, transport([unrelated]));
+    expect(env.DB.revisions.get('hn-44444501').summary).toBe('The better extracted summary.');
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+    expect(env.DB.revisions.get('hn-44444501').extractor).toBe('claude-skill-v2');
+  });
+
+  test('requires ownership for social-profile defaults on both write paths', async () => {
+    for (const [label, column, url, other] of [
+      ['GitHub', 'github_url', 'https://github.com/candidateexample', 'https://github.com/colleagueexample'],
+      ['LinkedIn', 'linkedin_url', 'https://www.linkedin.com/in/candidate-example', 'https://www.linkedin.com/in/colleague-example']
+    ]) {
+      for (const [source, expected] of [
+        [`${label}: ${url}`, url],
+        [`${label}: <a href="${url}">${label}</a>`, url],
+        [`<a href="${url}">my ${label}</a>`, url],
+        [`<a href="${url}">my profile</a>`, url],
+        [`A colleague's profile: ${other}<p>${label}: ${url}`, url],
+        [`${label}: ${url}<p>${label}: ${url}/?tracking=one`, url],
+        [url, ''],
+        [`A colleague's profile: ${other}`, ''],
+        [`Employer profile: ${other}`, ''],
+        [`${label}: not mine, see ${other}`, ''],
+        [`${label}: <a href="${other}">my colleague</a>`, ''],
+        [`${label}: not mine <a href="${other}">my ${label}</a>`, ''],
+        [`<blockquote>${label}: ${other}</blockquote>`, ''],
+        [`<blockquote><a href="${other}">my ${label}</a></blockquote>`, ''],
+        [`<script>${label}: ${other}</script>`, ''],
+        [`<style><a href="${other}">my profile</a></style>`, ''],
+        [`${label}: ${url}<p>${label}: ${other}`, '']
+      ]) {
+        const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source}` };
+        const env = configured();
+        await ingestThread(env, transport([comment]));
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+        await push(env, [item(comment)]);
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+      }
+    }
+  });
+
+  test('social ownership-only edits invalidate the cache while preserving higher-ranked links', async () => {
+    for (const [label, column, url] of [
+      ['GitHub', 'github_url', 'https://github.com/candidateexample'],
+      ['LinkedIn', 'linkedin_url', 'https://www.linkedin.com/in/candidate-example']
+    ]) {
+      const owned = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p><a href="${url}">my ${label}</a>` };
+      const unrelated = { ...owned, comment_text: owned.comment_text.replace(`my ${label}`, 'a colleague') };
+      expect(decodeHnCommentText(owned.comment_text)).toBe(decodeHnCommentText(unrelated.comment_text));
+      const env = configured();
+      await ingestThread(env, transport([owned]));
+      const before = env.DB.hnIngests.get('44444501').comment_hash;
+      expect(env.DB.revisions.get('hn-44444501')[column]).toBe(url);
+      await ingestThread(env, transport([unrelated]));
+      expect(env.DB.hnIngests.get('44444501').comment_hash).not.toBe(before);
+      expect(env.DB.revisions.get('hn-44444501')[column]).toBe('');
+      await push(env, [item(owned)], TOKEN, 'claude-skill-v2');
+      await ingestThread(env, transport([unrelated]));
+      expect(env.DB.revisions.get('hn-44444501')[column]).toBe(url);
+      expect(env.DB.revisions.get('hn-44444501').extractor).toBe('claude-skill-v2');
+    }
+  });
+
+  test('self-labeled anchors respect surrounding ownership and independent paragraphs', async () => {
+    for (const [label, column, url, other] of [
+      ['site', 'personal_url', 'https://candidate.example/', 'https://colleague.example/'],
+      ['website', 'personal_url', 'https://candidate.example/', 'https://colleague.example/'],
+      ['GitHub', 'github_url', 'https://github.com/candidateexample', 'https://github.com/otherprofile'],
+      ['LinkedIn', 'linkedin_url', 'https://www.linkedin.com/in/candidate-example', 'https://www.linkedin.com/in/otherprofile']
+    ]) {
+      const own = `<a href="${url}">my ${label}</a>`;
+      const unrelated = `<a href="${other}">my ${label}</a>`;
+      for (const [source, expected] of [
+        [`Not my ${own}.`, ''],
+        [`My colleague shares ${own}.`, ''],
+        [`My colleague links ${unrelated}.`, ''],
+        [`${own} is not mine.`, ''],
+        [`<strong>Not my</strong> ${own}.`, ''],
+        [`My colleague's ${own}.`, ''],
+        [`I share ${own}.`, url],
+        [`I share ${own} with my colleague.`, url],
+        [`Please visit ${own}.`, url],
+        [`My colleague shares ${unrelated}.<p>I share ${own}.`, url],
+        [`Not my link.<p>${own}`, url],
+        [`${own}<div>My colleague shares ${unrelated}.</div>`, url],
+        [`My colleague shares ${unrelated}.<br>${own}`, url]
+      ]) {
+        const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source}` };
+        const env = configured();
+        await ingestThread(env, transport([comment]));
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+        await push(env, [item(comment)]);
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+      }
+    }
+  });
+
+  test('owned-link hash rollout is bounded and empty evidence keeps the legacy hash', async () => {
+    const unrelated = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>A colleague's profiles: https://github.com/colleagueexample and https://www.linkedin.com/in/colleague-example` };
+    const empty = configured();
+    await ingestThread(empty, transport([unrelated]));
+    expect(empty.DB.hnIngests.get('44444501').comment_hash).toBe(await hnCommentHash(decodeHnCommentText(unrelated.comment_text), HN_EXTRACTION_VERSION));
+
+    const owned = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>GitHub: https://github.com/candidateexample<p>Website: https://candidate.example/` };
+    const env = configured();
+    await push(env, [item(owned, { summary: 'The higher-ranked profile.' })], TOKEN, 'claude-skill-v2');
+    const legacy = await hnCommentHash(decodeHnCommentText(owned.comment_text), HN_EXTRACTION_VERSION);
+    env.DB.hnIngests.get('44444501').comment_hash = legacy;
+    await ingestThread(env, transport([owned]));
+    expect(env.DB.hnIngests.get('44444501').comment_hash).not.toBe(legacy);
+    expect(env.DB.hnIngests.get('44444501').extractor_rank).toBe(0);
+    expect(env.DB.revisions.get('hn-44444501').summary).toBe('The higher-ranked profile.');
+    expect(env.DB.revisions.get('hn-44444501').extractor).toBe('claude-skill-v2');
+    expect(env.DB.revisions.get('hn-44444501').github_url).toBe('https://github.com/candidateexample');
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+    expect(await pendingIds(env, 'claude-skill-v2')).toEqual(['44444501']);
+    expect((await ingestHackerNews(env, { transport: transport([owned]).fetch })).queued).toBe(0);
+  });
+
+  test('irrelevant anchor formatting leaves the ownership cache unchanged', async () => {
+    const source = `${PROSE_COMMENT.comment_text}<p><a href="https://candidate.example/">my site</a>`;
+    const env = configured();
+    await ingestThread(env, transport([{ ...PROSE_COMMENT, comment_text: source }]));
+    const before = env.DB.hnIngests.get('44444501').comment_hash;
+    const formatted = source.replace('my site', '<strong>my site</strong>');
+    await ingestThread(env, transport([{ ...PROSE_COMMENT, comment_text: formatted }]));
+    expect(env.DB.hnIngests.get('44444501').comment_hash).toBe(before);
+    const plain = configured();
+    await ingestThread(plain, transport([PROSE_COMMENT]));
+    expect(plain.DB.hnIngests.get('44444501').comment_hash).toBe(await hnCommentHash(decodeHnCommentText(PROSE_COMMENT.comment_text), HN_EXTRACTION_VERSION));
   });
 
   // The push endpoint outranks the deterministic pass by design, so normalizing only that pass would

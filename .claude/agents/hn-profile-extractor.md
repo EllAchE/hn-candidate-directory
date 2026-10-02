@@ -42,6 +42,10 @@ the caller re-attaches those itself from a mapping you cannot see.
 
 ## Resume links
 
+Attribute a website, portfolio, social profile, or document to the candidate only when they
+present it as their own. Employer and project links, quoted introductions, and another person's
+profile do not establish ownership. A URL's position or apparent name is not ownership evidence.
+
 An item may carry a numbered `links` array. If exactly one is plausibly the candidate's
 resume, CV, portfolio, or personal site, return its **`index`** as `resumeLinkIndex`. Return
 `null` when nothing fits, when several are equally plausible, or when the only candidate is
