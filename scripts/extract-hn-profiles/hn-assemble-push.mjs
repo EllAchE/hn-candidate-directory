@@ -10,6 +10,7 @@
 // becomes `&lt;script&gt;`, which is still inert text, and the Worker escapes on render
 // regardless. `&lt;` and `&gt;` are deliberately left encoded.
 
+import { validExperience } from '../../sensitive-data.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -59,6 +60,8 @@ function validateDraft(value, trimmed_lists) {
     if (deduped.length > LIST_LIMIT) trimmed_lists.push({ field, kept: LIST_LIMIT, dropped: deduped.length - LIST_LIMIT });
     draft[field] = deduped.slice(0, LIST_LIMIT);
   }
+  if (value.experience !== undefined && !validExperience(value.experience)) return null;
+  if (value.experience !== undefined) draft.experience = value.experience;
   return draft;
 }
 

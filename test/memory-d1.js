@@ -345,6 +345,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         createdAt,
         updatedAt,
         publishedAt,
@@ -366,6 +367,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         updated_at: updatedAt,
         extractor,
         extractor_rank: extractorRank
@@ -508,6 +511,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         createdAt,
         updatedAt
       ] = this.values;
@@ -529,6 +533,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         created_at: createdAt,
         updated_at: updatedAt,
         published_at: null
@@ -561,6 +567,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         publishedAt,
         updatedAt,
         submissionId
@@ -583,6 +590,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         published_at: publishedAt,
         updated_at: updatedAt
       });
@@ -707,6 +716,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         updatedAt,
         submissionId
       ] = this.values;
@@ -727,6 +737,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         updated_at: updatedAt
       });
       return success();

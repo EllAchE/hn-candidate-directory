@@ -189,10 +189,19 @@ export function codexArgs({ cwd, output }) {
   return args;
 }
 
+function validExperience(value) {
+  return value === null || (value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 2 && Object.hasOwn(value, 'minYears') && Object.hasOwn(value, 'maxYears')
+    && Number.isFinite(value.minYears) && value.minYears >= 0 && value.minYears <= 80
+    && (value.maxYears === null || (Number.isFinite(value.maxYears) && value.maxYears >= value.minYears && value.maxYears <= 80)));
+}
+
+
 function validateDraftShape(draft) {
   if (draft === null) return;
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('draft must be an object or null');
-  const expected = [...TEXT_FIELDS, ...LIST_FIELDS].sort();
+  const expected = [...TEXT_FIELDS, ...LIST_FIELDS, ...(Object.hasOwn(draft, 'experience') ? ['experience'] : [])].sort();
+  if (draft.experience !== undefined && !validExperience(draft.experience)) throw new Error('invalid draft.experience');
   if (JSON.stringify(Object.keys(draft).sort()) !== JSON.stringify(expected)) throw new Error('draft has missing or extra fields');
   for (const field of TEXT_FIELDS) {
     if (typeof draft[field] !== 'string') throw new Error(`draft.${field} must be a string`);
