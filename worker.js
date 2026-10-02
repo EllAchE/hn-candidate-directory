@@ -1799,7 +1799,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
   }
 
-  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.commentText) });
+  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text, record.commentText) });
   if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
 
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
@@ -2295,7 +2295,7 @@ async function toHnRecord(thread, hit) {
     comment,
     text,
     permalink: `https://news.ycombinator.com/item?id=${itemId}`,
-    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnProfileLinks(commentHtml))
+    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnProfileLinks(text, commentHtml))
   };
 }
 
@@ -2355,7 +2355,7 @@ function extractHnProfile(record) {
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
-    ...hnProfileLinks(record.commentText),
+    ...hnProfileLinks(record.text, record.commentText),
     universities: listFor(HN_UNIVERSITY_LABELS),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
@@ -2364,7 +2364,7 @@ function extractHnProfile(record) {
 }
 
 // A project, employer, or colleague URL is not evidence of the candidate's own profile.
-function hnProfileLinks(html) {
+function hnProfileLinks(_text, html) {
   const ownershipHtml = hnOwnershipHtml(html);
   const anchorPattern = /<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi;
   const labeledHtml = ownershipHtml.replace(anchorPattern, (_, href, label) => `${href} ${decodeHnCommentText(label)}`);
