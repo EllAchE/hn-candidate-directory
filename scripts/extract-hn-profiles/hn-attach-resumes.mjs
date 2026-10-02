@@ -39,6 +39,13 @@ export function chooseIndex(item, draftEntry) {
   return validIndex(draftEntry?.resumeLinkIndex) ?? validIndex(item.resumeHint);
 }
 
+function educationRetryFields(item, entry) {
+  const universities = entry?.draft?.universities;
+  return item.resume && Array.isArray(universities) && universities.length === 0 &&
+    /^\s*(?:#{1,6}\s*)?(?:education|academic background|qualifications)\s*:?\s*$/im.test(item.resume)
+    ? ['universities'] : [];
+}
+
 // A resume already rendered for this nonce is reused only when it came from the same URL; a
 // different index is a different document and gets its own fetch.
 function cached(out, item, link) {
@@ -67,6 +74,7 @@ export async function attachResumes({ batch, out, drafts = [], retry = new Set()
   let fetched = 0;
 
   await pool(batch.items || [], concurrency, async (item) => {
+    if (educationRetryFields(item, byNonce.get(item.nonce)).length) selected.add(item.nonce);
     const index = chooseIndex(item, byNonce.get(item.nonce));
     const link = index ? (item.links || []).find((candidate) => candidate.index === index) : null;
     if (!link) {
@@ -74,7 +82,7 @@ export async function attachResumes({ batch, out, drafts = [], retry = new Set()
       return;
     }
     // The same document, already sealed into the item: nothing to fetch, and the item only
-    // goes into the subset when the miss check asked for it.
+    // goes into the subset when a strict miss or education cue asked for a retry.
     if (item.resume && item.resumeUrl === link.url) {
       if (retry.has(item.nonce)) selected.add(item.nonce);
       return;
@@ -131,7 +139,13 @@ if (import.meta.main) {
       // item simply runs again.
       const FIELD = (name) => name !== 'malformed' && name !== 'draft';
       const expected = new Map((check.flagged || []).map((entry) => [entry.nonce, entry.missing.filter(FIELD)]));
-      const subset = items.map((item) => ({ ...item, expected: expected.get(item.nonce) || [] }));
+      const subset = items.map((item) => ({
+        ...item,
+        expected: [...new Set([
+          ...(expected.get(item.nonce) || []),
+          ...educationRetryFields(item, drafts.find((entry) => entry.nonce === item.nonce))
+        ])]
+      }));
       writeFileSync(args.write, JSON.stringify({ ...batch, items: subset }, null, 2));
     }
   }
