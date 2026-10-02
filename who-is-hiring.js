@@ -345,11 +345,13 @@ function card(candidate) {
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
+  const companies = candidate.companies.filter(isProvided).join(', ');
+  const company = companies ? `<span class="candidate-company" title="Previously at ${escapeHtml(companies)}">Previously at ${escapeHtml(companies)}</span>` : '';
   const path = candidateProfilePath(candidate);
   const view = path
     ? `<a href="${escapeHtml(path)}" data-view="${escapeHtml(candidate.id)}" data-profile-route>View profile</a>`
     : `<button data-view="${escapeHtml(candidate.id)}">View profile</button>`;
-  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${handleLink(candidate)}</div><div class="card-statuses">${processing}${availability}</div></div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions">${view}<a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
+  return `<article class="candidate-card"${hover}><div class="card-top"><div class="candidate-identity"><span class="candidate-name">${escapeHtml(displayName(candidate))}</span>${company}${handleLink(candidate)}</div><div class="card-statuses">${processing}${availability}</div></div><div class="card-meta">${role}<div class="metadata">${metadata}<span class="source-cell">from ${sourceLink(candidate)}</span></div><div class="profile-links">${profileLinks(candidate)}</div></div><div class="card-bottom"><div class="chips">${chips}${overflow}</div><div class="card-actions">${view}<a href="#" data-request-for="${escapeHtml(candidate.id)}">Manage profile</a></div></div></article>`;
 }
 
 function candidateProfilePath(candidate) {
