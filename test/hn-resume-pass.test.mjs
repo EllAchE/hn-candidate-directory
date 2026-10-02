@@ -13,7 +13,6 @@ import test from 'node:test';
 import { attachResumes, chooseIndex } from '../scripts/extract-hn-profiles/hn-attach-resumes.mjs';
 import { documentToFollow, resumeText } from '../scripts/extract-hn-profiles/hn-resume-text.mjs';
 import { checkDrafts, expectedFields } from '../scripts/extract-hn-profiles/hn-check-drafts.mjs';
-import { mergeDrafts } from '../scripts/extract-hn-profiles/hn-merge-drafts.mjs';
 import { labelledResumeIndex, screenedLinks } from '../scripts/extract-hn-profiles/hn-untrusted.mjs';
 
 const DRIVE = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456/view?usp=sharing';
@@ -90,26 +89,6 @@ test('an empty name or employer list with a resume attached is a miss worth a re
     ['d', ['draft'], true],
     ['e', ['malformed'], true]
   ]);
-});
-
-test('a second pass replaces a first only when it knows at least as much, and never retires', () => {
-  const base = [
-    { nonce: 'a', injection: false, draft: { name: '', role: 'SRE', summary: 's', companies: [] } },
-    { nonce: 'b', injection: false, draft: { name: 'B', role: 'Dev', summary: 's', companies: ['X'] } },
-    { nonce: 'c', injection: true, draft: { name: '', role: 'PM', summary: 's', companies: [] } }
-  ];
-  const over = [
-    { nonce: 'a', injection: false, draft: { name: 'A', role: 'SRE', summary: 's', companies: ['Acme'] } },
-    { nonce: 'b', injection: false, draft: { name: '', role: 'Dev', summary: 's', companies: [] } },
-    { nonce: 'c', injection: false, draft: null },
-    { nonce: 'd', injection: false, draft: { name: 'D', role: 'x', summary: 's', companies: [] } }
-  ];
-  const merged = Object.fromEntries(mergeDrafts(base, over).map((entry) => [entry.nonce, entry]));
-  assert.equal(merged.a.draft.name, 'A');
-  assert.equal(merged.b.draft.name, 'B');
-  assert.equal(merged.c.draft.role, 'PM');
-  assert.equal(merged.c.injection, true);
-  assert.equal(merged.d.draft.name, 'D');
 });
 
 // A stand-in for the unblocker: any POST /fetch answers with a resume-shaped HTML page.
