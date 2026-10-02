@@ -91,7 +91,7 @@ const HN_LOCATION_LABELS = Object.freeze(['location', 'based in', 'based', 'city
 const HN_REMOTE_LABELS = Object.freeze(['remote', 'remote work', 'remote?']);
 const HN_ROLE_LABELS = Object.freeze(['role', 'title', 'position', 'seeking', 'looking for', 'interested in']);
 const HN_SKILL_LABELS = Object.freeze(['technologies', 'technology', 'tech', 'tech stack', 'stack', 'skills', 'tools']);
-const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'school', 'schools', 'degree']);
+const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'college', 'colleges', 'school', 'schools', 'degree']);
 // 'experience' is deliberately excluded: candidates use it for years-of-experience ("Experience:
 // 4+ years"), and mapping it here fed that phrase into the companies field instead of a name.
 const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'employers', 'worked at']);
@@ -2354,7 +2354,7 @@ function extractHnProfile(record) {
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
     ...hnProfileLinks(record.text, record.commentText),
-    universities: listFor(HN_UNIVERSITY_LABELS),
+    universities: educationUniversities(valueFor),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
@@ -2607,11 +2607,25 @@ function extractProfile(sourceText) {
     location: valueFor('location') || 'Location needs review',
     workMode: valueFor('work mode', 'work-mode', 'mode') || (/\bremote\b/i.test(sourceText) ? 'Remote' : 'Needs review'),
     availability: valueFor('availability') || 'Needs review',
-    universities: listFor('universities', 'university', 'education', 'school', 'schools'),
+    universities: educationUniversities((labels) => valueFor(...labels)),
     companies: listFor('companies', 'company', 'previously', 'experience', 'employers'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
+}
+
+function educationUniversities(valueFor) {
+  const independent = /\b(?:self[- ]taught|self[- ]study|boot\s?camps?|MOOCs?|courses?|certificates?|open\s?courseware|tutorials?|Coursera|Udemy|edX|freeCodeCamp)\b/i;
+  const courseCode = /\b[A-Z]{2,4}[- ]?\d{2,4}[a-z]?\b/;
+  const declared = splitList(valueFor(['universities', 'university', 'colleges', 'college', 'schools', 'school']));
+  const described = valueFor(['education', 'degree']).split(/[;|]/).map((value) => value.trim());
+  const attended = described.map((value) => {
+    if (independent.test(value) || courseCode.test(value)) return '';
+    const attendance = value.match(/^(?:attended|graduated from|enrolled at)\s+(.+)$/i);
+    const degree = value.match(/^(?:BA|BS|BSc|MA|MS|MSc|PhD|bachelor|master|doctorate)\b[^,;|]*?(?:\s+(?:at|from)\s+|,\s*)(.+)$/i);
+    return (attendance || degree)?.[1] || '';
+  });
+  return unique([...declared, ...attended].filter((value) => value && !independent.test(value) && !courseCode.test(value)));
 }
 
 function validateDraft(value) {

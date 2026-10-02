@@ -6,6 +6,7 @@ import worker, {
   HN_UNKNOWN,
   HN_WORK_MODES,
   decodeHnCommentText,
+  extractProfile,
   hnCommentHash,
   ingestHackerNews,
   ingestHnComment,
@@ -32,7 +33,7 @@ const LABELED_COMMENT = {
     'Willing to relocate: No',
     'Technologies: Rust, Go, Kubernetes, PostgreSQL',
     'Companies: Stripe, Example Systems',
-    'Education: University of Waterloo',
+    'University: University of Waterloo',
     'Availability: Immediate',
     'R&#xe9;sum&#xe9;&#x2F;CV: <a href="https:&#x2F;&#x2F;example.com&#x2F;ada.pdf" rel="nofollow">https:&#x2F;&#x2F;example.com&#x2F;ada.pdf</a>',
     'I have been building storage systems since 2019 - present and I&#x27;m looking for a small team.'
@@ -144,6 +145,30 @@ const RESUME_AVAILABLE_ONLY_COMMENT = {
 };
 
 describe('deterministic Hacker News extraction', () => {
+  test.each([
+    ['Education: Self-taught, Coursera, Harvard CS50', []],
+    ['Education: Coding bootcamp certificate', []],
+    ['University: Coursera; Udemy; edX; freeCodeCamp', []],
+    ['Education: Barista from Harvard University', []],
+    ['Education: University of Waterloo', []],
+    ['Education: Applying to Harvard University', []],
+    ["Education: My friend graduated from Yale University", []],
+    ['Education: Software engineer employed by Harvard University', []],
+    ['Universities: Harvard University; Stanford University', ['Harvard University', 'Stanford University']],
+    ['College: Example College', ['Example College']],
+    ['University: Harvard CS50 online', []],
+    ['Schools: MIT ECE101; Harvard CS50', []],
+    ['Education: Attended Stanford University; dropped out', ['Stanford University']],
+    ['Education: Enrolled at University of London', ['University of London']],
+    ['Degree: BSc Computer Science from Harvard University', ['Harvard University']],
+    ['Education: BSc, University of Oxford; Coursera courses', ['University of Oxford']],
+    ['Education: MSc at University of Edinburgh', ['University of Edinburgh']]
+  ])('keeps the same conservative university boundary in both ingestion paths: %s', (education, expected) => {
+    const text = `Name: Synthetic Applicant\nRole: Software engineer\n${education}`;
+    expect(DETERMINISTIC_HN_EXTRACTOR.extract({ author: 'synthetic_handle', text, commentText: text }).universities).toEqual(expected);
+    expect(extractProfile(text).universities).toEqual(expected);
+  });
+
   test('decodes comment HTML into labelled plain text', () => {
     expect(decodeHnCommentText(LABELED_COMMENT.comment_text).split('\n')).toEqual([
       'Location: Toronto, Canada',
@@ -151,7 +176,7 @@ describe('deterministic Hacker News extraction', () => {
       'Willing to relocate: No',
       'Technologies: Rust, Go, Kubernetes, PostgreSQL',
       'Companies: Stripe, Example Systems',
-      'Education: University of Waterloo',
+      'University: University of Waterloo',
       'Availability: Immediate',
       'Résumé/CV: https://example.com/ada.pdf',
       "I have been building storage systems since 2019 - present and I'm looking for a small team."
