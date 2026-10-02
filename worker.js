@@ -1768,7 +1768,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
   }
 
-  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text) });
+  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text, record.commentText) });
   if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
 
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
@@ -2322,7 +2322,7 @@ function extractHnProfile(record) {
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
-    ...hnProfileLinks(record.text),
+    ...hnProfileLinks(record.text, record.commentText),
     universities: listFor(HN_UNIVERSITY_LABELS),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
@@ -2330,22 +2330,34 @@ function extractHnProfile(record) {
   }).draft);
 }
 
-// `decodeHnCommentText` has already unwrapped every anchor to its bare href, so the links a
-// candidate published are plain text here. First match per field wins: a comment that names two
-// GitHub accounts is naming a project alongside a profile, and the profile is written first.
-function hnProfileLinks(text) {
-  const links = { linkedinUrl: '', githubUrl: '', personalUrl: '' };
+// A project or employer URL is not evidence of a candidate's personal website.
+function hnProfileLinks(text, html) {
+  const links = { linkedinUrl: '', githubUrl: '', personalUrl: hnPersonalSite(text, html) };
 
   for (const match of String(text || '').matchAll(HN_LINK_PATTERN)) {
     const candidate = match[0].replace(/[.,;:)\]]+$/, '');
     links.linkedinUrl ||= linkedinProfileUrl(candidate) || '';
     links.githubUrl ||= githubProfileUrl(candidate) || '';
-    if (!links.personalUrl && !HN_NON_PERSONAL_HOSTS.has(hostnameOf(candidate))) {
-      links.personalUrl = personalProfileUrl(candidate) || '';
-    }
   }
 
   return links;
+}
+
+function hnPersonalSite(text, html) {
+  const urls = [];
+  for (const line of text.split(/[\n|]/)) {
+    const labeled = line.trim().match(/^(?:website|personal (?:website|site|url)|portfolio|my (?:website|site|portfolio))\s*:\s*(.*)$/i);
+    if (labeled) urls.push(...[...labeled[1].matchAll(HN_LINK_PATTERN)].map((match) => match[0]));
+  }
+  for (const anchor of html.matchAll(/<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi)) {
+    if (/^(?:my|personal) (?:website|site|portfolio)$/i.test(decodeHnCommentText(anchor[2]))) {
+      urls.push(decodeHnCommentText(anchor[1]));
+    }
+  }
+  const sites = new Set(urls.map((url) => url.replace(/[.,;:)\]]+$/, ''))
+    .filter((url) => !HN_NON_PERSONAL_HOSTS.has(hostnameOf(url)))
+    .map(personalProfileUrl).filter(Boolean));
+  return sites.size === 1 ? [...sites][0] : '';
 }
 
 function hostnameOf(value) {
