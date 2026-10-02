@@ -2618,8 +2618,10 @@ function educationUniversities(valueFor) {
   const independent = /\b(?:self[- ]taught|self[- ]study|boot\s?camps?|MOOCs?|courses?|certificates?|open\s?courseware|tutorials?|Coursera|Udemy|edX|freeCodeCamp)\b/i;
   const courseCode = /\b[A-Z]{2,4}[- ]?\d{2,4}[a-z]?\b/;
   const events = /\b(?:talks?|conferences?|seminars?|workshops?|webinars?|lectures?|events?)\b/i;
+  const nonTertiary = /\b(?:high|secondary|elementary|primary|middle)\s+schools?\b/i;
   const absence = /^(?:none|n\/?a|not applicable|not provided|unknown|no (?:university|college|formal education))$/i;
-  const supported = (value) => value && !independent.test(value) && !courseCode.test(value) && !events.test(value) && !absence.test(value);
+  const supported = (value) => value && !independent.test(value) && !courseCode.test(value) &&
+    !events.test(value) && !nonTertiary.test(value) && !absence.test(value);
   const declared = splitList(valueFor(['universities', 'university', 'colleges', 'college', 'schools', 'school']));
   const described = valueFor(['education', 'degree']).split(/[;|]/).map((value) => value.trim());
   const attended = described.map((value) => {
