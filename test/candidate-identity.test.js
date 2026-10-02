@@ -8,7 +8,7 @@ function fixture() {
     id TEXT, submission_id TEXT, status TEXT, name TEXT, role TEXT, summary TEXT,
     location TEXT, work_mode TEXT, availability TEXT, hn_username TEXT,
     linkedin_url TEXT, github_url TEXT, personal_url TEXT,
-    universities_json TEXT, companies_json TEXT, skills_json TEXT, date_ranges_json TEXT,
+    universities_json TEXT, companies_json TEXT, skills_json TEXT, date_ranges_json TEXT, experience_json TEXT,
     published_at TEXT, updated_at TEXT
   ); CREATE TABLE hn_ingests (
     submission_id TEXT, hn_author TEXT, hn_permalink TEXT, thread_month TEXT,

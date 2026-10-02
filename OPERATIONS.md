@@ -559,3 +559,27 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
 - Stop canaries and promotion. Preserve restricted evidence without reposting the sensitive value.
 - Roll back code only with explicit authorization; revoke or rotate an exposed secret through the separately authorized secret workflow.
 - Verify the public endpoint is `Cache-Control: no-store`, contains only the documented candidate shape, and excludes non-published revisions before reopening traffic.
+
+### Professional experience
+
+`experience` is either `null` (unknown) or `{ minYears, maxYears }`. Exact values have equal bounds;
+ranges preserve both bounds; a stated lower bound such as 5+ uses `maxYears: null`. Values are numeric
+years from 0 through 80. Only explicit totals are extracted; education dates and skill-specific
+durations do not establish a professional total, and the current untyped date ranges are not summed.
+Conflicting explicit totals remain unknown. Reviewers can enter 5, 5+, or 3–5, or clear the value.
+
+Filters use established lower bounds: 5+ years matches a profile stating 5–7 or 5+, while 3–7 does
+not establish at least five. Under 2 requires a known upper bound below two. Unknown and Experience
+provided are explicit choices. Selections within this facet are OR; other facets combine with AND.
+An account's newest source supplies its experience; older submissions do not silently fill a missing
+current total. Existing rows remain unknown until individually enriched; no extraction-version bump
+or blanket requeue accompanies this feature.
+
+A human must apply `0008_experience.sql` before deploying code that reads/writes `experience_json`:
+
+```sh
+wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.production.toml
+```
+
+Migration execution, release, and historical enrichment are separate operations. Review the pending
+migration list and obtain the required exact production scope before release.

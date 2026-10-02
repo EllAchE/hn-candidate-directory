@@ -893,6 +893,27 @@ test(
   30_000
 );
 
+test('experience filters combine with work mode and preserve explicit unknowns', async () => {
+  const profiles = PUBLIC_CANDIDATES.slice(0, 3).map((candidate, index) => ({ ...candidate,
+    experience: index === 0 ? { minYears: 5, maxYears: null } : index === 1 ? { minYears: 3, maxYears: 7 } : null
+  }));
+  await withPage(async (cdp) => {
+    await selectFacetOption(cdp, 'experience', '5+ years');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name]);
+    expect(await textContent(cdp, '.metadata')).toContain('5+ years');
+    await selectFacetOption(cdp, 'mode', 'Remote');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name]);
+    await clearFilters(cdp);
+    await selectFacetOption(cdp, 'experience', 'Unknown');
+    expect(await candidateNames(cdp)).toEqual([profiles[2].name]);
+    await clearFilters(cdp);
+    await setViewport(cdp, 390, 844, true);
+    await click(cdp, '#filters-toggle');
+    await selectFacetOption(cdp, 'experience', '2+ years');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name, profiles[1].name]);
+  }, { candidates: profiles });
+}, 30_000);
+
 async function withPage(run, options = {}) {
   const dataset = options.candidates || PUBLIC_CANDIDATES;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
