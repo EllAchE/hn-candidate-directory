@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// Strict miss check over one batch's drafts. Every candidate states a role and deserves a
-// summary; a comment with a `Location:` or `Remote:` line has answered those questions; and a
-// resume the model actually read carries a name and an employer history. An empty field where
-// the source demonstrably has the answer is an extraction miss, not an absence, and is reported
-// as one. The check only reports: what happens to a flagged item is the wrapper's decision.
+// Completeness cues over one batch's drafts. Role and summary are expected for candidates;
+// labelled location/remote fields and resumes add retry cues. Explicitly absent employment
+// should not exclude first-job candidates for an empty company list. This is not a check that
+// extracted claims are supported by the source. The wrapper decides what happens to flags.
 //
 //   hn-check-drafts.mjs --batch <batch.json> --drafts <drafts.json> --out <check.json>
 
@@ -20,9 +19,22 @@ function parseArgs(argv) {
 
 const LOCATION_LINE = /^\s*location\s*:/im;
 const REMOTE_LINE = /^\s*remote\s*:/im;
-// Fields that read the resume: an empty one with a resume attached is worth a second pass.
+// Resume omissions are worth a second pass unless the source explicitly answers with absence.
 const RESUME_FIELDS = ['name', 'companies'];
 const FIELDS = ['name', 'role', 'summary', 'location', 'workMode', 'companies', 'universities', 'skills', 'dateRanges'];
+const NO_EMPLOYMENT = /\bno\s+(?:(?:prior|previous|professional|paid|formal)\s+)*(?:employment|work|professional)\s+(?:experience|history)\b(?=[ \t]*(?:[.!?;,\n]|$))|\bnever\s+(?:been\s+)?employed\b(?=[ \t]*(?:[.!?;,\n]|$))|\b(?:employment|work|professional)\s+(?:experience|history)\s*:\s*none\b(?=[ \t]*(?:[.!?;,\n]|$))/gi;
+const EMPLOYER_STATEMENT = /\b(?:worked|working|employed|interned)\s+(?:at|for|by)\b|\b(?:internship|employment|experience)\s+(?:at|with|for)\b|\b(?:engineer|developer|designer|manager|analyst|consultant|intern|researcher)\s+(?:at|for)\b/i;
+const EMPLOYMENT_SECTION = /(?:^|\n)[ \t]*(?:#{1,6}[ \t]*)?(?:employment|work|professional)\s+(?:experience|history)[ \t]*(?::[ \t]*[^\n]+|\n[ \t]*\S)/i;
+const EMPLOYER_LABEL = /(?:^|\n)[ \t]*(?:employer|company)[ \t]*:[ \t]*(?!none\b|no(?:[ \t]|$)|n\/?a\b)\S/i;
+const DATED_EMPLOYER = /\b(?:corp(?:oration)?|company|inc|ltd|llc|gmbh)\b[^\n]{0,100}\b(?:19|20)\d{2}\b/i;
+
+function explicitlyNoEmployment(item) {
+  const source = `${item.text || ''}\n${item.resume || ''}`;
+  const remaining = source.replace(NO_EMPLOYMENT, '');
+  if (remaining === source) return false;
+  // These are conservative retry cues, not proof of a claim. Conflicting work history wins.
+  return ![EMPLOYER_STATEMENT, EMPLOYMENT_SECTION, EMPLOYER_LABEL, DATED_EMPLOYER].some((cue) => cue.test(remaining));
+}
 
 const filled = (value) => (Array.isArray(value) ? value.length > 0 : typeof value === 'string' && value.trim() !== '');
 
@@ -30,7 +42,10 @@ export function expectedFields(item) {
   const expected = ['role', 'summary'];
   if (LOCATION_LINE.test(item.text || '')) expected.push('location');
   if (REMOTE_LINE.test(item.text || '')) expected.push('workMode');
-  if (item.resume) expected.push(...RESUME_FIELDS);
+  if (item.resume) {
+    expected.push('name');
+    if (!explicitlyNoEmployment(item)) expected.push('companies');
+  }
   return expected;
 }
 
