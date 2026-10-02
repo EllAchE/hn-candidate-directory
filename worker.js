@@ -1799,7 +1799,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
   }
 
-  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text, record.commentText) });
+  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.commentText) });
   if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
 
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
@@ -2295,7 +2295,7 @@ async function toHnRecord(thread, hit) {
     comment,
     text,
     permalink: `https://news.ycombinator.com/item?id=${itemId}`,
-    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnPersonalSite(commentHtml))
+    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnProfileLinks(commentHtml))
   };
 }
 
@@ -2303,8 +2303,9 @@ async function toHnRecord(thread, hit) {
 // thread-level queue filter and the per-comment write guard -- pick up a bump without a schema
 // change. Rows written before the envelope existed hold a bare hash of the text, so version 1 is
 // itself the first invalidation.
-function hnCommentHash(text, version, personalUrl = '') {
-  const ownership = personalUrl ? `\npersonal-site:${personalUrl}` : '';
+function hnCommentHash(text, version, links = {}) {
+  const evidence = [links.linkedinUrl || '', links.githubUrl || '', links.personalUrl || ''];
+  const ownership = evidence.some(Boolean) ? `\nowned-profile-links:${JSON.stringify(evidence)}` : '';
   return hashToken(`hn-extraction-v${version}\n${text}${ownership}`);
 }
 
@@ -2354,7 +2355,7 @@ function extractHnProfile(record) {
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
-    ...hnProfileLinks(record.text, record.commentText),
+    ...hnProfileLinks(record.commentText),
     universities: listFor(HN_UNIVERSITY_LABELS),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
@@ -2362,40 +2363,50 @@ function extractHnProfile(record) {
   }).draft);
 }
 
-// A project or employer URL is not evidence of a candidate's personal website.
-function hnProfileLinks(text, html) {
-  const links = { linkedinUrl: '', githubUrl: '', personalUrl: hnPersonalSite(html) };
-
-  for (const match of String(text || '').matchAll(HN_LINK_PATTERN)) {
-    const candidate = match[0].replace(/[.,;:)\]]+$/, '');
-    links.linkedinUrl ||= linkedinProfileUrl(candidate) || '';
-    links.githubUrl ||= githubProfileUrl(candidate) || '';
-  }
-
-  return links;
-}
-
-function hnPersonalSite(html) {
+// A project, employer, or colleague URL is not evidence of the candidate's own profile.
+function hnProfileLinks(html) {
   const ownershipHtml = hnOwnershipHtml(html);
   const anchorPattern = /<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi;
   const labeledHtml = ownershipHtml.replace(anchorPattern, (_, href, label) => `${href} ${decodeHnCommentText(label)}`);
-  const urls = [];
+  const urls = { linkedinUrl: [], githubUrl: [], personalUrl: [] };
+  const ambiguous = { linkedinUrl: [], githubUrl: [], personalUrl: [] };
   for (const line of decodeHnCommentText(labeledHtml).split(/[\n|]/)) {
-    const labeled = line.trim().match(/^(?:website|personal (?:website|site|url)|portfolio|my (?:website|site|portfolio))\s*:\s*(.*)$/i);
+    const labeled = line.trim().match(/^([^:]{1,80})\s*:\s*(.*)$/);
     if (!labeled) continue;
-    const matches = [...labeled[1].matchAll(HN_LINK_PATTERN)];
-    const context = labeled[1].replace(HN_LINK_PATTERN, '').replace(/[\s,;.:()\[\]]/g, '');
-    if (!context) urls.push(...matches.map((match) => match[0]));
+    const field = hnProfileLinkField(labeled[1].trim());
+    if (!field) continue;
+    const matches = [...labeled[2].matchAll(HN_LINK_PATTERN)];
+    const context = labeled[2].replace(HN_LINK_PATTERN, '').replace(/[,;.:()\[\]]/g, '').trim();
+    const target = !context || hnProfileLinkField(context) === field ? urls : ambiguous;
+    target[field].push(...matches.map((match) => match[0]));
   }
   for (const anchor of ownershipHtml.matchAll(anchorPattern)) {
-    if (/^(?:my|personal) (?:website|site|portfolio)$/i.test(decodeHnCommentText(anchor[2]))) {
-      urls.push(decodeHnCommentText(anchor[1]));
+    const label = decodeHnCommentText(anchor[2]);
+    const field = /^(?:my|personal) /i.test(label) ? hnProfileLinkField(label) : '';
+    if (field) urls[field].push(decodeHnCommentText(anchor[1]));
+    if (/^my profile$/i.test(label)) {
+      urls.linkedinUrl.push(decodeHnCommentText(anchor[1]));
+      urls.githubUrl.push(decodeHnCommentText(anchor[1]));
     }
   }
-  const sites = new Set(urls.map((url) => url.replace(/[.,;:)\]]+$/, ''))
-    .filter((url) => !HN_NON_PERSONAL_HOSTS.has(hostnameOf(url)))
-    .map(personalProfileUrl).filter(Boolean));
-  return sites.size === 1 ? [...sites][0] : '';
+  const canonicalizers = { linkedinUrl: linkedinProfileUrl, githubUrl: githubProfileUrl, personalUrl: personalProfileUrl };
+  return Object.fromEntries(Object.entries(urls).map(([field, values]) => {
+    const canonicalize = (url) => {
+      const value = url.replace(/[.,;:)\]]+$/, '');
+      if (field === 'personalUrl' && HN_NON_PERSONAL_HOSTS.has(hostnameOf(value))) return null;
+      return canonicalizers[field](value);
+    };
+    const unclear = new Set(ambiguous[field].map(canonicalize).filter(Boolean));
+    const profiles = new Set(values.map(canonicalize).filter((url) => url && !unclear.has(url)));
+    return [field, profiles.size === 1 ? [...profiles][0] : ''];
+  }));
+}
+
+function hnProfileLinkField(label) {
+  if (/^(?:(?:my|personal) )?linkedin(?: profile)?$/i.test(label)) return 'linkedinUrl';
+  if (/^(?:(?:my|personal) )?github(?: profile)?$/i.test(label)) return 'githubUrl';
+  if (/^(?:website|portfolio|personal (?:website|site|url)|my (?:website|site|portfolio))$/i.test(label)) return 'personalUrl';
+  return '';
 }
 
 function hnOwnershipHtml(html) {
