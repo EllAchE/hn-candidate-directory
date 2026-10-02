@@ -2617,15 +2617,19 @@ function extractProfile(sourceText) {
 function educationUniversities(valueFor) {
   const independent = /\b(?:self[- ]taught|self[- ]study|boot\s?camps?|MOOCs?|courses?|certificates?|open\s?courseware|tutorials?|Coursera|Udemy|edX|freeCodeCamp)\b/i;
   const courseCode = /\b[A-Z]{2,4}[- ]?\d{2,4}[a-z]?\b/;
+  const events = /\b(?:talks?|conferences?|seminars?|workshops?|webinars?|lectures?|events?)\b/i;
+  const absence = /^(?:none|n\/?a|not applicable|not provided|unknown|no (?:university|college|formal education))$/i;
+  const supported = (value) => value && !independent.test(value) && !courseCode.test(value) && !events.test(value) && !absence.test(value);
   const declared = splitList(valueFor(['universities', 'university', 'colleges', 'college', 'schools', 'school']));
   const described = valueFor(['education', 'degree']).split(/[;|]/).map((value) => value.trim());
   const attended = described.map((value) => {
     if (independent.test(value) || courseCode.test(value)) return '';
     const attendance = value.match(/^(?:attended|graduated from|enrolled at)\s+(.+)$/i);
     const degree = value.match(/^(?:BA|BS|BSc|MA|MS|MSc|PhD|bachelor|master|doctorate)\b[^,;|]*?(?:\s+(?:at|from)\s+|,\s*)(.+)$/i);
-    return (attendance || degree)?.[1] || '';
+    const institution = (attendance || degree)?.[1] || '';
+    return institution.replace(/,\s*\d{4}(?:\s*(?:[-–—]|to)\s*(?:\d{4}|present))?\s*$/i, '').trim();
   });
-  return unique([...declared, ...attended].filter((value) => value && !independent.test(value) && !courseCode.test(value)));
+  return unique([...declared, ...attended].filter(supported));
 }
 
 function validateDraft(value) {

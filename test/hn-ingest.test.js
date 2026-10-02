@@ -150,6 +150,12 @@ describe('deterministic Hacker News extraction', () => {
     ['Education: Coding bootcamp certificate', []],
     ['University: Coursera; Udemy; edX; freeCodeCamp', []],
     ['Education: Barista from Harvard University', []],
+    ['Education: Attended a talk at Harvard University', []],
+    ['Education: Attended Harvard University conference', []],
+    ['University: None', []],
+    ['University: Not applicable', []],
+    ['College: N/A', []],
+    ['Universities: None; University of Oxford', ['University of Oxford']],
     ['Education: University of Waterloo', []],
     ['Education: Applying to Harvard University', []],
     ["Education: My friend graduated from Yale University", []],
@@ -162,6 +168,9 @@ describe('deterministic Hacker News extraction', () => {
     ['Education: Enrolled at University of London', ['University of London']],
     ['Degree: BSc Computer Science from Harvard University', ['Harvard University']],
     ['Education: BSc, University of Oxford; Coursera courses', ['University of Oxford']],
+    ['Education: BSc, University of Oxford, 2020-2024', ['University of Oxford']],
+    ['Degree: MSc from University of Edinburgh, 2020 to present', ['University of Edinburgh']],
+    ['Degree: BSc Event Management from Example University', ['Example University']],
     ['Education: MSc at University of Edinburgh', ['University of Edinburgh']]
   ])('keeps the same conservative university boundary in both ingestion paths: %s', (education, expected) => {
     const text = `Name: Synthetic Applicant\nRole: Software engineer\n${education}`;
