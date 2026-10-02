@@ -583,3 +583,32 @@ wrangler d1 migrations apply hn-candidate-directory --remote --config wrangler.p
 
 Migration execution, release, and historical enrichment are separate operations. Review the pending
 migration list and obtain the required exact production scope before release.
+
+### Organization logos
+
+Cards, profile pages, and profile dialogs show small site icons beside matched company and university
+names. Google’s favicon service supplies 64-pixel images for curated official domains; it can redirect
+to Google’s static-image hosts. Text remains the authoritative label. Images are decorative, fixed-size,
+lazy-loaded, asynchronously decoded, and sent without a referrer. A failed image is removed and its URL
+is not retried on each filter change. Missing and ambiguous matches render text without an image.
+
+The initial mappings were checked against the organizations’ own websites:
+
+| Organization | Official website |
+| --- | --- |
+| Google | https://about.google/ (product domain google.com) |
+| Microsoft | https://www.microsoft.com/ |
+| Meta | https://www.meta.com/about/ |
+| Stripe | https://stripe.com/ |
+| Stanford University | https://www.stanford.edu/ |
+| Massachusetts Institute of Technology | https://www.mit.edu/ |
+| University of Waterloo | https://uwaterloo.ca/ |
+| Georgia Institute of Technology | https://www.gatech.edu/ |
+| Carnegie Mellon University | https://www.cmu.edu/ |
+
+`organization-logos.js` owns exact aliases and official domains, separately for companies and schools.
+Case and whitespace normalize, but substrings, URLs, and fuzzy names do not match. Ambiguous initials
+such as CMU and UW have no mapping. Add an alias only after verifying its institution and domain;
+a logo is not evidence that a candidate attended or worked there. This presentation layer does not
+change extraction, employment/attendance checks, stored names, or filters. No credentials or candidate
+content are included in icon URLs. If the provider is unavailable, browsing continues with text labels.

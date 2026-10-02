@@ -914,6 +914,27 @@ test('experience filters combine with work mode and preserve explicit unknowns',
   }, { candidates: profiles });
 }, 30_000);
 
+test('organization labels retain text and unknown identities when logo images fail', async () => {
+  const profiles = [{ ...PUBLIC_CANDIDATES[0], hnUsername: 'samplehandle', companies: ['Google LLC', 'Unknown Company'], universities: ['MIT', 'CMU'], university: 'MIT, CMU' }];
+  await withPage(async (cdp) => {
+    expect(await textContent(cdp, '.candidate-company')).toBe('Previously at Google LLC, Unknown Company');
+    expect(await textContent(cdp, '.metadata')).toContain('MIT, CMU');
+    expect(await evaluate(cdp, `[...document.querySelectorAll('.organization-label')].map((label) => label.textContent)`)).toContain('Unknown Company');
+    expect(await evaluate(cdp, `(() => {
+      const label = [...document.querySelectorAll('.organization-label')].find((item) => item.textContent === 'CMU');
+      return label.querySelector('img') === null;
+    })()`)).toBe(true);
+    await evaluate(cdp, `document.querySelectorAll('.organization-logo').forEach((image) => image.dispatchEvent(new Event('error')))`);
+    expect(await evaluate(cdp, `document.querySelectorAll('.organization-logo').length`)).toBe(0);
+    await setViewport(cdp, 390, 844, true);
+    expect(await textContent(cdp, '.candidate-company')).toContain('Google LLC');
+    await navigate(cdp, `http://127.0.0.1:${await evaluate(cdp, 'location.port')}/samplehandle`);
+    await waitFor(cdp, `document.querySelector('.profile-section') !== null`);
+    expect(await textContent(cdp, '#profile-content')).toContain('Google LLC');
+    expect(await textContent(cdp, '#profile-content')).toContain('CMU');
+  }, { candidates: profiles });
+}, 30_000);
+
 async function withPage(run, options = {}) {
   const dataset = options.candidates || PUBLIC_CANDIDATES;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
@@ -928,7 +949,7 @@ async function withPage(run, options = {}) {
     cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => runtimeExceptions.push(exceptionDetails.text));
 
     await Promise.all([cdp.send('Page.enable'), cdp.send('Runtime.enable'), cdp.send('Network.enable')]);
-    await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*'] });
+    await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*', 'https://www.google.com/s2/favicons*', 'https://*.gstatic.com/favicon*'] });
     // The stat tiles count up over ~700ms, so every assertion on a total would race the animation.
     // Only the test that is about the animation opts into motion.
     await cdp.send('Emulation.setEmulatedMedia', {
@@ -959,7 +980,8 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES, fixture = {}) {
     ['/who-is-hiring.html', ['who-is-hiring.html', 'text/html; charset=utf-8']],
     ['/who-is-hiring.css', ['who-is-hiring.css', 'text/css; charset=utf-8']],
     ['/who-is-hiring.js', ['who-is-hiring.js', 'text/javascript; charset=utf-8']],
-    ['/sensitive-data.js', ['sensitive-data.js', 'text/javascript; charset=utf-8']]
+    ['/sensitive-data.js', ['sensitive-data.js', 'text/javascript; charset=utf-8']],
+    ['/organization-logos.js', ['organization-logos.js', 'text/javascript; charset=utf-8']]
   ]);
 
   return Bun.serve({

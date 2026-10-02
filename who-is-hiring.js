@@ -1,3 +1,4 @@
+import { organizationLogoUrl } from './organization-logos.js';
 import { parseExperience, extractExperience, experienceLabel, experienceBands } from './sensitive-data.js';
 
 let candidates = [];
@@ -326,6 +327,25 @@ function syncFilterDrawer() {
   toggle.setAttribute('aria-expanded', String(!collapsible || filtersOpen));
 }
 
+const failedLogoUrls = new Set();
+document.addEventListener('error', (event) => {
+  if (!event.target.matches?.('.organization-logo')) return;
+  failedLogoUrls.add(event.target.getAttribute('src'));
+  event.target.remove();
+}, true);
+
+function organizationLabel(kind, name) {
+  const url = organizationLogoUrl(kind, name);
+  const image = url && !failedLogoUrls.has(url)
+    ? `<img class="organization-logo" src="${escapeHtml(url)}" alt="" aria-hidden="true" width="16" height="16" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+    : '';
+  return `<span class="organization-label">${image}<span>${escapeHtml(name)}</span></span>`;
+}
+
+function organizationLabels(kind, values) {
+  return (values || []).filter(isProvided).map((name) => organizationLabel(kind, name)).join(', ');
+}
+
 const CARD_SKILL_LIMIT = 6;
 
 function card(candidate) {
@@ -339,17 +359,17 @@ function card(candidate) {
     : '';
   const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
   const processing = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
-  const metadata = [candidate.location, candidate.mode, experienceLabel(candidate.experience), candidate.university]
+  const metadata = [candidate.location, candidate.mode, experienceLabel(candidate.experience)]
     .filter(isProvided)
     .map((value) => `<span>${escapeHtml(value)}</span>`)
-    .join('');
+    .join('') + organizationLabels('university', candidate.universities?.length ? candidate.universities : [candidate.university]);
   // Both of these are clamped to one line in CSS — the role to 300 characters of extractor output,
   // the card body to none of the summary at all — so the title attribute is the only way the rest of
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
   const companies = candidate.companies.filter(isProvided).join(', ');
-  const company = companies ? `<span class="candidate-company" title="Previously at ${escapeHtml(companies)}">Previously at ${escapeHtml(companies)}</span>` : '';
+  const company = companies ? `<span class="candidate-company" title="Previously at ${escapeHtml(companies)}">Previously at ${organizationLabels('company', candidate.companies)}</span>` : '';
   const path = candidateProfilePath(candidate);
   const view = path
     ? `<a href="${escapeHtml(path)}" data-view="${escapeHtml(candidate.id)}" data-profile-route>View profile</a>`
@@ -408,8 +428,8 @@ function profileLinks(candidate) {
 function profileBackground(candidate) {
   const facts = [
     candidate.experience ? `<strong>${escapeHtml(experienceLabel(candidate.experience))}</strong> of professional experience` : '',
-    isProvided(candidate.university) ? `Studied at <strong>${escapeHtml(candidate.university)}</strong>` : '',
-    isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${escapeHtml(candidate.companies.join(', '))}</strong>` : ''
+    isProvided(candidate.university) ? `Studied at <strong>${organizationLabels('university', candidate.universities?.length ? candidate.universities : [candidate.university])}</strong>` : '',
+    isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${organizationLabels('company', candidate.companies)}</strong>` : ''
   ].filter(Boolean);
   return facts.length ? `<p class="dialog-copy" style="margin-top:20px">${facts.join(' · ')}</p>` : '';
 }
@@ -418,9 +438,9 @@ function profileFact(label, value) {
   return isProvided(value) ? `<div class="profile-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>` : '';
 }
 
-function profileSection(label, values) {
+function profileSection(label, values, organizationKind) {
   const supplied = (Array.isArray(values) ? values : [values]).filter(isProvided);
-  return supplied.length ? `<section class="profile-section"><h2>${escapeHtml(label)}</h2><p>${supplied.map((value) => escapeHtml(value)).join(' · ')}</p></section>` : '';
+  return supplied.length ? `<section class="profile-section"><h2>${escapeHtml(label)}</h2><p>${supplied.map((value) => organizationKind ? organizationLabel(organizationKind, value) : escapeHtml(value)).join(' · ')}</p></section>` : '';
 }
 
 function profilePageContent(candidate) {
@@ -437,8 +457,8 @@ function profilePageContent(candidate) {
   ].join('');
   const sections = [
     profileSection('Skills', candidate.skills || []),
-    profileSection('Previously at', candidate.companies || []),
-    profileSection('Education', candidate.universities || []),
+    profileSection('Previously at', candidate.companies || [], 'company'),
+    profileSection('Education', candidate.universities?.length ? candidate.universities : [candidate.university], 'university'),
     profileSection('Experience dates', candidate.dateRanges || [])
   ].join('');
   const controls = candidate.sourceUrl
