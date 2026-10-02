@@ -13,7 +13,7 @@ const FACETS = [
   { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
   { key: 'mode', label: 'Work mode', kind: 'toggle', values: (candidate) => [candidate.mode] },
   { key: 'location', label: 'Location', kind: 'combobox', placeholder: 'Type a city, region, or “remote”', values: (candidate) => [candidate.location] },
-  { key: 'university', label: 'University', kind: 'combobox', placeholder: 'Type a university', values: (candidate) => [candidate.university] },
+  { key: 'university', label: 'University', kind: 'combobox', placeholder: 'Type a university', values: (candidate) => candidate.universities?.length ? candidate.universities : [candidate.university] },
   { key: 'company', label: 'Previously at', kind: 'combobox', placeholder: 'Type a company', values: (candidate) => candidate.companies },
   { key: 'skill', label: 'Skill or stack', kind: 'combobox', placeholder: 'Type a skill or stack', values: (candidate) => candidate.skills }
 ];
@@ -106,7 +106,7 @@ function distinctFacetValues(key) {
 // the old extractor wrote the handle into `name`, so it landed in this haystack as a side effect.
 // Rows whose `name` is now correctly empty would otherwise stop matching their own author.
 function searchableText(candidate) {
-  return [candidate.name, candidate.hnUsername, candidate.role, candidate.location, candidate.university, ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
+  return [candidate.name, candidate.hnUsername, candidate.role, candidate.location, ...(candidate.universities || [candidate.university]), ...(candidate.companies || []), ...(candidate.skills || []), candidate.summary]
     .filter(isProvided)
     .join(' ')
     .toLowerCase();
@@ -438,7 +438,7 @@ function profilePageContent(candidate) {
     ? `<button class="button button-danger" type="button" data-remove-for="${escapeHtml(candidate.id)}">This is me — remove my listing</button>`
     : `<button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button>`;
   const provenance = candidate.sourceUrl
-    ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p>`
+    ? `<p class="privacy-note">This profile was compiled from a public ${sourceLinks(candidate)}. Removal takes effect immediately and hides all submissions from this HN account.</p>`
     : '';
   return `<div class="section-kicker">Candidate profile</div><h1>${escapeHtml(displayName(candidate))}</h1>${isProvided(candidate.role) ? `<p class="profile-role">${escapeHtml(candidate.role)}</p>` : ''}${isProvided(candidate.summary) ? `<p class="profile-summary">${escapeHtml(candidate.summary)}</p>` : ''}${facts ? `<div class="profile-facts">${facts}</div>` : ''}${links ? `<div class="profile-links">${links}</div>` : ''}${sections ? `<div class="profile-sections">${sections}</div>` : ''}<div class="dialog-actions">${controls}</div>${provenance}`;
 }
@@ -458,6 +458,11 @@ async function loadProfilePage(username) {
   } catch {
     el('profile-content').innerHTML = '<div class="section-kicker">Candidate profile</div><h1>Profile unavailable</h1><p class="profile-not-found">This profile could not be loaded. Try again in a moment.</p>';
   }
+}
+
+function sourceLinks(candidate) {
+  const sources = candidate.sources?.length ? candidate.sources : [{ label: candidate.source, url: candidate.sourceUrl }];
+  return sources.map((source) => sourceLink({ source: source.label, sourceUrl: source.url })).join(', ');
 }
 
 function sourceLink(candidate) {
@@ -569,7 +574,7 @@ document.addEventListener('click', (event) => {
     const background = profileBackground(candidate);
     const identity = `${handleLink(candidate)}${profileLinks(candidate)}`;
     const controls = candidate.sourceUrl
-      ? `<p class="privacy-note">This profile was compiled from a public ${sourceLink(candidate)}. Removal takes effect immediately and the comment will not be collected again.</p><p class="profile-removal"><a href="#" data-remove-for="${escapeHtml(candidate.id)}">Remove my details</a></p>`
+      ? `<p class="privacy-note">This profile was compiled from a public ${sourceLinks(candidate)}. Removal takes effect immediately and hides all submissions from this HN account.</p><p class="profile-removal"><a href="#" data-remove-for="${escapeHtml(candidate.id)}">Remove my details</a></p>`
       : `<div class="dialog-actions"><button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button></div>`;
     const status = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
     el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2>${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
@@ -815,7 +820,7 @@ async function loadDirectoryTotals() {
 }
 
 async function loadPublishedCandidates() {
-  const loaded = [];
+  const loaded = new Map();
   let offset = 0;
   // A reload rebuilds the array from page one, so the previous run's completeness cannot carry over
   // or the summary would dip to one page's worth on the way back up.
@@ -826,8 +831,11 @@ async function loadPublishedCandidates() {
       if (!response.ok) break;
       const payload = await response.json();
       if (!Array.isArray(payload.candidates)) break;
-      loaded.push(...payload.candidates);
-      candidates = loaded;
+      payload.candidates.forEach((candidate) => {
+        const key = candidate.sourceUrl && candidate.hnUsername ? `hn:${candidate.hnUsername.toLowerCase()}` : `profile:${candidate.id}`;
+        loaded.set(key, candidate);
+      });
+      candidates = [...loaded.values()];
       listingTruncated = payload.truncated === true;
       render();
       offset = Number.isInteger(payload.nextOffset) ? payload.nextOffset : null;

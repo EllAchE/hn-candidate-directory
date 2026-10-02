@@ -1180,30 +1180,74 @@ async function listPublishedCandidates(request, env) {
 
   let result;
   try {
-    const hnUsernameFilter = hnUsername ? 'AND r.hn_username = ? COLLATE NOCASE' : '';
-    const bindings = hnUsername ? [hnUsername, limit, offset] : [limit, offset];
-    result = await env.DB.prepare(
-      `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
-              r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
-              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
-              i.hn_permalink, i.thread_month, i.extractor_rank
-         FROM profile_revisions r
-         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
-        WHERE r.status = 'published' AND i.suppressed_at IS NULL
-          ${hnUsernameFilter}
-        ORDER BY r.published_at DESC, r.id
-        LIMIT ? OFFSET ?`
-    ).bind(...bindings).all();
+    result = await publishedCandidateRows(env, limit, offset, hnUsername);
   } catch {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
 
-  const pageWasFull = result.results.length === limit;
+  const candidates = mergePublishedCandidates(result.results);
+  const pageWasFull = candidates.length === limit;
   const nextOffset = pageWasFull && offset + limit < MAX_PUBLIC_CANDIDATES ? offset + limit : null;
   // A full final page means the ceiling, not the data, ended the listing, so say so rather than
   // letting the reader mistake a capped list for the whole directory.
   const truncated = pageWasFull && nextOffset === null;
-  return json({ candidates: result.results.map(toPublicCandidate), nextOffset, truncated });
+  return json({ candidates, nextOffset, truncated });
+}
+
+async function publishedCandidateRows(env, limit, offset = 0, hnUsername = '') {
+  const usernameFilter = hnUsername ? "AND COALESCE(NULLIF(i.hn_author, ''), r.hn_username) = ? COLLATE NOCASE" : '';
+  return env.DB.prepare(
+    `WITH eligible AS (
+       SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
+              r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
+              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
+              i.hn_author, i.hn_permalink, i.thread_month, i.extractor_rank,
+              COALESCE(i.comment_created_at, r.published_at) AS source_created_at,
+              CASE WHEN i.hn_permalink IS NOT NULL AND TRIM(COALESCE(i.hn_author, r.hn_username, '')) <> ''
+                   THEN 'hn:' || LOWER(TRIM(COALESCE(NULLIF(i.hn_author, ''), r.hn_username)))
+                   ELSE 'profile:' || r.id END AS person_key
+         FROM profile_revisions r
+         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+        WHERE r.status = 'published' AND i.suppressed_at IS NULL
+          AND (i.hn_author IS NULL OR LOWER(TRIM(i.hn_author)) NOT IN (
+            SELECT LOWER(TRIM(removed.hn_author)) FROM hn_ingests removed
+             WHERE removed.suppressed_at IS NOT NULL AND TRIM(removed.hn_author) <> ''
+          ))
+          ${usernameFilter}
+     ), ranked AS (
+       SELECT eligible.*, ROW_NUMBER() OVER (
+         PARTITION BY person_key ORDER BY source_created_at DESC, id
+       ) AS person_rank FROM eligible
+     ), page AS (
+       SELECT person_key, source_created_at, id FROM ranked WHERE person_rank = 1
+        ORDER BY source_created_at DESC, id LIMIT ? OFFSET ?
+     )
+     SELECT ranked.* FROM ranked JOIN page ON page.person_key = ranked.person_key
+      ORDER BY page.source_created_at DESC, page.id, ranked.person_rank`
+  ).bind(...(hnUsername ? [hnUsername, limit, offset] : [limit, offset])).all();
+}
+
+function mergePublishedCandidates(rows) {
+  const people = new Map();
+  for (const row of rows) {
+    const candidate = toPublicCandidate({ ...row, hn_username: row.hn_author || row.hn_username });
+    const key = row.person_key || `profile:${row.id}`;
+    const existing = people.get(key);
+    const source = candidate.sourceUrl ? { label: candidate.source, url: candidate.sourceUrl } : null;
+    if (!existing) {
+      people.set(key, { ...candidate, sources: source ? [source] : [] });
+      continue;
+    }
+    if (!isProvidedFacetValue(existing.name) && isProvidedFacetValue(candidate.name)) existing.name = candidate.name;
+    for (const field of ['universities', 'companies', 'skills', 'dateRanges']) {
+      const values = [...existing[field], ...candidate[field]].filter(isProvidedFacetValue);
+      existing[field] = [...new Map(values.map((value) => [value.toLowerCase().trim(), value])).values()];
+    }
+    existing.university = existing.universities[0] || HN_UNKNOWN;
+    existing.processed &&= candidate.processed;
+    if (source && !existing.sources.some((item) => item.url === source.url)) existing.sources.push(source);
+  }
+  return [...people.values()];
 }
 
 function clampCandidateOffset(raw) {
@@ -1243,15 +1287,7 @@ async function summarizePublishedCandidates(request, env) {
 
   let result;
   try {
-    result = await env.DB.prepare(
-      `SELECT r.location, r.work_mode, r.availability,
-              r.universities_json, r.companies_json, r.skills_json,
-              i.hn_permalink, i.extractor_rank
-         FROM profile_revisions r
-         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
-        WHERE r.status = 'published' AND i.suppressed_at IS NULL
-        LIMIT ?`
-    ).bind(MAX_PUBLIC_CANDIDATES).all();
+    result = await publishedCandidateRows(env, MAX_PUBLIC_CANDIDATES);
   } catch {
     return json({ error: 'submission_storage_unavailable' }, 503);
   }
@@ -1260,22 +1296,10 @@ async function summarizePublishedCandidates(request, env) {
   const universities = new Set();
   const facets = { processed: 0, availability: 0, mode: 0, location: 0, university: 0, company: 0, skill: 0 };
   let processed = 0;
-  for (const row of result.results) {
-    // The listing publishes sanitized values, so the summary has to count the sanitized forms or a
-    // redaction would split one location into two.
-    const { draft } = sanitizeCandidateDraft({
-      name: '',
-      role: '',
-      summary: '',
-      location: row.location,
-      workMode: row.work_mode,
-      availability: row.availability,
-      universities: parseList(row.universities_json),
-      companies: parseList(row.companies_json),
-      skills: parseList(row.skills_json),
-      dateRanges: []
-    });
-    const profileProcessed = isProcessedCandidateRow(row);
+  const candidates = mergePublishedCandidates(result.results);
+  for (const candidate of candidates) {
+    const draft = { ...candidate, workMode: candidate.mode };
+    const profileProcessed = candidate.processed;
     if (profileProcessed) processed += 1;
     facets.processed += 1;
     facets.availability += Number(isProvidedFacetValue(draft.availability));
@@ -1290,13 +1314,13 @@ async function summarizePublishedCandidates(request, env) {
     }
   }
 
-  return json({ candidates: result.results.length, processed, locations: locations.size, universities: universities.size, facets });
+  return json({ candidates: candidates.length, processed, locations: locations.size, universities: universities.size, facets });
 }
 
 // Deliberately unauthenticated. A profile built from a Hacker News comment is published without
 // the subject ever asking, so they never receive the management token every other write path
 // requires -- gating removal behind it would leave them with no way out at all. The asymmetry is
-// intentional: a wrongful removal hides one public post from one directory and an operator can
+// intentional: a wrongful removal hides one account from one directory and an operator can
 // restore it, while a wrongful retention keeps someone listed against their wishes.
 async function requestCandidateRemoval(request, env, candidateId) {
   const limited = await enforceQuota(env, 'removalRequest', await clientKey(env, request));
@@ -1305,7 +1329,7 @@ async function requestCandidateRemoval(request, env, candidateId) {
   let row;
   try {
     row = await env.DB.prepare(
-      `SELECT r.id, r.submission_id, r.status, i.hn_item_id, i.suppressed_at
+      `SELECT r.id, r.submission_id, r.status, i.hn_item_id, i.hn_author, i.suppressed_at
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.id = ?`
@@ -1318,19 +1342,20 @@ async function requestCandidateRemoval(request, env, candidateId) {
 
   if (!row) return json({ error: 'candidate_not_found' }, 404);
   if (!row.hn_item_id) return json({ error: 'token_managed_candidate' }, 409);
-  if (row.suppressed_at || row.status === 'archived') return json({ removed: true });
+  if (!row.hn_author && (row.suppressed_at || row.status === 'archived')) return json({ removed: true });
 
-  const removedAt = new Date().toISOString();
+  const removedAt = row.suppressed_at || new Date().toISOString();
   try {
+    const accountFilter = row.hn_author ? 'hn_author = ? COLLATE NOCASE' : 'submission_id = ?';
+    const identity = row.hn_author || row.submission_id;
     await env.DB.batch([
-      env.DB.prepare('UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?').bind(
-        removedAt,
-        removedAt,
-        row.submission_id
+      env.DB.prepare(`UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE ${accountFilter}`).bind(
+        removedAt, removedAt, identity
       ),
       env.DB.prepare(
-        "UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ? WHERE id = ?"
-      ).bind(removedAt, row.id)
+        `UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ?
+          WHERE submission_id IN (SELECT submission_id FROM hn_ingests WHERE ${accountFilter})`
+      ).bind(removedAt, identity)
     ]);
   } catch {
     return json({ error: 'submission_storage_unavailable' }, 503);
@@ -1663,6 +1688,12 @@ async function processHnCommentMessage(message, env) {
   }
 }
 
+async function isSuppressedHnAuthor(env, author) {
+  return Boolean(await env.DB.prepare(
+    'SELECT hn_item_id FROM hn_ingests WHERE hn_author = ? COLLATE NOCASE AND suppressed_at IS NOT NULL LIMIT 1'
+  ).bind(author).first());
+}
+
 async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRACTOR) {
   const record = await toHnRecord(null, comment);
   if (!record) return 'skipped_invalid';
@@ -1672,7 +1703,7 @@ async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRAC
   )
     .bind(record.itemId)
     .first();
-  if (existing?.suppressed_at) return 'skipped_suppressed';
+  if (existing?.suppressed_at || await isSuppressedHnAuthor(env, record.author)) return 'skipped_suppressed';
   if (existing && existing.comment_hash === record.commentHash) return 'unchanged';
 
   const draft = extractor.extract(record);
@@ -1758,7 +1789,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
 
   const hnItemId = record.itemId;
   const state = known.get(hnItemId);
-  if (state?.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+  if (state?.suppressed_at || await isSuppressedHnAuthor(env, record.author)) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
   if (entry.hold === true) return planStepOut(env, hnItemId, state, entry, 'held', extractor, pushedAt);
 
   const resumeUrl = hnResumeUrl(entry?.resumeUrl);
@@ -2689,7 +2720,7 @@ function toPublicCandidate(row) {
     source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
     sourceUrl: fromHackerNews ? row.hn_permalink : '',
     processed: isProcessedCandidateRow(row),
-    posted: daysSince(row.published_at),
+    posted: daysSince(row.source_created_at || row.published_at),
     publishedAt: row.published_at
   };
 }

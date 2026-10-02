@@ -206,6 +206,17 @@ describe('pushing externally-extracted HN profiles', () => {
     expect((await ingestHackerNews(env, { transport: transport().fetch })).queued).toBe(0);
   });
 
+  test('rejects a new comment from an account that removed another submission', async () => {
+    const env = configured();
+    await ingestThread(env);
+    suppress(env, '44444501');
+    const future = { ...PROSE_COMMENT, objectID: '44444999', author: 'PROSEPOSTER' };
+    const response = await push(env, [item(future, { companies: ['Example Systems'] })]);
+    expect((await response.json()).results[0]).toEqual({ hnItemId: '44444999', outcome: 'skipped_suppressed' });
+    expect(env.DB.hnIngests.has('44444999')).toBe(false);
+    expect(env.DB.revisions.has('hn-44444999')).toBe(false);
+  });
+
   test('never resurrects a suppressed candidate', async () => {
     const env = configured();
     await ingestThread(env);
