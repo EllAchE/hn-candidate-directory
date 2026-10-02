@@ -2264,7 +2264,7 @@ async function toHnRecord(thread, hit) {
     comment,
     text,
     permalink: `https://news.ycombinator.com/item?id=${itemId}`,
-    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION)
+    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnPersonalSite(commentHtml))
   };
 }
 
@@ -2272,8 +2272,9 @@ async function toHnRecord(thread, hit) {
 // thread-level queue filter and the per-comment write guard -- pick up a bump without a schema
 // change. Rows written before the envelope existed hold a bare hash of the text, so version 1 is
 // itself the first invalidation.
-function hnCommentHash(text, version) {
-  return hashToken(`hn-extraction-v${version}\n${text}`);
+function hnCommentHash(text, version, personalUrl = '') {
+  const ownership = personalUrl ? `\npersonal-site:${personalUrl}` : '';
+  return hashToken(`hn-extraction-v${version}\n${text}${ownership}`);
 }
 
 const DETERMINISTIC_HN_EXTRACTOR = Object.freeze({
@@ -2332,7 +2333,7 @@ function extractHnProfile(record) {
 
 // A project or employer URL is not evidence of a candidate's personal website.
 function hnProfileLinks(text, html) {
-  const links = { linkedinUrl: '', githubUrl: '', personalUrl: hnPersonalSite(text, html) };
+  const links = { linkedinUrl: '', githubUrl: '', personalUrl: hnPersonalSite(html) };
 
   for (const match of String(text || '').matchAll(HN_LINK_PATTERN)) {
     const candidate = match[0].replace(/[.,;:)\]]+$/, '');
@@ -2343,13 +2344,19 @@ function hnProfileLinks(text, html) {
   return links;
 }
 
-function hnPersonalSite(text, html) {
+function hnPersonalSite(html) {
+  const ownershipHtml = hnOwnershipHtml(html);
+  const anchorPattern = /<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi;
+  const labeledHtml = ownershipHtml.replace(anchorPattern, (_, href, label) => `${href} ${decodeHnCommentText(label)}`);
   const urls = [];
-  for (const line of text.split(/[\n|]/)) {
+  for (const line of decodeHnCommentText(labeledHtml).split(/[\n|]/)) {
     const labeled = line.trim().match(/^(?:website|personal (?:website|site|url)|portfolio|my (?:website|site|portfolio))\s*:\s*(.*)$/i);
-    if (labeled) urls.push(...[...labeled[1].matchAll(HN_LINK_PATTERN)].map((match) => match[0]));
+    if (!labeled) continue;
+    const matches = [...labeled[1].matchAll(HN_LINK_PATTERN)];
+    const context = labeled[1].replace(HN_LINK_PATTERN, '').replace(/[\s,;.:()\[\]]/g, '');
+    if (!context) urls.push(...matches.map((match) => match[0]));
   }
-  for (const anchor of html.matchAll(/<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi)) {
+  for (const anchor of ownershipHtml.matchAll(anchorPattern)) {
     if (/^(?:my|personal) (?:website|site|portfolio)$/i.test(decodeHnCommentText(anchor[2]))) {
       urls.push(decodeHnCommentText(anchor[1]));
     }
@@ -2358,6 +2365,23 @@ function hnPersonalSite(text, html) {
     .filter((url) => !HN_NON_PERSONAL_HOSTS.has(hostnameOf(url)))
     .map(personalProfileUrl).filter(Boolean));
   return sites.size === 1 ? [...sites][0] : '';
+}
+
+function hnOwnershipHtml(html) {
+  const blocked = [];
+  let cursor = 0;
+  let ownHtml = '';
+  for (const tag of html.matchAll(/<\/?(blockquote|script|style)\b[^>]{0,512}>/gi)) {
+    if (!blocked.length) ownHtml += html.slice(cursor, tag.index);
+    const name = tag[1].toLowerCase();
+    if (tag[0].startsWith('</')) {
+      if (blocked.at(-1) === name) blocked.pop();
+    } else if (!blocked.length || blocked.at(-1) === 'blockquote') {
+      blocked.push(name);
+    }
+    cursor = tag.index + tag[0].length;
+  }
+  return blocked.length ? ownHtml : ownHtml + html.slice(cursor);
 }
 
 function hostnameOf(value) {

@@ -668,6 +668,64 @@ describe('profile links and the HN handle', () => {
     expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
   });
 
+  test('rejects negated, third-party, quoted, and hidden Website evidence on both write paths', async () => {
+    for (const [source, website] of [
+      ['Website: not mine, see https://employer.example/', ''],
+      ['Website: my old employer at https://employer.example/', ''],
+      ['Website: https://employer.example/ (not mine)', ''],
+      ['Website: <a href="https://employer.example/">my old employer</a>', ''],
+      ['Website: <a href="https://candidate.example/">my site</a>', 'https://candidate.example/'],
+      ['A colleague wrote:<blockquote><p>Website: https://colleague.example/</blockquote>', ''],
+      ['<blockquote><a href="https://colleague.example/">my site</a></blockquote>', ''],
+      ['<blockquote><blockquote>Other source</blockquote><p>Website: https://colleague.example/</blockquote>', ''],
+      ['<blockquote><p>Website: https://colleague.example/', ''],
+      ['<script>Website: https://script.example/</script>', ''],
+      ['<style>Website: https://style.example/</style>', ''],
+      ['<script><a href="https://script.example/">my site</a></script>', ''],
+      ['<blockquote>Website: https://colleague.example/</blockquote><p>Website: https://candidate.example/', 'https://candidate.example/'],
+      ['<script>Website: https://script.example/</script><p><a href="https://candidate.example/">my site</a>', 'https://candidate.example/'],
+      ['Website: https://one.example/<p>Website: https://two.example/', '']
+    ]) {
+      const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source}` };
+      const env = configured();
+      await ingestThread(env, transport([comment]));
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+      await push(env, [item(comment)]);
+      expect(env.DB.revisions.get('hn-44444501').personal_url).toBe(website);
+    }
+  });
+
+  test('an ownership-only edit updates an unprocessed Website without replacing a better draft', async () => {
+    const owned = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p><a href="https://candidate.example/">my site</a>` };
+    const unrelated = { ...owned, comment_text: owned.comment_text.replace('my site', 'employer website') };
+    expect(decodeHnCommentText(owned.comment_text)).toBe(decodeHnCommentText(unrelated.comment_text));
+    const env = configured();
+    await ingestThread(env, transport([owned]));
+    const before = env.DB.hnIngests.get('44444501').comment_hash;
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+    await ingestThread(env, transport([unrelated]));
+    expect(env.DB.hnIngests.get('44444501').comment_hash).not.toBe(before);
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('');
+    await push(env, [item(owned, { summary: 'The better extracted summary.' })], TOKEN, 'claude-skill-v2');
+    await ingestThread(env, transport([unrelated]));
+    expect(env.DB.revisions.get('hn-44444501').summary).toBe('The better extracted summary.');
+    expect(env.DB.revisions.get('hn-44444501').personal_url).toBe('https://candidate.example/');
+    expect(env.DB.revisions.get('hn-44444501').extractor).toBe('claude-skill-v2');
+  });
+
+  test('irrelevant anchor formatting leaves the ownership cache unchanged', async () => {
+    const source = `${PROSE_COMMENT.comment_text}<p><a href="https://candidate.example/">my site</a>`;
+    const env = configured();
+    await ingestThread(env, transport([{ ...PROSE_COMMENT, comment_text: source }]));
+    const before = env.DB.hnIngests.get('44444501').comment_hash;
+    const formatted = source.replace('my site', '<strong>my site</strong>');
+    await ingestThread(env, transport([{ ...PROSE_COMMENT, comment_text: formatted }]));
+    expect(env.DB.hnIngests.get('44444501').comment_hash).toBe(before);
+    const plain = configured();
+    await ingestThread(plain, transport([PROSE_COMMENT]));
+    expect(plain.DB.hnIngests.get('44444501').comment_hash).toBe(await hnCommentHash(decodeHnCommentText(PROSE_COMMENT.comment_text), HN_EXTRACTION_VERSION));
+  });
+
   // The push endpoint outranks the deterministic pass by design, so normalizing only that pass would
   // hold the vocabulary exactly until the first backfill ran.
   test('canonicalizes the facets a pushed draft states, rather than trusting them', async () => {
