@@ -789,6 +789,40 @@ describe('profile links and the HN handle', () => {
     }
   });
 
+  test('self-labeled anchors respect surrounding ownership and independent paragraphs', async () => {
+    for (const [label, column, url, other] of [
+      ['site', 'personal_url', 'https://candidate.example/', 'https://colleague.example/'],
+      ['website', 'personal_url', 'https://candidate.example/', 'https://colleague.example/'],
+      ['GitHub', 'github_url', 'https://github.com/candidateexample', 'https://github.com/otherprofile'],
+      ['LinkedIn', 'linkedin_url', 'https://www.linkedin.com/in/candidate-example', 'https://www.linkedin.com/in/otherprofile']
+    ]) {
+      const own = `<a href="${url}">my ${label}</a>`;
+      const unrelated = `<a href="${other}">my ${label}</a>`;
+      for (const [source, expected] of [
+        [`Not my ${own}.`, ''],
+        [`My colleague shares ${own}.`, ''],
+        [`My colleague links ${unrelated}.`, ''],
+        [`${own} is not mine.`, ''],
+        [`<strong>Not my</strong> ${own}.`, ''],
+        [`My colleague's ${own}.`, ''],
+        [`I share ${own}.`, url],
+        [`I share ${own} with my colleague.`, url],
+        [`Please visit ${own}.`, url],
+        [`My colleague shares ${unrelated}.<p>I share ${own}.`, url],
+        [`Not my link.<p>${own}`, url],
+        [`${own}<div>My colleague shares ${unrelated}.</div>`, url],
+        [`My colleague shares ${unrelated}.<br>${own}`, url]
+      ]) {
+        const comment = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>${source}` };
+        const env = configured();
+        await ingestThread(env, transport([comment]));
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+        await push(env, [item(comment)]);
+        expect(env.DB.revisions.get('hn-44444501')[column]).toBe(expected);
+      }
+    }
+  });
+
   test('owned-link hash rollout is bounded and empty evidence keeps the legacy hash', async () => {
     const unrelated = { ...PROSE_COMMENT, comment_text: `${PROSE_COMMENT.comment_text}<p>A colleague's profiles: https://github.com/colleagueexample and https://www.linkedin.com/in/colleague-example` };
     const empty = configured();

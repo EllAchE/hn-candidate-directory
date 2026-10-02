@@ -2380,13 +2380,17 @@ function hnProfileLinks(html) {
     const target = !context || hnProfileLinkField(context) === field ? urls : ambiguous;
     target[field].push(...matches.map((match) => match[0]));
   }
-  for (const anchor of ownershipHtml.matchAll(anchorPattern)) {
-    const label = decodeHnCommentText(anchor[2]);
-    const field = /^(?:my|personal) /i.test(label) ? hnProfileLinkField(label) : '';
-    if (field) urls[field].push(decodeHnCommentText(anchor[1]));
-    if (/^my profile$/i.test(label)) {
-      urls.linkedinUrl.push(decodeHnCommentText(anchor[1]));
-      urls.githubUrl.push(decodeHnCommentText(anchor[1]));
+  for (const paragraph of ownershipHtml.split(/<\/?(?:p|br|div|li|ul|ol|pre)\b[^>]{0,512}>|[\r\n]/gi)) {
+    const context = decodeHnCommentText(paragraph.replace(anchorPattern, ' '));
+    if (hnAnchorOwnershipConflict(context)) continue;
+    for (const anchor of paragraph.matchAll(anchorPattern)) {
+      const label = decodeHnCommentText(anchor[2]);
+      const field = /^(?:my|personal) /i.test(label) ? hnProfileLinkField(label) : '';
+      if (field) urls[field].push(decodeHnCommentText(anchor[1]));
+      if (/^my profile$/i.test(label)) {
+        urls.linkedinUrl.push(decodeHnCommentText(anchor[1]));
+        urls.githubUrl.push(decodeHnCommentText(anchor[1]));
+      }
     }
   }
   const canonicalizers = { linkedinUrl: linkedinProfileUrl, githubUrl: githubProfileUrl, personalUrl: personalProfileUrl };
@@ -2400,6 +2404,12 @@ function hnProfileLinks(html) {
     const profiles = new Set(values.map(canonicalize).filter((url) => url && !unclear.has(url)));
     return [field, profiles.size === 1 ? [...profiles][0] : ''];
   }));
+}
+
+// Self-labeled anchors can belong to another speaker; their paragraph supplies that attribution.
+function hnAnchorOwnershipConflict(context) {
+  return /\b(?:not\s+(?:my|mine)|isn['’]t\s+mine)\b/i.test(context)
+    || /\b(?:my|a|the|another)\s+(?:colleague|coworker|co-worker|friend|employer|client)(?:['’]s\b|\s+(?:shares?|links?|owns?|has|uses?|posts?|wrote|said)\b)/i.test(context);
 }
 
 function hnProfileLinkField(label) {
