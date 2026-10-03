@@ -359,7 +359,7 @@ function card(candidate) {
     : '';
   const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
   const processing = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
-  const metadata = [candidate.location, candidate.mode, experienceLabel(candidate.experience)]
+  const metadata = [candidate.location, candidate.mode, candidate.experience ? experienceLabel(candidate.experience) : 'Experience unknown']
     .filter(isProvided)
     .map((value) => `<span>${escapeHtml(value)}</span>`)
     .join('') + organizationLabels('university', candidate.universities?.length ? candidate.universities : [candidate.university]);
@@ -453,7 +453,7 @@ function profilePageContent(candidate) {
     profileFact('Location', candidate.location),
     profileFact('Work mode', candidate.mode),
     profileFact('Availability', candidate.availability),
-    profileFact('Professional experience', experienceLabel(candidate.experience))
+    profileFact('Professional experience', candidate.experience ? experienceLabel(candidate.experience) : 'Unknown')
   ].join('');
   const sections = [
     profileSection('Skills', candidate.skills || []),
@@ -608,7 +608,7 @@ document.addEventListener('click', (event) => {
       ? `<p class="privacy-note">This profile was compiled from a public ${sourceLinks(candidate)}. Removal takes effect immediately and hides all submissions from this HN account.</p><p class="profile-removal"><a href="#" data-remove-for="${escapeHtml(candidate.id)}">Remove my details</a></p>`
       : `<div class="dialog-actions"><button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button></div>`;
     const status = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2>${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2 id="candidate-dialog-heading">${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
