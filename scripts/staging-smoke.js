@@ -26,6 +26,7 @@ const REQUIRED_CANDIDATE_FIELDS = Object.freeze({
   posted: 'number',
   publishedAt: 'string'
 });
+const OPTIONAL_CANDIDATE_FIELDS = Object.freeze({ experience: 'experience' });
 const PRIVATE_KEYS = new Set([
   'apikey',
   'authorization',
@@ -202,9 +203,12 @@ function validateCandidatePayload(payload) {
 function validateCandidate(candidate, index) {
   if (!isPlainObject(candidate)) throw new Error(`candidate ${index} is not an object`);
   const expectedKeys = Object.keys(REQUIRED_CANDIDATE_FIELDS).sort();
-  const actualKeys = Object.keys(candidate).sort();
+  const actualKeys = Object.keys(candidate).filter((key) => !Object.hasOwn(OPTIONAL_CANDIDATE_FIELDS, key)).sort();
   if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, keyIndex) => key !== expectedKeys[keyIndex])) {
     throw new Error(`candidate ${index} does not match the public shape`);
+  }
+  if (Object.hasOwn(candidate, 'experience') && !validExperience(candidate.experience)) {
+    throw new Error(`candidate ${index} has invalid experience`);
   }
 
   Object.entries(REQUIRED_CANDIDATE_FIELDS).forEach(([key, type]) => {
@@ -225,6 +229,14 @@ function validateCandidate(candidate, index) {
     }
     validatePublicUrl(source.url, `${label}.url`, { hnSource: true });
   });
+}
+
+function validExperience(value) {
+  if (value === null) return true;
+  if (!isPlainObject(value) || Object.keys(value).sort().join(',') !== 'maxYears,minYears') return false;
+  const { minYears, maxYears } = value;
+  return Number.isFinite(minYears) && minYears >= 0 && minYears <= 80
+    && (maxYears === null || (Number.isFinite(maxYears) && maxYears >= minYears && maxYears <= 80));
 }
 
 function validatePublicUrl(value, label, { allowEmpty = false, hnSource = false } = {}) {

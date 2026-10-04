@@ -45,6 +45,15 @@ describe('staging smoke', () => {
     await expect(runStagingSmoke(baseUrl)).resolves.toEqual({ assets: 2, candidates: 1 });
   });
 
+  test.each([
+    ['no experience', null],
+    ['a bounded range', { minYears: 3, maxYears: 5 }],
+    ['an open-ended range', { minYears: 10, maxYears: null }]
+  ])('accepts %s', async (_label, experience) => {
+    const value = { ...candidate, experience };
+    await expect(runStagingSmoke(serve({ candidatesResponse: () => json({ candidates: [value] }) }))).resolves.toEqual({ assets: 2, candidates: 1 });
+  });
+
   test('accepts the actual Worker listing after merging synthetic HN submissions', async () => {
     const env = createEnvironment();
     env.HN_INGEST_TOKEN = 'synthetic-smoke-test-token-long-enough';
@@ -83,7 +92,10 @@ describe('staging smoke', () => {
     ['private nested source data', { ...candidate, sources: [{ label: 'HN', url: 'https://news.ycombinator.com/item?id=900001', sourceText: 'private' }] }, 'private key payload.candidates[0].sources[0].sourceText'],
     ['a missing source URL', { ...candidate, sources: [{ label: 'HN' }] }, 'public source shape'],
     ['an empty source label', { ...candidate, sources: [{ label: '', url: 'https://news.ycombinator.com/item?id=900001' }] }, 'public source shape'],
-    ['an empty source URL', { ...candidate, sources: [{ label: 'HN', url: '' }] }, 'invalid URL']
+    ['an empty source URL', { ...candidate, sources: [{ label: 'HN', url: '' }] }, 'invalid URL'],
+    ['non-object experience', { ...candidate, experience: '5 years' }, 'invalid experience'],
+    ['unknown experience keys', { ...candidate, experience: { minYears: 5, maxYears: 5, raw: '5' } }, 'invalid experience'],
+    ['an inverted experience range', { ...candidate, experience: { minYears: 8, maxYears: 3 } }, 'invalid experience']
   ])('rejects %s in the current schema', async (_label, value, message) => {
     await expect(runStagingSmoke(serve({ candidatesResponse: () => json({ candidates: [value] }) }))).rejects.toThrow(message);
   });
