@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./who-is-hiring.css" />
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="topbar">
       <a class="brand" href="/">Who wants<span> to be hired</span></a>
       <nav aria-label="Main navigation">
@@ -17,7 +18,7 @@
       </nav>
     </header>
 
-    <main>
+    <main id="main-content" tabindex="-1">
       <section class="profile-page" id="profile-page" aria-live="polite" hidden>
         <a class="profile-back" href="/#directory">← Back to the directory</a>
         <div id="profile-content">
@@ -76,10 +77,10 @@
 
     <footer><span>Who wants to be hired · a searchable index of Hacker News candidate posts</span><a href="/#about">How this works</a><button class="text-link" data-open-feedback>Send feedback</button></footer>
 
-    <dialog id="feedback-dialog" class="dialog">
+    <dialog id="feedback-dialog" aria-labelledby="feedback-heading" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div class="section-kicker">Pilot feedback</div>
-      <h2>Tell us what is wrong or missing</h2>
+      <h2 id="feedback-heading">Tell us what is wrong or missing</h2>
       <p class="dialog-copy">This directory is an early pilot. Wrong data, a listing that should not be here, a search that missed something, or an idea — all of it is read.</p>
       <form id="feedback-form">
         <label class="field-label" for="feedback-message">What happened?</label>
@@ -92,15 +93,15 @@
       <div class="success-message" id="feedback-success" hidden></div>
     </dialog>
 
-    <dialog id="candidate-dialog" class="dialog">
+    <dialog id="candidate-dialog" aria-labelledby="candidate-dialog-heading" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div id="dialog-content"></div>
     </dialog>
 
-    <dialog id="import-dialog" class="dialog dialog-wide">
+    <dialog id="import-dialog" aria-labelledby="import-heading" class="dialog dialog-wide">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div class="section-kicker">Private candidate submission</div>
-      <h2>Review before you publish</h2>
+      <h2 id="import-heading">Review before you publish</h2>
       <p class="dialog-copy">Choose one source. A background job extracts structured fields into a private draft. Saving edits stays private; publication requires a separate, explicit approval.</p>
       <fieldset class="source-choice">
         <legend class="field-label">Submission source</legend>
@@ -126,10 +127,10 @@
       <div class="import-result" id="import-result" hidden></div>
     </dialog>
 
-    <dialog id="request-dialog" class="dialog">
+    <dialog id="request-dialog" aria-labelledby="request-heading" class="dialog">
       <button class="dialog-close" data-close-dialog aria-label="Close">×</button>
       <div class="section-kicker">Candidate controls</div>
-      <h2>Update or remove your profile</h2>
+      <h2 id="request-heading">Update or remove your profile</h2>
       <p class="dialog-copy">Choose your listing and enter the private token issued during submission. Tokens are checked against the exact profile before any visibility or data changes.</p>
       <form id="request-form">
         <label class="field-label" for="request-candidate">Published profile</label>
@@ -142,6 +143,6 @@
       <div class="success-message" id="request-success" hidden></div>
     </dialog>
 
-    <script src="./who-is-hiring.js"></script>
+    <script type="module" src="./who-is-hiring.js"></script>
   </body>
 </html>

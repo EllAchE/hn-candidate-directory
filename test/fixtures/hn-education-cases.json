@@ -1,0 +1,160 @@
+{
+  "instructionCommit": "170ce4710c5dce02cfb864495812e723d338e96d",
+  "instructionSha256": "6449e384e602cca31aa1309e2520641d4b4388294c40486f48248bf2f63b0df7",
+  "wrapperBaseCommit": "b6ce3151e598cfb362eb45119781fd44a0cb04d2",
+  "wrapperSha256": "07fa6c313ded326bcb2f2496675e22a9bd566a34e28b772ae61fca9cc3a82e17",
+  "cases": [
+    {
+      "label": "unlabeled undergraduate study",
+      "resume": "I studied physics at the University of Oxford from 2017 to 2021 and received a BA. I now build software.",
+      "expected": {
+        "universities": [
+          "University of Oxford"
+        ]
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "ongoing online degree",
+      "resume": "Currently enrolled as a BSc Computer Science student at the University of London via distance learning.",
+      "expected": {
+        "universities": [
+          "University of London"
+        ]
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "unfinished degree",
+      "resume": "Enrolled undergraduate student at Stanford University, 2019-2021. Withdrew without a degree.",
+      "expected": {
+        "universities": [
+          "Stanford University"
+        ]
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "planned application",
+      "resume": "Education: I am applying to Harvard University next year. Currently self-taught through online tutorials; never attended a university.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "explicit nonattendance plus branded courses",
+      "resume": "Education: Harvard CS50x and MIT OpenCourseWare; both self-study, not university enrollment. I do not have a degree.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "friend degree attribution",
+      "resume": "My friend earned an MSc at the University of Cambridge. We collaborated on a side project. My own education is self-taught.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "spouse degree under education heading",
+      "resume": "Education: My spouse graduated from Yale University. I took Udemy programming courses and have never attended college.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "university as employer",
+      "resume": "Work experience: Software engineer on payroll at Harvard University, 2020-2024. My education was a coding bootcamp, not Harvard.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "visiting researcher",
+      "resume": "I was a visiting researcher at the University of Oxford in 2022, after being hired by an independent laboratory. I studied computing through tutorials; never a university student.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "university branded bootcamp",
+      "resume": "Education: UC Berkeley Extension coding bootcamp certificate, 24 weeks. This was a bootcamp, not enrollment in a university degree program.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "course certificate",
+      "resume": "Education: Coursera certificate in Machine Learning from Stanford Online. Completed as an open online course without university admission or enrollment.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "mixed degree and independent course",
+      "resume": "Education: BSc Computer Science, University of Edinburgh, 2015-2019. Harvard CS50 via edX, 2020; MIT OpenCourseWare algorithms self-study, 2021.",
+      "expected": {
+        "universities": [
+          "University of Edinburgh"
+        ]
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "unlabeled self taught paragraph",
+      "resume": "I learned programming on my own through freeCodeCamp, Udemy, and Harvard CS50. I have never been enrolled at a university.",
+      "expected": {
+        "universities": []
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "formal nondegree enrollment",
+      "resume": "Education: Admitted and enrolled as a visiting non-degree undergraduate student at the University of Toronto for the 2022 academic year, taking credited university classes.",
+      "expected": {
+        "universities": [
+          "University of Toronto"
+        ]
+      },
+      "comment": "Synthetic job-seeker seeking a software engineering role. Resume details follow."
+    },
+    {
+      "label": "education cue on courses is advisory",
+      "resume": "Synthetic Applicant\nEducation\nSelf-taught; Harvard CS50 certificate and MIT OpenCourseWare algorithms self-study. No university enrollment.\nExperience\nEngineer at Example Systems, 2020-2024.",
+      "recheck": [
+        "universities"
+      ],
+      "expected": {
+        "universities": [],
+        "companies": [
+          "Example Systems"
+        ]
+      },
+      "comment": "Synthetic applicant seeking a software engineering role."
+    },
+    {
+      "label": "first-job graduate does not invent employers",
+      "resume": "Synthetic Applicant\nEducation\nBSc Computer Science, University of Oxford, 2020-2024.\nExperience\nSeeking my first job. I have never been employed; university projects only.",
+      "recheck": [
+        "universities",
+        "companies"
+      ],
+      "expected": {
+        "universities": [
+          "University of Oxford"
+        ],
+        "companies": []
+      },
+      "comment": "Synthetic applicant seeking a software engineering role."
+    }
+  ],
+  "developerInstructionsSha256": "6d1724499a2e877af9f3ea1cfff506d9d2c9e8fa7cb8512c0100a45c531533b5"
+}

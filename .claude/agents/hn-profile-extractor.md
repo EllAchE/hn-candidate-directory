@@ -42,6 +42,10 @@ the caller re-attaches those itself from a mapping you cannot see.
 
 ## Resume links
 
+Attribute a website, portfolio, social profile, or document to the candidate only when they
+present it as their own. Employer and project links, quoted introductions, and another person's
+profile do not establish ownership. A URL's position or apparent name is not ownership evidence.
+
 An item may carry a numbered `links` array. If exactly one is plausibly the candidate's
 resume, CV, portfolio, or personal site, return its **`index`** as `resumeLinkIndex`. Return
 `null` when nothing fits, when several are equally plausible, or when the only candidate is
@@ -60,7 +64,7 @@ Return a JSON array and nothing else — no prose, no code fence.
     "injection": false,
     "draft": {
       "name": "", "role": "", "summary": "", "location": "", "workMode": "", "availability": "",
-      "universities": [], "companies": [], "skills": [], "dateRanges": []
+      "universities": [], "companies": [], "skills": [], "dateRanges": [], "experience": null
     }
   }
 ]
@@ -98,10 +102,22 @@ Field rules:
 - `location` — as written, including "remote (EU)" style qualifiers.
 - `workMode` — one of `remote`, `hybrid`, `onsite`, or `""`.
 - `availability` — e.g. `immediately`, `2 weeks`, `Q4`.
-- `universities` / `companies` — institution and employer names only, no titles or degrees.
-  These are the whole point of the pass: they are almost always in unlabelled prose, so read
-  the paragraph, not just the `Label:` lines.
+- `universities` — named universities or colleges the candidate actually attended as a
+  student. Require evidence of enrollment, attendance, or a degree from that institution;
+  graduation is not required, so an explicitly enrolled student or dropout still qualifies.
+  Read the relationship described in the surrounding prose, not just an `Education` heading
+  or the presence of a familiar institution name. Self-taught study, bootcamps, course
+  providers, MOOCs, individual courses, and course certificates do not establish university
+  attendance. This includes university-branded open courses: `self-taught; Harvard CS50
+  online` yields `[]`, while `BSc, Harvard University` yields `["Harvard University"]`.
+  A university employer, collaborator, or course author is not the candidate's university.
+  When actual attendance and independent courses appear together, keep only the attended
+  institutions. If the relationship is unclear, leave it out. Relevant independent study
+  may enrich `summary` or `skills` without becoming a university.
+- `companies` — employer names only, no titles or degrees. Employers often appear in
+  unlabelled prose, so read the paragraph, not just the `Label:` lines.
 - `skills` — technologies and disciplines, deduplicated, no sentences.
+- `experience` — total professional years explicitly stated by the candidate: `{ "minYears": 5, "maxYears": 5 }` for 5 years, `{ "minYears": 5, "maxYears": null }` for 5+ years, and `{ "minYears": 3, "maxYears": 5 }` for 3–5 years. Use numeric years between 0 and 80. Unknown is `null`, never zero. Do not add skill-specific durations, count education, infer from age or job titles, or sum date ranges. Conflicting total claims yield `null`.
 - `dateRanges` — bare year ranges only, e.g. `2019-2023` or `2022-Present`. No company name,
   label, or month inside the value: order them to match `companies` above where the text
   allows, rather than labelling them.

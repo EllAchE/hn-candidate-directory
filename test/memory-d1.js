@@ -121,8 +121,13 @@ class MemoryStatement {
         submission_id: revision.submission_id,
         status: revision.status,
         hn_item_id: ingest?.hn_item_id ?? null,
+        hn_author: ingest?.hn_author ?? null,
         suppressed_at: ingest?.suppressed_at ?? null
       };
+    }
+    if (this.sql.startsWith('SELECT hn_item_id FROM hn_ingests WHERE hn_author = ?')) {
+      const ingest = [...this.database.hnIngests.values()].find((row) => row.suppressed_at && row.hn_author.toLowerCase() === this.values[0].toLowerCase());
+      return ingest ? { hn_item_id: ingest.hn_item_id } : null;
     }
     if (this.sql.includes('FROM hn_ingests') && this.sql.includes('WHERE hn_item_id = ?')) {
       const ingest = this.database.hnIngests.get(this.values[0]);
@@ -239,20 +244,34 @@ class MemoryStatement {
         .map((ingest) => select(ingest, ['hn_item_id', 'comment_hash', 'suppressed_at']));
       return { results };
     }
-    if (this.sql.includes("WHERE r.status = 'published'")) {
+    if (this.sql.startsWith('WITH eligible AS')) {
       const ingestsBySubmission = new Map([...this.database.hnIngests.values()].map((ingest) => [ingest.submission_id, ingest]));
+      const suppressedAuthors = new Set([...this.database.hnIngests.values()].filter((ingest) => ingest.suppressed_at).map((ingest) => String(ingest.hn_author || '').toLowerCase()));
       let rows = [...this.database.revisions.values()]
         .filter((revision) => revision.status === 'published')
-        .map((revision) => ({ ...revision, ...hnJoinColumns(ingestsBySubmission.get(revision.submission_id)) }))
-        .filter((revision) => revision.suppressed_at === null);
-      if (this.sql.includes('AND r.hn_username = ? COLLATE NOCASE')) {
+        .map((revision) => {
+          const ingest = ingestsBySubmission.get(revision.submission_id);
+          const accountKey = String(ingest?.hn_author || revision.hn_username || '').trim().toLowerCase();
+          return { ...revision, ...hnJoinColumns(ingest),
+            source_created_at: ingest?.comment_created_at || revision.published_at,
+            person_key: ingest?.hn_permalink && accountKey ? `hn:${accountKey}` : `profile:${revision.id}`,
+            account_suppressed: ingest && suppressedAuthors.has(String(ingest.hn_author || '').toLowerCase())
+          };
+        })
+        .filter((revision) => revision.suppressed_at === null && !revision.account_suppressed);
+      if (this.sql.includes("AND COALESCE(NULLIF(i.hn_author, ''), r.hn_username) = ? COLLATE NOCASE")) {
         const username = String(this.values[0]).toLowerCase();
-        rows = rows.filter((revision) => String(revision.hn_username || '').toLowerCase() === username);
+        rows = rows.filter((revision) => String(revision.hn_author || revision.hn_username || '').toLowerCase() === username);
       }
-      rows.sort((left, right) => right.published_at.localeCompare(left.published_at) || left.id.localeCompare(right.id));
+      rows.sort((left, right) => right.source_created_at.localeCompare(left.source_created_at) || left.id.localeCompare(right.id));
+      const groups = new Map();
+      for (const row of rows) {
+        const group = groups.get(row.person_key) || [];
+        group.push(row);
+        groups.set(row.person_key, group);
+      }
       const [limit, offset] = this.values.slice(-2);
-      const results = this.sql.includes('LIMIT ? OFFSET ?') ? rows.slice(offset, offset + limit) : rows;
-      return { results };
+      return { results: [...groups.values()].slice(offset, offset + limit).flat() };
     }
     throw new Error(`Unsupported all statement: ${this.sql}`);
   }
@@ -326,6 +345,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         createdAt,
         updatedAt,
         publishedAt,
@@ -347,6 +367,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         updated_at: updatedAt,
         extractor,
         extractor_rank: extractorRank
@@ -489,6 +511,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         createdAt,
         updatedAt
       ] = this.values;
@@ -510,6 +533,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         created_at: createdAt,
         updated_at: updatedAt,
         published_at: null
@@ -542,6 +567,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         publishedAt,
         updatedAt,
         submissionId
@@ -564,6 +590,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         published_at: publishedAt,
         updated_at: updatedAt
       });
@@ -637,6 +665,20 @@ class MemoryStatement {
       Object.assign(ingest, { step_out: 'requeued', extractor_rank: Math.min(ingest.extractor_rank ?? 0, rank), updated_at: updatedAt });
       return success();
     }
+    if (this.sql.startsWith('UPDATE hn_ingests SET suppressed_at = ?') && this.sql.includes('WHERE hn_author = ?')) {
+      const [suppressedAt, updatedAt, author] = this.values;
+      const ingests = [...this.database.hnIngests.values()].filter((row) => row.hn_author.toLowerCase() === author.toLowerCase());
+      ingests.forEach((row) => Object.assign(row, { suppressed_at: suppressedAt, updated_at: updatedAt }));
+      return success(ingests.length);
+    }
+    if (this.sql.startsWith("UPDATE profile_revisions SET status = 'archived'") && this.sql.includes('WHERE submission_id IN')) {
+      const [updatedAt, identity] = this.values;
+      const ingests = [...this.database.hnIngests.values()].filter((row) => this.sql.includes('WHERE hn_author = ?')
+        ? row.hn_author.toLowerCase() === identity.toLowerCase() : row.submission_id === identity);
+      const revisions = ingests.map((row) => this.database.revisions.get(row.submission_id)).filter(Boolean);
+      revisions.forEach((row) => Object.assign(row, { status: 'archived', published_at: null, updated_at: updatedAt }));
+      return success(revisions.length);
+    }
     if (this.sql === 'UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?') {
       const [suppressedAt, updatedAt, submissionId] = this.values;
       const ingest = [...this.database.hnIngests.values()].find((row) => row.submission_id === submissionId);
@@ -674,6 +716,7 @@ class MemoryStatement {
         companiesJson,
         skillsJson,
         dateRangesJson,
+        experienceJson,
         updatedAt,
         submissionId
       ] = this.values;
@@ -694,6 +737,8 @@ class MemoryStatement {
         companies_json: companiesJson,
         skills_json: skillsJson,
         date_ranges_json: dateRangesJson,
+        experience_json: experienceJson,
+        experienceJson,
         updated_at: updatedAt
       });
       return success();
@@ -728,6 +773,7 @@ function select(value, keys) {
 
 function hnJoinColumns(ingest) {
   return {
+    hn_author: ingest?.hn_author ?? null,
     hn_permalink: ingest?.hn_permalink ?? null,
     thread_month: ingest?.thread_month ?? null,
     extractor_rank: ingest?.extractor_rank ?? null,

@@ -4,7 +4,8 @@
 // first. Fetches go to a local server standing in for the unblocker shim via UNBLOCKER_URL.
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +14,6 @@ import test from 'node:test';
 import { attachResumes, chooseIndex } from '../scripts/extract-hn-profiles/hn-attach-resumes.mjs';
 import { documentToFollow, resumeText } from '../scripts/extract-hn-profiles/hn-resume-text.mjs';
 import { checkDrafts, expectedFields } from '../scripts/extract-hn-profiles/hn-check-drafts.mjs';
-import { mergeDrafts } from '../scripts/extract-hn-profiles/hn-merge-drafts.mjs';
 import { labelledResumeIndex, screenedLinks } from '../scripts/extract-hn-profiles/hn-untrusted.mjs';
 
 const DRIVE = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456/view?usp=sharing';
@@ -92,26 +92,6 @@ test('an empty name or employer list with a resume attached is a miss worth a re
   ]);
 });
 
-test('a second pass replaces a first only when it knows at least as much, and never retires', () => {
-  const base = [
-    { nonce: 'a', injection: false, draft: { name: '', role: 'SRE', summary: 's', companies: [] } },
-    { nonce: 'b', injection: false, draft: { name: 'B', role: 'Dev', summary: 's', companies: ['X'] } },
-    { nonce: 'c', injection: true, draft: { name: '', role: 'PM', summary: 's', companies: [] } }
-  ];
-  const over = [
-    { nonce: 'a', injection: false, draft: { name: 'A', role: 'SRE', summary: 's', companies: ['Acme'] } },
-    { nonce: 'b', injection: false, draft: { name: '', role: 'Dev', summary: 's', companies: [] } },
-    { nonce: 'c', injection: false, draft: null },
-    { nonce: 'd', injection: false, draft: { name: 'D', role: 'x', summary: 's', companies: [] } }
-  ];
-  const merged = Object.fromEntries(mergeDrafts(base, over).map((entry) => [entry.nonce, entry]));
-  assert.equal(merged.a.draft.name, 'A');
-  assert.equal(merged.b.draft.name, 'B');
-  assert.equal(merged.c.draft.role, 'PM');
-  assert.equal(merged.c.injection, true);
-  assert.equal(merged.d.draft.name, 'D');
-});
-
 // A stand-in for the unblocker: any POST /fetch answers with a resume-shaped HTML page.
 async function withFetchServer(fn) {
   const hits = [];
@@ -167,6 +147,42 @@ test('attach seals the fetched text into the item and reuses it on the next pass
     assert.equal(batch.items[1].resumeSource, 'model');
     assert.deepEqual(hits, ['https://cv.example.org/jane.pdf', 'https://cv.example.org/other.pdf']);
   });
+});
+
+test('an education retry preserves other retry fields without making school a strict requirement', () => {
+  const out = mkdtempSync(join(tmpdir(), 'hncd-education-retry-'));
+  const draft = { name: 'Example Candidate', role: 'Engineer', summary: 'Builds systems.', companies: ['Example Company'], universities: [] };
+  const items = [
+    { nonce: 'school', text: '', links: [], resume: '## Education\nExample University' },
+    { nonce: 'filled', text: '', links: [], resume: 'Education\nExample University' },
+    { nonce: 'bare', text: '', links: [], resume: 'Engineering work and projects.' },
+    { nonce: 'gaps', text: '', links: [], resume: 'Academic background:\nExample University' },
+    { nonce: 'retired', text: '', links: [], resume: 'Education\nExample University' }
+  ];
+  const drafts = [
+    { nonce: 'school', draft },
+    { nonce: 'filled', draft: { ...draft, universities: ['Example University'] } },
+    { nonce: 'bare', draft },
+    { nonce: 'gaps', draft: { ...draft, name: '', companies: [] } },
+    { nonce: 'retired', draft: null }
+  ];
+  const batch = { batch: 1, items };
+  const check = checkDrafts(batch, drafts);
+  assert.deepEqual(check.flagged.map((f) => f.nonce), ['gaps']);
+  for (const [name, data] of Object.entries({ batch, drafts, check })) {
+    writeFileSync(join(out, `${name}.json`), JSON.stringify(data));
+  }
+  const subset = join(out, 'retry.json');
+  execFileSync(process.execPath, [
+    new URL('../scripts/extract-hn-profiles/hn-attach-resumes.mjs', import.meta.url).pathname,
+    '--batch', join(out, 'batch.json'), '--out', out, '--drafts', join(out, 'drafts.json'),
+    '--retry', join(out, 'check.json'), '--write', subset
+  ]);
+  const written = JSON.parse(readFileSync(subset, 'utf8')).items;
+  assert.deepEqual(written.map((item) => [item.nonce, item.expected]), [
+    ['school', ['universities']], ['gaps', ['name', 'companies', 'universities']]
+  ]);
+  assert.deepEqual(checkDrafts(batch, drafts).flagged.map((f) => f.nonce), ['gaps']);
 });
 
 test('a fetch miss is counted by reason and never throws', async () => {

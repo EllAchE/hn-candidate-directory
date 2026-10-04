@@ -123,4 +123,45 @@ function isPaymentCardLike(value) {
   return sum % 10 === 0;
 }
 
-export { REDACTION_MARKER, redactSensitiveText, sanitizeCandidateDraft };
+function validExperience(value) {
+  return value === null || (value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 2 && Object.hasOwn(value, 'minYears') && Object.hasOwn(value, 'maxYears')
+    && Number.isFinite(value.minYears) && value.minYears >= 0 && value.minYears <= 80
+    && (value.maxYears === null || (Number.isFinite(value.maxYears) && value.maxYears >= value.minYears && value.maxYears <= 80)));
+}
+
+function parseExperience(value) {
+  const match = /^\s*(\d{1,2}(?:\.\d{1,2})?)(?:\s*([-–—]|to)\s*(\d{1,2}(?:\.\d{1,2})?)|(\+))?\s*(?:years?(?:\s+of\s+(?:professional|work)\s+experience)?)?\s*$/i.exec(value);
+  if (!match) return null;
+  const minYears = Number(match[1]);
+  const maxYears = match[4] ? null : Number(match[3] ?? match[1]);
+  const experience = { minYears, maxYears };
+  return validExperience(experience) ? experience : null;
+}
+
+function extractExperience(sourceText) {
+  const declared = [...sourceText.matchAll(/^(?:years of (?:professional )?experience|professional experience|work experience|experience|YOE):\s*(.+)$/gim)]
+    .map((match) => parseExperience(match[1])).filter(Boolean);
+  const totals = [...sourceText.matchAll(/(?:^|\bI (?:have|bring) )\s*(\d{1,2}(?:\.\d{1,2})?(?:\s*(?:[-–—]|to)\s*\d{1,2}(?:\.\d{1,2})?|\+)?)[ ]+years? of (?:total |overall )?(?:(?:professional|work|industry) )?experience\b/gi)]
+    .map((match) => parseExperience(match[1])).filter(Boolean);
+  const distinct = [...new Map([...declared, ...totals].map((value) => [JSON.stringify(value), value])).values()];
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+function experienceLabel(value) {
+  if (!value || !validExperience(value)) return '';
+  return value.maxYears === null ? `${value.minYears}+ years` : value.minYears === value.maxYears
+    ? `${value.minYears} ${value.minYears === 1 ? 'year' : 'years'}` : `${value.minYears}–${value.maxYears} years`;
+}
+
+function experienceBands(value) {
+  if (!value || !validExperience(value)) return ['Unknown'];
+  const labels = ['Experience provided'];
+  if (value.maxYears !== null && value.maxYears < 2) labels.push('Under 2 years');
+  for (const threshold of [2, 5, 10]) {
+    if (value.minYears >= threshold) labels.push(`${threshold}+ years`);
+  }
+  return labels;
+}
+
+export { REDACTION_MARKER, redactSensitiveText, sanitizeCandidateDraft, validExperience, parseExperience, extractExperience, experienceLabel, experienceBands };

@@ -1,4 +1,4 @@
-import { redactSensitiveText, sanitizeCandidateDraft } from './sensitive-data.js';
+import { redactSensitiveText, sanitizeCandidateDraft, validExperience, extractExperience } from './sensitive-data.js';
 
 // Outbound fetches must never follow a redirect, but `redirect: 'error'` is not implementable at
 // the edge and workerd throws a TypeError on it before the request leaves. Node and Bun both accept
@@ -91,7 +91,7 @@ const HN_LOCATION_LABELS = Object.freeze(['location', 'based in', 'based', 'city
 const HN_REMOTE_LABELS = Object.freeze(['remote', 'remote work', 'remote?']);
 const HN_ROLE_LABELS = Object.freeze(['role', 'title', 'position', 'seeking', 'looking for', 'interested in']);
 const HN_SKILL_LABELS = Object.freeze(['technologies', 'technology', 'tech', 'tech stack', 'stack', 'skills', 'tools']);
-const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'school', 'schools', 'degree']);
+const HN_UNIVERSITY_LABELS = Object.freeze(['education', 'university', 'universities', 'college', 'colleges', 'school', 'schools', 'degree']);
 // 'experience' is deliberately excluded: candidates use it for years-of-experience ("Experience:
 // 4+ years"), and mapping it here fed that phrase into the companies field instead of a name.
 const HN_COMPANY_LABELS = Object.freeze(['companies', 'company', 'previously', 'employers', 'worked at']);
@@ -196,7 +196,7 @@ const CONTENT_SECURITY_POLICY = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data:",
+  "img-src 'self' data: https://www.google.com https://*.gstatic.com",
   "connect-src 'self'",
   'upgrade-insecure-requests'
 ].join('; ');
@@ -1037,7 +1037,7 @@ async function updateReview(request, env, submissionId) {
     `UPDATE profile_revisions
         SET name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
             hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
-            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, updated_at = ?
+            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, experience_json = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
     .bind(
@@ -1055,6 +1055,7 @@ async function updateReview(request, env, submissionId) {
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
       JSON.stringify(draft.dateRanges),
+      JSON.stringify(draft.experience ?? null),
       updatedAt,
       submissionId
     )
@@ -1096,7 +1097,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
     `UPDATE profile_revisions
         SET status = 'published', name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
             hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
-            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, published_at = ?, updated_at = ?
+            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, experience_json = ?, published_at = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
     .bind(
@@ -1114,6 +1115,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
       JSON.stringify(approvedDraft.companies),
       JSON.stringify(approvedDraft.skills),
       JSON.stringify(approvedDraft.dateRanges),
+      JSON.stringify(approvedDraft.experience ?? null),
       publishedAt,
       publishedAt,
       submissionId
@@ -1167,7 +1169,7 @@ async function getReviewRevision(env, submissionId) {
   return env.DB.prepare(
     `SELECT id, status, name, role, summary, location, work_mode, availability,
             hn_username, linkedin_url, github_url, personal_url,
-            universities_json, companies_json, skills_json, date_ranges_json, updated_at, published_at
+            universities_json, companies_json, skills_json, date_ranges_json, experience_json, updated_at, published_at
        FROM profile_revisions
       WHERE submission_id = ?`
   ).bind(submissionId).first();
@@ -1188,30 +1190,74 @@ async function listPublishedCandidates(request, env) {
 
   let result;
   try {
-    const hnUsernameFilter = hnUsername ? 'AND r.hn_username = ? COLLATE NOCASE' : '';
-    const bindings = hnUsername ? [hnUsername, limit, offset] : [limit, offset];
-    result = await env.DB.prepare(
-      `SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
-              r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
-              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
-              i.hn_permalink, i.thread_month, i.extractor_rank
-         FROM profile_revisions r
-         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
-        WHERE r.status = 'published' AND i.suppressed_at IS NULL
-          ${hnUsernameFilter}
-        ORDER BY r.published_at DESC, r.id
-        LIMIT ? OFFSET ?`
-    ).bind(...bindings).all();
+    result = await publishedCandidateRows(env, limit, offset, hnUsername);
   } catch (error) {
     return storageUnavailable('listPublishedCandidates', error);
   }
 
-  const pageWasFull = result.results.length === limit;
+  const candidates = mergePublishedCandidates(result.results);
+  const pageWasFull = candidates.length === limit;
   const nextOffset = pageWasFull && offset + limit < MAX_PUBLIC_CANDIDATES ? offset + limit : null;
   // A full final page means the ceiling, not the data, ended the listing, so say so rather than
   // letting the reader mistake a capped list for the whole directory.
   const truncated = pageWasFull && nextOffset === null;
-  return json({ candidates: result.results.map(toPublicCandidate), nextOffset, truncated });
+  return json({ candidates, nextOffset, truncated });
+}
+
+async function publishedCandidateRows(env, limit, offset = 0, hnUsername = '') {
+  const usernameFilter = hnUsername ? "AND COALESCE(NULLIF(i.hn_author, ''), r.hn_username) = ? COLLATE NOCASE" : '';
+  return env.DB.prepare(
+    `WITH eligible AS (
+       SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
+              r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
+              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.experience_json, r.published_at,
+              i.hn_author, i.hn_permalink, i.thread_month, i.extractor_rank,
+              COALESCE(i.comment_created_at, r.published_at) AS source_created_at,
+              CASE WHEN i.hn_permalink IS NOT NULL AND TRIM(COALESCE(i.hn_author, r.hn_username, '')) <> ''
+                   THEN 'hn:' || LOWER(TRIM(COALESCE(NULLIF(i.hn_author, ''), r.hn_username)))
+                   ELSE 'profile:' || r.id END AS person_key
+         FROM profile_revisions r
+         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
+        WHERE r.status = 'published' AND i.suppressed_at IS NULL
+          AND (i.hn_author IS NULL OR LOWER(TRIM(i.hn_author)) NOT IN (
+            SELECT LOWER(TRIM(removed.hn_author)) FROM hn_ingests removed
+             WHERE removed.suppressed_at IS NOT NULL AND TRIM(removed.hn_author) <> ''
+          ))
+          ${usernameFilter}
+     ), ranked AS (
+       SELECT eligible.*, ROW_NUMBER() OVER (
+         PARTITION BY person_key ORDER BY source_created_at DESC, id
+       ) AS person_rank FROM eligible
+     ), page AS (
+       SELECT person_key, source_created_at, id FROM ranked WHERE person_rank = 1
+        ORDER BY source_created_at DESC, id LIMIT ? OFFSET ?
+     )
+     SELECT ranked.* FROM ranked JOIN page ON page.person_key = ranked.person_key
+      ORDER BY page.source_created_at DESC, page.id, ranked.person_rank`
+  ).bind(...(hnUsername ? [hnUsername, limit, offset] : [limit, offset])).all();
+}
+
+function mergePublishedCandidates(rows) {
+  const people = new Map();
+  for (const row of rows) {
+    const candidate = toPublicCandidate({ ...row, hn_username: row.hn_author || row.hn_username });
+    const key = row.person_key || `profile:${row.id}`;
+    const existing = people.get(key);
+    const source = candidate.sourceUrl ? { label: candidate.source, url: candidate.sourceUrl } : null;
+    if (!existing) {
+      people.set(key, { ...candidate, sources: source ? [source] : [] });
+      continue;
+    }
+    if (!isProvidedFacetValue(existing.name) && isProvidedFacetValue(candidate.name)) existing.name = candidate.name;
+    for (const field of ['universities', 'companies', 'skills', 'dateRanges']) {
+      const values = [...existing[field], ...candidate[field]].filter(isProvidedFacetValue);
+      existing[field] = [...new Map(values.map((value) => [value.toLowerCase().trim(), value])).values()];
+    }
+    existing.university = existing.universities[0] || HN_UNKNOWN;
+    existing.processed &&= candidate.processed;
+    if (source && !existing.sources.some((item) => item.url === source.url)) existing.sources.push(source);
+  }
+  return [...people.values()];
 }
 
 function clampCandidateOffset(raw) {
@@ -1251,15 +1297,7 @@ async function summarizePublishedCandidates(request, env) {
 
   let result;
   try {
-    result = await env.DB.prepare(
-      `SELECT r.location, r.work_mode, r.availability,
-              r.universities_json, r.companies_json, r.skills_json,
-              i.hn_permalink, i.extractor_rank
-         FROM profile_revisions r
-         LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
-        WHERE r.status = 'published' AND i.suppressed_at IS NULL
-        LIMIT ?`
-    ).bind(MAX_PUBLIC_CANDIDATES).all();
+    result = await publishedCandidateRows(env, MAX_PUBLIC_CANDIDATES);
   } catch (error) {
     return storageUnavailable('summarizePublishedCandidates', error);
   }
@@ -1268,22 +1306,10 @@ async function summarizePublishedCandidates(request, env) {
   const universities = new Set();
   const facets = { processed: 0, availability: 0, mode: 0, location: 0, university: 0, company: 0, skill: 0 };
   let processed = 0;
-  for (const row of result.results) {
-    // The listing publishes sanitized values, so the summary has to count the sanitized forms or a
-    // redaction would split one location into two.
-    const { draft } = sanitizeCandidateDraft({
-      name: '',
-      role: '',
-      summary: '',
-      location: row.location,
-      workMode: row.work_mode,
-      availability: row.availability,
-      universities: parseList(row.universities_json),
-      companies: parseList(row.companies_json),
-      skills: parseList(row.skills_json),
-      dateRanges: []
-    });
-    const profileProcessed = isProcessedCandidateRow(row);
+  const candidates = mergePublishedCandidates(result.results);
+  for (const candidate of candidates) {
+    const draft = { ...candidate, workMode: candidate.mode };
+    const profileProcessed = candidate.processed;
     if (profileProcessed) processed += 1;
     facets.processed += 1;
     facets.availability += Number(isProvidedFacetValue(draft.availability));
@@ -1298,13 +1324,13 @@ async function summarizePublishedCandidates(request, env) {
     }
   }
 
-  return json({ candidates: result.results.length, processed, locations: locations.size, universities: universities.size, facets });
+  return json({ candidates: candidates.length, processed, locations: locations.size, universities: universities.size, facets });
 }
 
 // Deliberately unauthenticated. A profile built from a Hacker News comment is published without
 // the subject ever asking, so they never receive the management token every other write path
 // requires -- gating removal behind it would leave them with no way out at all. The asymmetry is
-// intentional: a wrongful removal hides one public post from one directory and an operator can
+// intentional: a wrongful removal hides one account from one directory and an operator can
 // restore it, while a wrongful retention keeps someone listed against their wishes.
 async function requestCandidateRemoval(request, env, candidateId) {
   const limited = await enforceQuota(env, 'removalRequest', await clientKey(env, request));
@@ -1313,7 +1339,7 @@ async function requestCandidateRemoval(request, env, candidateId) {
   let row;
   try {
     row = await env.DB.prepare(
-      `SELECT r.id, r.submission_id, r.status, i.hn_item_id, i.suppressed_at
+      `SELECT r.id, r.submission_id, r.status, i.hn_item_id, i.hn_author, i.suppressed_at
          FROM profile_revisions r
          LEFT JOIN hn_ingests i ON i.submission_id = r.submission_id
         WHERE r.id = ?`
@@ -1326,19 +1352,20 @@ async function requestCandidateRemoval(request, env, candidateId) {
 
   if (!row) return json({ error: 'candidate_not_found' }, 404);
   if (!row.hn_item_id) return json({ error: 'token_managed_candidate' }, 409);
-  if (row.suppressed_at || row.status === 'archived') return json({ removed: true });
+  if (!row.hn_author && (row.suppressed_at || row.status === 'archived')) return json({ removed: true });
 
-  const removedAt = new Date().toISOString();
+  const removedAt = row.suppressed_at || new Date().toISOString();
   try {
+    const accountFilter = row.hn_author ? 'hn_author = ? COLLATE NOCASE' : 'submission_id = ?';
+    const identity = row.hn_author || row.submission_id;
     await env.DB.batch([
-      env.DB.prepare('UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE submission_id = ?').bind(
-        removedAt,
-        removedAt,
-        row.submission_id
+      env.DB.prepare(`UPDATE hn_ingests SET suppressed_at = ?, updated_at = ? WHERE ${accountFilter}`).bind(
+        removedAt, removedAt, identity
       ),
       env.DB.prepare(
-        "UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ? WHERE id = ?"
-      ).bind(removedAt, row.id)
+        `UPDATE profile_revisions SET status = 'archived', published_at = NULL, updated_at = ?
+          WHERE submission_id IN (SELECT submission_id FROM hn_ingests WHERE ${accountFilter})`
+      ).bind(removedAt, identity)
     ]);
   } catch (error) {
     return storageUnavailable('requestCandidateRemoval', error);
@@ -1483,15 +1510,15 @@ async function processSubmissionMessage(message, env) {
         `INSERT INTO profile_revisions (
            id, submission_id, status, name, role, summary, location, work_mode, availability,
            hn_username, linkedin_url, github_url, personal_url,
-           universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at
-         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           universities_json, companies_json, skills_json, date_ranges_json, experience_json, created_at, updated_at
+         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(submission_id) DO UPDATE SET
            name = excluded.name, role = excluded.role, summary = excluded.summary,
            location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
            hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
            github_url = excluded.github_url, personal_url = excluded.personal_url,
            universities_json = excluded.universities_json, companies_json = excluded.companies_json,
-           skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
+           skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json, experience_json = excluded.experience_json,
            updated_at = excluded.updated_at`
       ).bind(
         revisionId,
@@ -1510,6 +1537,7 @@ async function processSubmissionMessage(message, env) {
         JSON.stringify(draft.companies),
         JSON.stringify(draft.skills),
         JSON.stringify(draft.dateRanges),
+        JSON.stringify(draft.experience ?? null),
         completedAt,
         completedAt
       ),
@@ -1671,6 +1699,12 @@ async function processHnCommentMessage(message, env) {
   }
 }
 
+async function isSuppressedHnAuthor(env, author) {
+  return Boolean(await env.DB.prepare(
+    'SELECT hn_item_id FROM hn_ingests WHERE hn_author = ? COLLATE NOCASE AND suppressed_at IS NOT NULL LIMIT 1'
+  ).bind(author).first());
+}
+
 async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRACTOR) {
   const record = await toHnRecord(null, comment);
   if (!record) return 'skipped_invalid';
@@ -1680,7 +1714,7 @@ async function ingestHnComment(env, comment, extractor = DETERMINISTIC_HN_EXTRAC
   )
     .bind(record.itemId)
     .first();
-  if (existing?.suppressed_at) return 'skipped_suppressed';
+  if (existing?.suppressed_at || await isSuppressedHnAuthor(env, record.author)) return 'skipped_suppressed';
   if (existing && existing.comment_hash === record.commentHash) return 'unchanged';
 
   const draft = extractor.extract(record);
@@ -1766,7 +1800,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
 
   const hnItemId = record.itemId;
   const state = known.get(hnItemId);
-  if (state?.suppressed_at) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
+  if (state?.suppressed_at || await isSuppressedHnAuthor(env, record.author)) return { result: { hnItemId, outcome: 'skipped_suppressed' }, statements: [] };
   if (entry.hold === true) return planStepOut(env, hnItemId, state, entry, 'held', extractor, pushedAt);
 
   const resumeUrl = hnResumeUrl(entry?.resumeUrl);
@@ -1776,7 +1810,7 @@ async function planPushedProfile(env, entry, record, known, extractor, pushedAt)
     return { result: { hnItemId, outcome: 'invalid_resume_url' }, statements: [] };
   }
 
-  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text) });
+  const prepared = pushedDraft(entry?.draft, { hnUsername: record.author, ...hnProfileLinks(record.text, record.commentText) });
   if (!prepared) return { result: { hnItemId, outcome: 'invalid_draft' }, statements: [] };
 
   const provenance = { rank: extractor.rank, resumeUrl, resumeFetchedAt };
@@ -2164,16 +2198,16 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
       `INSERT INTO profile_revisions (
          id, submission_id, status, name, role, summary, location, work_mode, availability,
          hn_username, linkedin_url, github_url, personal_url,
-         universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at,
+         universities_json, companies_json, skills_json, date_ranges_json, experience_json, created_at, updated_at, published_at,
          extractor, extractor_rank
-       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(submission_id) DO UPDATE SET
          name = excluded.name, role = excluded.role, summary = excluded.summary,
          location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
          hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
          github_url = excluded.github_url, personal_url = excluded.personal_url,
          universities_json = excluded.universities_json, companies_json = excluded.companies_json,
-         skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
+         skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json, experience_json = excluded.experience_json,
          updated_at = excluded.updated_at,
          extractor = excluded.extractor, extractor_rank = excluded.extractor_rank
        WHERE profile_revisions.status = 'published'
@@ -2195,6 +2229,7 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
       JSON.stringify(draft.dateRanges),
+      JSON.stringify(draft.experience ?? null),
       ingestedAt,
       ingestedAt,
       record.createdAt,
@@ -2219,7 +2254,7 @@ function hnIngestStatement(env, record, submissionId, ingestedAt, provenance = {
        thread_month = excluded.thread_month, comment_hash = excluded.comment_hash,
        resume_url = COALESCE(excluded.resume_url, hn_ingests.resume_url),
        resume_fetched_at = COALESCE(excluded.resume_fetched_at, hn_ingests.resume_fetched_at),
-       -- The rank records the best extractor that has read *this* text. A changed comment is a new
+       -- The rank records the best extractor that has read this evidence. A changed comment is a new
        -- reading, so it drops back to whatever just wrote it and returns to the work queue.
        extractor_rank = CASE WHEN hn_ingests.comment_hash = excluded.comment_hash
                              THEN MAX(hn_ingests.extractor_rank, excluded.extractor_rank)
@@ -2272,7 +2307,7 @@ async function toHnRecord(thread, hit) {
     comment,
     text,
     permalink: `https://news.ycombinator.com/item?id=${itemId}`,
-    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION)
+    commentHash: await hnCommentHash(text, HN_EXTRACTION_VERSION, hnProfileLinks(text, commentHtml))
   };
 }
 
@@ -2280,8 +2315,10 @@ async function toHnRecord(thread, hit) {
 // thread-level queue filter and the per-comment write guard -- pick up a bump without a schema
 // change. Rows written before the envelope existed hold a bare hash of the text, so version 1 is
 // itself the first invalidation.
-function hnCommentHash(text, version) {
-  return hashToken(`hn-extraction-v${version}\n${text}`);
+function hnCommentHash(text, version, links = {}) {
+  const evidence = [links.linkedinUrl || '', links.githubUrl || '', links.personalUrl || ''];
+  const ownership = evidence.some(Boolean) ? `\nowned-profile-links:${JSON.stringify(evidence)}` : '';
+  return hashToken(`hn-extraction-v${version}\n${text}${ownership}`);
 }
 
 const DETERMINISTIC_HN_EXTRACTOR = Object.freeze({
@@ -2330,30 +2367,87 @@ function extractHnProfile(record) {
     workMode: hnWorkMode(valueFor(HN_REMOTE_LABELS), record.text),
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
-    ...hnProfileLinks(record.text),
-    universities: listFor(HN_UNIVERSITY_LABELS),
+    ...hnProfileLinks(record.text, record.commentText),
+    experience: extractExperience(record.text),
+    universities: educationUniversities(valueFor),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
 }
 
-// `decodeHnCommentText` has already unwrapped every anchor to its bare href, so the links a
-// candidate published are plain text here. First match per field wins: a comment that names two
-// GitHub accounts is naming a project alongside a profile, and the profile is written first.
-function hnProfileLinks(text) {
-  const links = { linkedinUrl: '', githubUrl: '', personalUrl: '' };
-
-  for (const match of String(text || '').matchAll(HN_LINK_PATTERN)) {
-    const candidate = match[0].replace(/[.,;:)\]]+$/, '');
-    links.linkedinUrl ||= linkedinProfileUrl(candidate) || '';
-    links.githubUrl ||= githubProfileUrl(candidate) || '';
-    if (!links.personalUrl && !HN_NON_PERSONAL_HOSTS.has(hostnameOf(candidate))) {
-      links.personalUrl = personalProfileUrl(candidate) || '';
+// A project, employer, or colleague URL is not evidence of the candidate's own profile.
+function hnProfileLinks(_text, html) {
+  const ownershipHtml = hnOwnershipHtml(html);
+  const anchorPattern = /<a\b[^>]{0,512}\bhref\s*=\s*"([^"]{0,2048})"[^>]{0,512}>([\s\S]{0,4096}?)<\/a>/gi;
+  const labeledHtml = ownershipHtml.replace(anchorPattern, (_, href, label) => `${href} ${decodeHnCommentText(label)}`);
+  const urls = { linkedinUrl: [], githubUrl: [], personalUrl: [] };
+  const ambiguous = { linkedinUrl: [], githubUrl: [], personalUrl: [] };
+  for (const line of decodeHnCommentText(labeledHtml).split(/[\n|]/)) {
+    const labeled = line.trim().match(/^([^:]{1,80})\s*:\s*(.*)$/);
+    if (!labeled) continue;
+    const field = hnProfileLinkField(labeled[1].trim());
+    if (!field) continue;
+    const matches = [...labeled[2].matchAll(HN_LINK_PATTERN)];
+    const context = labeled[2].replace(HN_LINK_PATTERN, '').replace(/[,;.:()\[\]]/g, '').trim();
+    const target = !context || hnProfileLinkField(context) === field ? urls : ambiguous;
+    target[field].push(...matches.map((match) => match[0]));
+  }
+  for (const paragraph of ownershipHtml.split(/<\/?(?:p|br|div|li|ul|ol|pre)\b[^>]{0,512}>|[\r\n]/gi)) {
+    const context = decodeHnCommentText(paragraph.replace(anchorPattern, ' '));
+    if (hnAnchorOwnershipConflict(context)) continue;
+    for (const anchor of paragraph.matchAll(anchorPattern)) {
+      const label = decodeHnCommentText(anchor[2]);
+      const field = /^(?:my|personal) /i.test(label) ? hnProfileLinkField(label) : '';
+      if (field) urls[field].push(decodeHnCommentText(anchor[1]));
+      if (/^my profile$/i.test(label)) {
+        urls.linkedinUrl.push(decodeHnCommentText(anchor[1]));
+        urls.githubUrl.push(decodeHnCommentText(anchor[1]));
+      }
     }
   }
+  const canonicalizers = { linkedinUrl: linkedinProfileUrl, githubUrl: githubProfileUrl, personalUrl: personalProfileUrl };
+  return Object.fromEntries(Object.entries(urls).map(([field, values]) => {
+    const canonicalize = (url) => {
+      const value = url.replace(/[.,;:)\]]+$/, '');
+      if (field === 'personalUrl' && HN_NON_PERSONAL_HOSTS.has(hostnameOf(value))) return null;
+      return canonicalizers[field](value);
+    };
+    const unclear = new Set(ambiguous[field].map(canonicalize).filter(Boolean));
+    const profiles = new Set(values.map(canonicalize).filter((url) => url && !unclear.has(url)));
+    return [field, profiles.size === 1 ? [...profiles][0] : ''];
+  }));
+}
 
-  return links;
+// Self-labeled anchors can belong to another speaker; their paragraph supplies that attribution.
+function hnAnchorOwnershipConflict(context) {
+  return /\b(?:not\s+(?:my|mine)|isn['’]t\s+mine)\b/i.test(context)
+    || /\b(?:my|a|the|another)\s+(?:colleague|coworker|co-worker|friend|employer|client)(?:['’]s\b|\s+(?:shares?|links?|owns?|has|uses?|posts?|wrote|said)\b)/i.test(context);
+}
+
+function hnProfileLinkField(label) {
+  if (/^(?:(?:my|personal) )?linkedin(?: profile)?$/i.test(label)) return 'linkedinUrl';
+  if (/^(?:(?:my|personal) )?github(?: profile)?$/i.test(label)) return 'githubUrl';
+  if (/^(?:website|portfolio|personal (?:website|site|url)|my (?:website|site|portfolio))$/i.test(label)) return 'personalUrl';
+  return '';
+}
+
+function hnOwnershipHtml(html) {
+  const blocked = [];
+  let cursor = 0;
+  let ownHtml = '';
+  for (const tag of html.matchAll(/<\/?(blockquote|script|style)\b[^>]{0,512}>/gi)) {
+    if (!blocked.length) ownHtml += html.slice(cursor, tag.index);
+    const name = tag[1].toLowerCase();
+    if (tag[0].startsWith('</')) {
+      if (blocked.at(-1) === name) blocked.pop();
+    } else if (!blocked.length || blocked.at(-1) === 'blockquote') {
+      if (!blocked.length) ownHtml += '\n';
+      blocked.push(name);
+    }
+    cursor = tag.index + tag[0].length;
+  }
+  return blocked.length ? ownHtml : ownHtml + html.slice(cursor);
 }
 
 function hostnameOf(value) {
@@ -2572,15 +2666,37 @@ function extractProfile(sourceText) {
     location: valueFor('location') || 'Location needs review',
     workMode: valueFor('work mode', 'work-mode', 'mode') || (/\bremote\b/i.test(sourceText) ? 'Remote' : 'Needs review'),
     availability: valueFor('availability') || 'Needs review',
-    universities: listFor('universities', 'university', 'education', 'school', 'schools'),
-    companies: listFor('companies', 'company', 'previously', 'experience', 'employers'),
+    experience: extractExperience(sourceText),
+    universities: educationUniversities((labels) => valueFor(...labels)),
+    companies: listFor('companies', 'company', 'previously', 'employers'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
 }
 
+function educationUniversities(valueFor) {
+  const independent = /\b(?:self[- ]taught|self[- ]study|boot\s?camps?|MOOCs?|courses?|certificates?|open\s?courseware|tutorials?|Coursera|Udemy|edX|freeCodeCamp)\b/i;
+  const courseCode = /\b[A-Z]{2,4}[- ]?\d{2,4}[a-z]?\b/;
+  const events = /\b(?:talks?|conferences?|seminars?|workshops?|webinars?|lectures?|events?)\b/i;
+  const nonTertiary = /\b(?:high|secondary|elementary|primary|middle)\s+schools?\b/i;
+  const absence = /^(?:none|n\/?a|not applicable|not provided|unknown|no (?:university|college|formal education))$/i;
+  const supported = (value) => value && !independent.test(value) && !courseCode.test(value) &&
+    !events.test(value) && !nonTertiary.test(value) && !absence.test(value);
+  const declared = splitList(valueFor(['universities', 'university', 'colleges', 'college', 'schools', 'school']));
+  const described = valueFor(['education', 'degree']).split(/[;|]/).map((value) => value.trim());
+  const attended = described.map((value) => {
+    if (independent.test(value) || courseCode.test(value)) return '';
+    const attendance = value.match(/^(?:attended|graduated from|enrolled at)\s+(.+)$/i);
+    const degree = value.match(/^(?:BA|BS|BSc|MA|MS|MSc|PhD|bachelor|master|doctorate)\b[^,;|]*?(?:\s+(?:at|from)\s+|,\s*)(.+)$/i);
+    const institution = (attendance || degree)?.[1] || '';
+    return institution.replace(/,\s*\d{4}(?:\s*(?:[-–—]|to)\s*(?:\d{4}|present))?\s*$/i, '').trim();
+  });
+  return unique([...declared, ...attended].filter(supported));
+}
+
 function validateDraft(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.experience !== undefined && !validExperience(value.experience)) return null;
   const text = (key, maxLength) => {
     if (typeof value[key] !== 'string') return null;
     const normalized = normalizeStoredText(value[key]);
@@ -2624,7 +2740,7 @@ function validateDraft(value) {
     skills: list('skills'),
     dateRanges: list('dateRanges')
   };
-  return Object.values(draft).some((field) => field === null) ? null : draft;
+  return Object.values(draft).some((field) => field === null) ? null : { ...draft, experience: value.experience ?? null };
 }
 
 // Bidi overrides and zero-width characters survive escaping and reorder or hide text in every consumer.
@@ -2640,6 +2756,7 @@ function normalizeStoredText(value, maxChars = Number.MAX_SAFE_INTEGER) {
 function boundedDraft(draft) {
   return {
     ...draft,
+    experience: validExperience(draft.experience ?? null) ? draft.experience ?? null : null,
     name: normalizeStoredText(draft.name, DRAFT_FIELD_LIMITS.name),
     role: normalizeStoredText(draft.role, DRAFT_FIELD_LIMITS.role),
     summary: normalizeStoredText(draft.summary, DRAFT_FIELD_LIMITS.summary),
@@ -2694,10 +2811,11 @@ function toPublicCandidate(row) {
     companies: sanitized.companies,
     skills: sanitized.skills,
     dateRanges: sanitized.dateRanges,
+    experience: sanitized.experience,
     source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
     sourceUrl: fromHackerNews ? row.hn_permalink : '',
     processed: isProcessedCandidateRow(row),
-    posted: daysSince(row.published_at),
+    posted: daysSince(row.source_created_at || row.published_at),
     publishedAt: row.published_at
   };
 }
@@ -2719,6 +2837,16 @@ function daysSince(timestamp) {
   return Math.max(0, Math.floor((Date.now() - published) / 86_400_000));
 }
 
+function storedExperience(raw) {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw);
+    return validExperience(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function candidateDraftFromRow(row) {
   return sanitizeCandidateDraft({
     name: row.name,
@@ -2734,7 +2862,8 @@ function candidateDraftFromRow(row) {
     universities: parseList(row.universities_json),
     companies: parseList(row.companies_json),
     skills: parseList(row.skills_json),
-    dateRanges: parseList(row.date_ranges_json)
+    dateRanges: parseList(row.date_ranges_json),
+    experience: storedExperience(row.experience_json)
   }).draft;
 }
 
