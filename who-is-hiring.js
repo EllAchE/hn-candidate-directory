@@ -1,3 +1,5 @@
+import { organizationLogoUrl } from './organization-logos.js';
+import { parseExperience, extractExperience, experienceLabel, experienceBands } from './sensitive-data.js';
 
 let candidates = [];
 let directoryTotals = null;
@@ -9,6 +11,7 @@ const UNKNOWN_VALUE = 'not specified';
 const activeProfileUsername = profileUsernameFromPath(window.location.pathname);
 
 const FACETS = [
+  { key: 'experience', label: 'Years of experience', kind: 'toggle', values: (candidate) => experienceBands(candidate.experience) },
   { key: 'processed', label: 'Processing status', kind: 'toggle', values: (candidate) => [processingLabel(candidate)] },
   { key: 'availability', label: 'Availability', kind: 'toggle', values: (candidate) => [candidate.availability] },
   { key: 'mode', label: 'Work mode', kind: 'toggle', values: (candidate) => [candidate.mode] },
@@ -150,6 +153,7 @@ function processingLabel(candidate) {
 }
 
 function facetCoverage(facet) {
+  if (facet.key === 'experience') return candidates.filter((candidate) => candidate.experience != null).length;
   return candidates.filter((candidate) => facetValues(facet, candidate).length > 0).length;
 }
 
@@ -157,7 +161,7 @@ function renderFacetTotal(facet) {
   const node = el(`facet-${facet.key}-total`);
   if (!node) return;
   const completeCoverage = facetCoverage(facet);
-  const coverage = listingComplete ? completeCoverage : directoryTotals?.facets?.[facet.key] ?? completeCoverage;
+  const coverage = facet.key === 'experience' ? completeCoverage : listingComplete ? completeCoverage : directoryTotals?.facets?.[facet.key] ?? completeCoverage;
   const total = listingComplete ? candidates.length : directoryTotals?.candidates ?? candidates.length;
   node.textContent = total ? `${coverage.toLocaleString()} of ${total.toLocaleString()}` : '—';
   node.title = total ? `${coverage.toLocaleString()} of ${total.toLocaleString()} profiles have data for this filter` : '';
@@ -323,6 +327,25 @@ function syncFilterDrawer() {
   toggle.setAttribute('aria-expanded', String(!collapsible || filtersOpen));
 }
 
+const failedLogoUrls = new Set();
+document.addEventListener('error', (event) => {
+  if (!event.target.matches?.('.organization-logo')) return;
+  failedLogoUrls.add(event.target.getAttribute('src'));
+  event.target.remove();
+}, true);
+
+function organizationLabel(kind, name) {
+  const url = organizationLogoUrl(kind, name);
+  const image = url && !failedLogoUrls.has(url)
+    ? `<img class="organization-logo" src="${escapeHtml(url)}" alt="" aria-hidden="true" width="16" height="16" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+    : '';
+  return `<span class="organization-label">${image}<span>${escapeHtml(name)}</span></span>`;
+}
+
+function organizationLabels(kind, values) {
+  return (values || []).filter(isProvided).map((name) => organizationLabel(kind, name)).join(', ');
+}
+
 const CARD_SKILL_LIMIT = 6;
 
 function card(candidate) {
@@ -336,17 +359,17 @@ function card(candidate) {
     : '';
   const availability = isProvided(candidate.availability) ? `<span class="availability">${escapeHtml(candidate.availability)}</span>` : '';
   const processing = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
-  const metadata = [candidate.location, candidate.mode, candidate.university]
+  const metadata = [candidate.location, candidate.mode, candidate.experience ? experienceLabel(candidate.experience) : 'Experience unknown']
     .filter(isProvided)
     .map((value) => `<span>${escapeHtml(value)}</span>`)
-    .join('');
+    .join('') + organizationLabels('university', candidate.universities?.length ? candidate.universities : [candidate.university]);
   // Both of these are clamped to one line in CSS — the role to 300 characters of extractor output,
   // the card body to none of the summary at all — so the title attribute is the only way the rest of
   // either stays reachable without opening the dialog.
   const role = isProvided(candidate.role) ? `<span class="candidate-role" title="${escapeHtml(candidate.role)}">${escapeHtml(candidate.role)}</span>` : '';
   const hover = isProvided(candidate.summary) ? ` title="${escapeHtml(candidate.summary)}"` : '';
   const companies = candidate.companies.filter(isProvided).join(', ');
-  const company = companies ? `<span class="candidate-company" title="Previously at ${escapeHtml(companies)}">Previously at ${escapeHtml(companies)}</span>` : '';
+  const company = companies ? `<span class="candidate-company" title="Previously at ${escapeHtml(companies)}">Previously at ${organizationLabels('company', candidate.companies)}</span>` : '';
   const path = candidateProfilePath(candidate);
   const view = path
     ? `<a href="${escapeHtml(path)}" data-view="${escapeHtml(candidate.id)}" data-profile-route>View profile</a>`
@@ -404,8 +427,9 @@ function profileLinks(candidate) {
 
 function profileBackground(candidate) {
   const facts = [
-    isProvided(candidate.university) ? `Studied at <strong>${escapeHtml(candidate.university)}</strong>` : '',
-    isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${escapeHtml(candidate.companies.join(', '))}</strong>` : ''
+    candidate.experience ? `<strong>${escapeHtml(experienceLabel(candidate.experience))}</strong> of professional experience` : '',
+    isProvided(candidate.university) ? `Studied at <strong>${organizationLabels('university', candidate.universities?.length ? candidate.universities : [candidate.university])}</strong>` : '',
+    isProvided(candidate.companies.join(', ')) ? `Previously at <strong>${organizationLabels('company', candidate.companies)}</strong>` : ''
   ].filter(Boolean);
   return facts.length ? `<p class="dialog-copy" style="margin-top:20px">${facts.join(' · ')}</p>` : '';
 }
@@ -414,9 +438,9 @@ function profileFact(label, value) {
   return isProvided(value) ? `<div class="profile-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>` : '';
 }
 
-function profileSection(label, values) {
+function profileSection(label, values, organizationKind) {
   const supplied = (Array.isArray(values) ? values : [values]).filter(isProvided);
-  return supplied.length ? `<section class="profile-section"><h2>${escapeHtml(label)}</h2><p>${supplied.map((value) => escapeHtml(value)).join(' · ')}</p></section>` : '';
+  return supplied.length ? `<section class="profile-section"><h2>${escapeHtml(label)}</h2><p>${supplied.map((value) => organizationKind ? organizationLabel(organizationKind, value) : escapeHtml(value)).join(' · ')}</p></section>` : '';
 }
 
 function profilePageContent(candidate) {
@@ -428,12 +452,13 @@ function profilePageContent(candidate) {
   const facts = [
     profileFact('Location', candidate.location),
     profileFact('Work mode', candidate.mode),
-    profileFact('Availability', candidate.availability)
+    profileFact('Availability', candidate.availability),
+    profileFact('Professional experience', candidate.experience ? experienceLabel(candidate.experience) : 'Unknown')
   ].join('');
   const sections = [
     profileSection('Skills', candidate.skills || []),
-    profileSection('Previously at', candidate.companies || []),
-    profileSection('Education', candidate.universities || []),
+    profileSection('Previously at', candidate.companies || [], 'company'),
+    profileSection('Education', candidate.universities?.length ? candidate.universities : [candidate.university], 'university'),
     profileSection('Experience dates', candidate.dateRanges || [])
   ].join('');
   const controls = candidate.sourceUrl
@@ -491,6 +516,10 @@ el('sort').addEventListener('change', render);
 el('filters-toggle').addEventListener('click', () => { filtersOpen = !filtersOpen; syncFilterDrawer(); });
 window.addEventListener('resize', syncFilterDrawer);
 document.addEventListener('input', (event) => {
+  if (event.target.matches('[name="experience"]')) {
+    const value = event.target.value.trim();
+    event.target.setCustomValidity(value && !parseExperience(value) ? 'Enter years from 0 to 80, such as 5, 5+, or 3–5; leave blank if unknown.' : '');
+  }
   const input = event.target.closest('.combo-input');
   if (!input) return;
   const state = comboState.get(input.dataset.combo);
@@ -579,7 +608,7 @@ document.addEventListener('click', (event) => {
       ? `<p class="privacy-note">This profile was compiled from a public ${sourceLinks(candidate)}. Removal takes effect immediately and hides all submissions from this HN account.</p><p class="profile-removal"><a href="#" data-remove-for="${escapeHtml(candidate.id)}">Remove my details</a></p>`
       : `<div class="dialog-actions"><button class="button button-ghost" type="button" data-request-for="${escapeHtml(candidate.id)}">Manage this profile</button></div>`;
     const status = `<span class="processing-status ${isProcessed(candidate) ? 'is-processed' : 'is-unprocessed'}">${processingLabel(candidate)}</span>`;
-    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2>${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
+    el('dialog-content').innerHTML = `<div class="section-kicker">Candidate profile</div><div class="dialog-profile-heading"><h2 id="candidate-dialog-heading">${escapeHtml(displayName(candidate))}</h2>${status}</div>${identity ? `<div class="profile-links dialog-links">${identity}</div>` : ''}<p class="dialog-copy">${escapeHtml(candidate.summary)}</p><div class="chips">${candidate.skills.map((skill) => `<span class="chip">${escapeHtml(skill)}</span>`).join('')}</div>${background}${controls}`;
     openDialog(el('candidate-dialog'));
   }
   const request = event.target.closest('[data-request-for]');
@@ -939,7 +968,7 @@ function renderReviewDraft(draft) {
   el('run-import').closest('.dialog-actions').hidden = true;
   result.hidden = false;
   result.classList.add('review-ready');
-  result.innerHTML = `${managementTokenPanel()}<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewInput('LinkedIn', 'linkedinUrl', draft.linkedinUrl || '')}${reviewInput('GitHub', 'githubUrl', draft.githubUrl || '')}${reviewInput('Personal site', 'personalUrl', draft.personalUrl || '')}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
+  result.innerHTML = `${managementTokenPanel()}<form id="review-form"><div class="review-heading"><strong>Review your extracted profile</strong><span class="private-badge">Private draft</span></div><p class="privacy-note">Edit any field below. Saving this draft does not publish it or add it to directory search.</p><div class="review-grid">${reviewInput('Name', 'name', draft.name)}${reviewInput('Role', 'role', draft.role)}${reviewInput('Location', 'location', draft.location)}${reviewInput('Work mode', 'workMode', draft.workMode)}${reviewInput('Availability', 'availability', draft.availability)}${reviewInput('Years of professional experience (e.g. 5, 5+, 3–5)', 'experience', experienceLabel(draft.experience))}${reviewInput('Date ranges', 'dateRanges', draft.dateRanges.join(', '))}${reviewInput('LinkedIn', 'linkedinUrl', draft.linkedinUrl || '')}${reviewInput('GitHub', 'githubUrl', draft.githubUrl || '')}${reviewInput('Personal site', 'personalUrl', draft.personalUrl || '')}${reviewTextarea('Summary', 'summary', draft.summary, true)}${reviewTextarea('Universities', 'universities', draft.universities.join(', '))}${reviewTextarea('Companies', 'companies', draft.companies.join(', '))}${reviewTextarea('Skills', 'skills', draft.skills.join(', '))}</div><div class="dialog-actions"><span class="review-save-state" id="review-save-state">Not searchable</span><button class="button button-ghost" type="submit">Save private draft</button></div>${decisionControls}</form>`;
 }
 
 function renderPublicationResult(result) {
@@ -989,6 +1018,7 @@ function reviewTextarea(label, name, value, full = false) {
 }
 
 function draftFromForm(form) {
+  if (!form.reportValidity()) throw new Error('Review the invalid profile fields before saving.');
   const data = new FormData(form);
   const list = (name) => String(data.get(name) || '').split(/[,;|\n]/).map((item) => item.trim()).filter(Boolean);
   return {
@@ -998,6 +1028,7 @@ function draftFromForm(form) {
     location: String(data.get('location') || '').trim(),
     workMode: String(data.get('workMode') || '').trim(),
     availability: String(data.get('availability') || '').trim(),
+    experience: parseExperience(String(data.get('experience') || '')),
     linkedinUrl: String(data.get('linkedinUrl') || '').trim(),
     githubUrl: String(data.get('githubUrl') || '').trim(),
     personalUrl: String(data.get('personalUrl') || '').trim(),
@@ -1022,7 +1053,8 @@ async function extractLocalDraft(sourceText) {
     workMode: valueFor('work mode', 'mode') || (/\bremote\b/i.test(sourceText) ? 'Remote' : 'Needs review'),
     availability: valueFor('availability') || 'Needs review',
     universities: listFor('universities', 'university', 'education', 'school'),
-    companies: listFor('companies', 'company', 'previously', 'experience'),
+    companies: listFor('companies', 'company', 'previously'),
+    experience: extractExperience(sourceText),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: [...sourceText.matchAll(/\b(?:19|20)\d{2}\s*(?:-|–|—|to)\s*(?:(?:19|20)\d{2}|present|current)\b/gi)].map((match) => match[0])
   }).draft;

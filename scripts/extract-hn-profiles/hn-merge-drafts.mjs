@@ -3,6 +3,7 @@
 // cannot decide which draft is more accurate. Keep its complete correction, with the first pass
 // as fallback for malformed output, and preserve source-injection findings from either pass.
 
+import { validExperience } from '../../sensitive-data.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 function parseArgs(argv) {
@@ -22,7 +23,8 @@ const assembledTextLength = (value) => value.trim().replace(/&amp;/g, '&').lengt
 
 function wellFormedDraft(draft) {
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return false;
-  return Object.entries(TEXT_LIMITS).every(([field, limit]) => typeof draft[field] === 'string' && assembledTextLength(draft[field]) <= limit)
+  return (draft.experience === undefined || validExperience(draft.experience))
+    && Object.entries(TEXT_LIMITS).every(([field, limit]) => typeof draft[field] === 'string' && assembledTextLength(draft[field]) <= limit)
     && LIST_FIELDS.every((field) => Array.isArray(draft[field])
       && draft[field].every((value) => typeof value === 'string' && assembledTextLength(value) <= LIST_ITEM_LIMIT));
 }

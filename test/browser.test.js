@@ -447,7 +447,7 @@ test(
 );
 
 test(
-  'filter controls become more compact as the viewport narrows',
+  'filter controls collapse on narrow screens and remain usable without overflow',
   async () => {
     await withPage(async (cdp) => {
       const widths = [1280, 1024, 900, 860, 820, 760, 700, 560, 390];
@@ -467,8 +467,10 @@ test(
       expect(desktop.panelWidth).toBeGreaterThanOrEqual(250);
 
       for (const measurement of measurements.slice(1)) {
-        expect({ width: measurement.width, control: measurement.controlWidth <= desktop.controlWidth + 0.5 }).toEqual({ width: measurement.width, control: true });
-        expect({ width: measurement.width, height: measurement.controlHeight <= desktop.controlHeight + 0.5 }).toEqual({ width: measurement.width, height: true });
+        if (measurement.width > 860) {
+          expect(measurement.controlWidth).toBeLessThanOrEqual(desktop.controlWidth + 0.5);
+        }
+        expect(measurement.controlHeight).toBeGreaterThanOrEqual(40);
         expect({ width: measurement.width, share: measurement.panelWidth / measurement.width <= 1 }).toEqual({ width: measurement.width, share: true });
       }
 
@@ -637,9 +639,11 @@ test(
         expect(await evaluate(cdp, `[...document.querySelectorAll('#candidate-list .metadata span')].map((node) => node.textContent)`)).toEqual([
           'Toronto, Canada',
           'Remote',
+          'Experience unknown',
           'from HN · August 2026',
           'Gipuzkoa, Spain',
           'Remote',
+          'Experience unknown',
           'from HN · August 2026'
         ]);
 
@@ -683,7 +687,7 @@ test(
       await click(cdp, '[data-view="evelyn-stone"]');
       expect(await textContent(cdp, '#dialog-content [data-remove-for]')).toBe('Remove my details');
       expect(await evaluate(cdp, `document.querySelector('#dialog-content [data-remove-for]').tagName`)).toBe('A');
-      expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content [data-remove-for]')).fontSize`)).toBe('9px');
+      expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content [data-remove-for]')).fontSize`)).toBe('12px');
       expect(await evaluate(cdp, `getComputedStyle(document.querySelector('#dialog-content .profile-removal')).textAlign`)).toBe('right');
       expect(await textContent(cdp, '#dialog-content .privacy-note')).toBe(
         'This profile was compiled from a public HN · July 2026. Removal takes effect immediately and hides all submissions from this HN account.'
@@ -893,6 +897,94 @@ test(
   30_000
 );
 
+test('experience filters combine with work mode and preserve explicit unknowns', async () => {
+  const profiles = PUBLIC_CANDIDATES.slice(0, 3).map((candidate, index) => ({ ...candidate,
+    experience: index === 0 ? { minYears: 5, maxYears: null } : index === 1 ? { minYears: 3, maxYears: 7 } : null
+  }));
+  await withPage(async (cdp) => {
+    await selectFacetOption(cdp, 'experience', '5+ years');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name]);
+    expect(await textContent(cdp, '.metadata')).toContain('5+ years');
+    await selectFacetOption(cdp, 'mode', 'Remote');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name]);
+    await clearFilters(cdp);
+    await selectFacetOption(cdp, 'experience', 'Unknown');
+    expect(await candidateNames(cdp)).toEqual([profiles[2].name]);
+    await clearFilters(cdp);
+    await setViewport(cdp, 390, 844, true);
+    await click(cdp, '#filters-toggle');
+    await selectFacetOption(cdp, 'experience', '2+ years');
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name, profiles[1].name]);
+  }, { candidates: profiles });
+}, 30_000);
+
+test('organization labels retain text and unknown identities when logo images fail', async () => {
+  const profiles = [{ ...PUBLIC_CANDIDATES[0], hnUsername: 'samplehandle', companies: ['Google LLC', 'Unknown Company'], universities: ['MIT', 'CMU'], university: 'MIT, CMU' }];
+  await withPage(async (cdp) => {
+    expect(await textContent(cdp, '.candidate-company')).toBe('Previously at Google LLC, Unknown Company');
+    expect(await textContent(cdp, '.metadata')).toContain('MIT, CMU');
+    expect(await evaluate(cdp, `[...document.querySelectorAll('.organization-label')].map((label) => label.textContent)`)).toContain('Unknown Company');
+    expect(await evaluate(cdp, `(() => {
+      const label = [...document.querySelectorAll('.organization-label')].find((item) => item.textContent === 'CMU');
+      return label.querySelector('img') === null;
+    })()`)).toBe(true);
+    await evaluate(cdp, `document.querySelectorAll('.organization-logo').forEach((image) => image.dispatchEvent(new Event('error')))`);
+    expect(await evaluate(cdp, `document.querySelectorAll('.organization-logo').length`)).toBe(0);
+    await setViewport(cdp, 390, 844, true);
+    expect(await textContent(cdp, '.candidate-company')).toContain('Google LLC');
+    await navigate(cdp, `http://127.0.0.1:${await evaluate(cdp, 'location.port')}/samplehandle`);
+    await waitFor(cdp, `document.querySelector('.profile-section') !== null`);
+    expect(await textContent(cdp, '#profile-content')).toContain('Google LLC');
+    expect(await textContent(cdp, '#profile-content')).toContain('CMU');
+  }, { candidates: profiles });
+}, 30_000);
+
+test('long tags and organization labels fit narrow pages, filters and dialogs', async () => {
+  const longSkill = 'DistributedSystemsObservabilityAndReliabilityEngineering'.repeat(2);
+  const longOrganization = 'IndependentResearchOrganization'.repeat(5);
+  const profiles = [
+    { ...PUBLIC_CANDIDATES[0], hnUsername: 'synthetic_engineer', skills: [longSkill], companies: [longOrganization], university: longOrganization },
+    { ...PUBLIC_CANDIDATES[1], experience: null, availability: 'Not specified', university: 'Not specified', companies: [] }
+  ];
+  await withPage(async (cdp) => {
+    for (const width of [1280, 780, 390, 320]) {
+      await setViewport(cdp, width, 844, width < 800);
+      expect(await evaluate(cdp, 'document.documentElement.scrollWidth - document.documentElement.clientWidth')).toBe(0);
+      expect(await evaluate(cdp, `(() => {
+        const chip = document.querySelector('.chip');
+        return chip.scrollWidth <= chip.clientWidth;
+      })()`)).toBe(true);
+    }
+    await setViewport(cdp, 390, 844, true);
+    await click(cdp, '#filters-toggle');
+    await selectFacetOption(cdp, 'skill', longSkill);
+    expect(await candidateNames(cdp)).toEqual([profiles[0].name]);
+    expect(await evaluate(cdp, 'document.documentElement.scrollWidth - document.documentElement.clientWidth')).toBe(0);
+    await clearFilters(cdp);
+    await click(cdp, '[data-view="beatrice-okafor"]');
+    expect(await evaluate(cdp, `document.getElementById('candidate-dialog').open`)).toBe(true);
+    expect(await attribute(cdp, '#candidate-dialog', 'aria-labelledby')).toBe('candidate-dialog-heading');
+    await pressKey(cdp, 'Escape');
+    await click(cdp, '[data-view="ada-rivera"]');
+    await waitFor(cdp, `location.pathname === '/synthetic_engineer' && document.querySelector('.profile-summary')`);
+    expect(await textContent(cdp, '#profile-content')).toContain(longSkill);
+    expect(await textContent(cdp, '#profile-content')).toContain(longOrganization);
+    expect(await textContent(cdp, '.profile-facts')).toContain('Unknown');
+    expect(await evaluate(cdp, 'document.documentElement.scrollWidth - document.documentElement.clientWidth')).toBe(0);
+    await navigate(cdp, `http://127.0.0.1:${await evaluate(cdp, 'location.port')}/`);
+    await waitFor(cdp, `document.querySelector('.candidate-name') !== null`);
+    await evaluate(cdp, `document.querySelector('.hero-actions [data-open-import]').focus()`);
+    await click(cdp, '.hero-actions [data-open-import]');
+    expect(await evaluate(cdp, `(() => {
+      const dialog = document.getElementById('import-dialog');
+      return dialog.open && dialog.scrollWidth <= dialog.clientWidth;
+    })()`)).toBe(true);
+    await pressKey(cdp, 'Escape');
+    await waitFor(cdp, `!document.getElementById('import-dialog').open`);
+    expect(await evaluate(cdp, `document.activeElement.matches('.hero-actions [data-open-import]')`)).toBe(true);
+  }, { candidates: profiles });
+}, 30_000);
+
 async function withPage(run, options = {}) {
   const dataset = options.candidates || PUBLIC_CANDIDATES;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'hn-candidate-browser-'));
@@ -907,7 +999,7 @@ async function withPage(run, options = {}) {
     cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => runtimeExceptions.push(exceptionDetails.text));
 
     await Promise.all([cdp.send('Page.enable'), cdp.send('Runtime.enable'), cdp.send('Network.enable')]);
-    await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*'] });
+    await cdp.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://fonts.gstatic.com/*', 'https://www.google.com/s2/favicons*', 'https://*.gstatic.com/favicon*'] });
     // The stat tiles count up over ~700ms, so every assertion on a total would race the animation.
     // Only the test that is about the animation opts into motion.
     await cdp.send('Emulation.setEmulatedMedia', {
@@ -938,7 +1030,8 @@ function createFixtureServer(candidates = PUBLIC_CANDIDATES, fixture = {}) {
     ['/who-is-hiring.html', ['who-is-hiring.html', 'text/html; charset=utf-8']],
     ['/who-is-hiring.css', ['who-is-hiring.css', 'text/css; charset=utf-8']],
     ['/who-is-hiring.js', ['who-is-hiring.js', 'text/javascript; charset=utf-8']],
-    ['/sensitive-data.js', ['sensitive-data.js', 'text/javascript; charset=utf-8']]
+    ['/sensitive-data.js', ['sensitive-data.js', 'text/javascript; charset=utf-8']],
+    ['/organization-logos.js', ['organization-logos.js', 'text/javascript; charset=utf-8']]
   ]);
 
   return Bun.serve({

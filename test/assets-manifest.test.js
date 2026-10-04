@@ -9,7 +9,7 @@ const REPO_ROOT = join(import.meta.dir, '..');
 // publishable set rather than the exclusions: a new operator artifact, editor
 // directory, or credential cache is caught by the pin, not by remembering to
 // deny it.
-const PUBLIC_ASSETS = ['sensitive-data.js', 'who-is-hiring.css', 'who-is-hiring.html', 'who-is-hiring.js'];
+const PUBLIC_ASSETS = ['organization-logos.js', 'sensitive-data.js', 'who-is-hiring.css', 'who-is-hiring.html', 'who-is-hiring.js'];
 
 test('publishes only the intended public assets', async () => {
   const patterns = await readIgnorePatterns();

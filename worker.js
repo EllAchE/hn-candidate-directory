@@ -1,4 +1,4 @@
-import { redactSensitiveText, sanitizeCandidateDraft } from './sensitive-data.js';
+import { redactSensitiveText, sanitizeCandidateDraft, validExperience, extractExperience } from './sensitive-data.js';
 
 // Outbound fetches must never follow a redirect, but `redirect: 'error'` is not implementable at
 // the edge and workerd throws a TypeError on it before the request leaves. Node and Bun both accept
@@ -196,7 +196,7 @@ const CONTENT_SECURITY_POLICY = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data:",
+  "img-src 'self' data: https://www.google.com https://*.gstatic.com",
   "connect-src 'self'",
   'upgrade-insecure-requests'
 ].join('; ');
@@ -1029,7 +1029,7 @@ async function updateReview(request, env, submissionId) {
     `UPDATE profile_revisions
         SET name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
             hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
-            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, updated_at = ?
+            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, experience_json = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
     .bind(
@@ -1047,6 +1047,7 @@ async function updateReview(request, env, submissionId) {
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
       JSON.stringify(draft.dateRanges),
+      JSON.stringify(draft.experience ?? null),
       updatedAt,
       submissionId
     )
@@ -1088,7 +1089,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
     `UPDATE profile_revisions
         SET status = 'published', name = ?, role = ?, summary = ?, location = ?, work_mode = ?, availability = ?,
             hn_username = ?, linkedin_url = ?, github_url = ?, personal_url = ?,
-            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, published_at = ?, updated_at = ?
+            universities_json = ?, companies_json = ?, skills_json = ?, date_ranges_json = ?, experience_json = ?, published_at = ?, updated_at = ?
       WHERE submission_id = ? AND status = 'review_ready'`
   )
     .bind(
@@ -1106,6 +1107,7 @@ async function publishReview(env, submissionId, revision, draftValue) {
       JSON.stringify(approvedDraft.companies),
       JSON.stringify(approvedDraft.skills),
       JSON.stringify(approvedDraft.dateRanges),
+      JSON.stringify(approvedDraft.experience ?? null),
       publishedAt,
       publishedAt,
       submissionId
@@ -1159,7 +1161,7 @@ async function getReviewRevision(env, submissionId) {
   return env.DB.prepare(
     `SELECT id, status, name, role, summary, location, work_mode, availability,
             hn_username, linkedin_url, github_url, personal_url,
-            universities_json, companies_json, skills_json, date_ranges_json, updated_at, published_at
+            universities_json, companies_json, skills_json, date_ranges_json, experience_json, updated_at, published_at
        FROM profile_revisions
       WHERE submission_id = ?`
   ).bind(submissionId).first();
@@ -1200,7 +1202,7 @@ async function publishedCandidateRows(env, limit, offset = 0, hnUsername = '') {
     `WITH eligible AS (
        SELECT r.id, r.name, r.role, r.summary, r.location, r.work_mode, r.availability,
               r.hn_username, r.linkedin_url, r.github_url, r.personal_url,
-              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.published_at,
+              r.universities_json, r.companies_json, r.skills_json, r.date_ranges_json, r.experience_json, r.published_at,
               i.hn_author, i.hn_permalink, i.thread_month, i.extractor_rank,
               COALESCE(i.comment_created_at, r.published_at) AS source_created_at,
               CASE WHEN i.hn_permalink IS NOT NULL AND TRIM(COALESCE(i.hn_author, r.hn_username, '')) <> ''
@@ -1500,15 +1502,15 @@ async function processSubmissionMessage(message, env) {
         `INSERT INTO profile_revisions (
            id, submission_id, status, name, role, summary, location, work_mode, availability,
            hn_username, linkedin_url, github_url, personal_url,
-           universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at
-         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           universities_json, companies_json, skills_json, date_ranges_json, experience_json, created_at, updated_at
+         ) VALUES (?, ?, 'review_ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(submission_id) DO UPDATE SET
            name = excluded.name, role = excluded.role, summary = excluded.summary,
            location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
            hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
            github_url = excluded.github_url, personal_url = excluded.personal_url,
            universities_json = excluded.universities_json, companies_json = excluded.companies_json,
-           skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
+           skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json, experience_json = excluded.experience_json,
            updated_at = excluded.updated_at`
       ).bind(
         revisionId,
@@ -1527,6 +1529,7 @@ async function processSubmissionMessage(message, env) {
         JSON.stringify(draft.companies),
         JSON.stringify(draft.skills),
         JSON.stringify(draft.dateRanges),
+        JSON.stringify(draft.experience ?? null),
         completedAt,
         completedAt
       ),
@@ -2187,16 +2190,16 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
       `INSERT INTO profile_revisions (
          id, submission_id, status, name, role, summary, location, work_mode, availability,
          hn_username, linkedin_url, github_url, personal_url,
-         universities_json, companies_json, skills_json, date_ranges_json, created_at, updated_at, published_at,
+         universities_json, companies_json, skills_json, date_ranges_json, experience_json, created_at, updated_at, published_at,
          extractor, extractor_rank
-       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(submission_id) DO UPDATE SET
          name = excluded.name, role = excluded.role, summary = excluded.summary,
          location = excluded.location, work_mode = excluded.work_mode, availability = excluded.availability,
          hn_username = excluded.hn_username, linkedin_url = excluded.linkedin_url,
          github_url = excluded.github_url, personal_url = excluded.personal_url,
          universities_json = excluded.universities_json, companies_json = excluded.companies_json,
-         skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json,
+         skills_json = excluded.skills_json, date_ranges_json = excluded.date_ranges_json, experience_json = excluded.experience_json,
          updated_at = excluded.updated_at,
          extractor = excluded.extractor, extractor_rank = excluded.extractor_rank
        WHERE profile_revisions.status = 'published'
@@ -2218,6 +2221,7 @@ async function hnProfileStatements(env, submissionId, record, draft, ingestedAt,
       JSON.stringify(draft.companies),
       JSON.stringify(draft.skills),
       JSON.stringify(draft.dateRanges),
+      JSON.stringify(draft.experience ?? null),
       ingestedAt,
       ingestedAt,
       record.createdAt,
@@ -2356,6 +2360,7 @@ function extractHnProfile(record) {
     availability: hnAvailability(valueFor(HN_AVAILABILITY_LABELS), record.text),
     hnUsername: record.author,
     ...hnProfileLinks(record.text, record.commentText),
+    experience: extractExperience(record.text),
     universities: educationUniversities(valueFor),
     companies: listFor(HN_COMPANY_LABELS),
     skills,
@@ -2653,8 +2658,9 @@ function extractProfile(sourceText) {
     location: valueFor('location') || 'Location needs review',
     workMode: valueFor('work mode', 'work-mode', 'mode') || (/\bremote\b/i.test(sourceText) ? 'Remote' : 'Needs review'),
     availability: valueFor('availability') || 'Needs review',
+    experience: extractExperience(sourceText),
     universities: educationUniversities((labels) => valueFor(...labels)),
-    companies: listFor('companies', 'company', 'previously', 'experience', 'employers'),
+    companies: listFor('companies', 'company', 'previously', 'employers'),
     skills: listFor('skills', 'technologies', 'technology', 'stack'),
     dateRanges: unique(dateRanges).slice(0, 20)
   }).draft);
@@ -2682,6 +2688,7 @@ function educationUniversities(valueFor) {
 
 function validateDraft(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.experience !== undefined && !validExperience(value.experience)) return null;
   const text = (key, maxLength) => {
     if (typeof value[key] !== 'string') return null;
     const normalized = normalizeStoredText(value[key]);
@@ -2725,7 +2732,7 @@ function validateDraft(value) {
     skills: list('skills'),
     dateRanges: list('dateRanges')
   };
-  return Object.values(draft).some((field) => field === null) ? null : draft;
+  return Object.values(draft).some((field) => field === null) ? null : { ...draft, experience: value.experience ?? null };
 }
 
 // Bidi overrides and zero-width characters survive escaping and reorder or hide text in every consumer.
@@ -2741,6 +2748,7 @@ function normalizeStoredText(value, maxChars = Number.MAX_SAFE_INTEGER) {
 function boundedDraft(draft) {
   return {
     ...draft,
+    experience: validExperience(draft.experience ?? null) ? draft.experience ?? null : null,
     name: normalizeStoredText(draft.name, DRAFT_FIELD_LIMITS.name),
     role: normalizeStoredText(draft.role, DRAFT_FIELD_LIMITS.role),
     summary: normalizeStoredText(draft.summary, DRAFT_FIELD_LIMITS.summary),
@@ -2795,6 +2803,7 @@ function toPublicCandidate(row) {
     companies: sanitized.companies,
     skills: sanitized.skills,
     dateRanges: sanitized.dateRanges,
+    experience: sanitized.experience,
     source: fromHackerNews ? `HN · ${monthLabel(row.thread_month)}` : 'Candidate submitted',
     sourceUrl: fromHackerNews ? row.hn_permalink : '',
     processed: isProcessedCandidateRow(row),
@@ -2820,6 +2829,16 @@ function daysSince(timestamp) {
   return Math.max(0, Math.floor((Date.now() - published) / 86_400_000));
 }
 
+function storedExperience(raw) {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw);
+    return validExperience(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function candidateDraftFromRow(row) {
   return sanitizeCandidateDraft({
     name: row.name,
@@ -2835,7 +2854,8 @@ function candidateDraftFromRow(row) {
     universities: parseList(row.universities_json),
     companies: parseList(row.companies_json),
     skills: parseList(row.skills_json),
-    dateRanges: parseList(row.date_ranges_json)
+    dateRanges: parseList(row.date_ranges_json),
+    experience: storedExperience(row.experience_json)
   }).draft;
 }
 

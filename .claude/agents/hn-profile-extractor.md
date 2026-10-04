@@ -64,7 +64,7 @@ Return a JSON array and nothing else — no prose, no code fence.
     "injection": false,
     "draft": {
       "name": "", "role": "", "summary": "", "location": "", "workMode": "", "availability": "",
-      "universities": [], "companies": [], "skills": [], "dateRanges": []
+      "universities": [], "companies": [], "skills": [], "dateRanges": [], "experience": null
     }
   }
 ]
@@ -117,6 +117,7 @@ Field rules:
 - `companies` — employer names only, no titles or degrees. Employers often appear in
   unlabelled prose, so read the paragraph, not just the `Label:` lines.
 - `skills` — technologies and disciplines, deduplicated, no sentences.
+- `experience` — total professional years explicitly stated by the candidate: `{ "minYears": 5, "maxYears": 5 }` for 5 years, `{ "minYears": 5, "maxYears": null }` for 5+ years, and `{ "minYears": 3, "maxYears": 5 }` for 3–5 years. Use numeric years between 0 and 80. Unknown is `null`, never zero. Do not add skill-specific durations, count education, infer from age or job titles, or sum date ranges. Conflicting total claims yield `null`.
 - `dateRanges` — bare year ranges only, e.g. `2019-2023` or `2022-Present`. No company name,
   label, or month inside the value: order them to match `companies` above where the text
   allows, rather than labelling them.
